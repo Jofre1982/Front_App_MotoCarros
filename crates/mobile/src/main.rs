@@ -1,3 +1,18 @@
+use dioxus::prelude::*;
+use moto_core::api::ApiClient;
+use moto_ui::App;
+
+/// Fallback de desarrollo local. La URL real del backend se inyecta en build
+/// time via la variable de entorno `MOTOYA_API_BASE_URL` (nunca hardcodeada
+/// en el binario para un despliegue real — ver `.claude/STANDARDS.md`).
+const DEFAULT_API_BASE_URL: &str = "http://localhost:8000";
+
 fn main() {
-    dioxus::launch(moto_ui::App);
+    let base_url = option_env!("MOTOYA_API_BASE_URL")
+        .unwrap_or(DEFAULT_API_BASE_URL)
+        .to_string();
+
+    LaunchBuilder::new()
+        .with_context_provider(move || Box::new(ApiClient::new(base_url.clone())))
+        .launch(App);
 }
