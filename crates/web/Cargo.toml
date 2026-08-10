@@ -1,0 +1,9 @@
+[package]
+name = "web"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dioxus = { workspace = true, features = ["web"] }
+moto_ui = { path = "../moto_ui" }
+moto_core = { path = "../moto_core" }

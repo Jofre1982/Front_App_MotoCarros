@@ -1,0 +1,9 @@
+[package]
+name = "moto_core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dioxus = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
