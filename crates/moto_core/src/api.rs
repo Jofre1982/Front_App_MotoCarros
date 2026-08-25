@@ -4,7 +4,10 @@
 //! que expone el backend en cada momento (ver `openapi.yaml` de
 //! `Back_App_MotoCarros`).
 
-use crate::models::{ApiErrorBody, AuthToken, AuthenticatedUser, DataEnvelope, LoginPayload};
+use crate::models::{
+    ApiErrorBody, AuthToken, AuthenticatedUser, DataEnvelope, LoginPayload,
+    RegisterPassengerPayload,
+};
 
 #[derive(Debug, Clone)]
 pub struct ApiClient {
@@ -47,6 +50,62 @@ impl std::fmt::Display for LoginError {
 }
 
 impl std::error::Error for LoginError {}
+
+/// Fallos posibles de `POST /api/v1/auth/register/passenger`.
+///
+/// `InvalidEmail`/`InvalidPhone` se detectan en el cliente antes de mandar la
+/// request (formato basico), sin duplicar las reglas completas del backend
+/// (unicidad, normalizacion) — esas siguen viajando como `Validation` en un
+/// 422 (ver `openapi.yaml` de `Back_App_MotoCarros`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RegisterError {
+    EmptyFields,
+    InvalidEmail,
+    InvalidPhone,
+    Validation(ApiErrorBody),
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for RegisterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegisterError::EmptyFields => write!(f, "Completa todos los campos."),
+            RegisterError::InvalidEmail => write!(f, "Ingresa un email valido."),
+            RegisterError::InvalidPhone => {
+                write!(f, "Ingresa un telefono valido (7 a 15 digitos).")
+            }
+            RegisterError::Validation(body) => write!(f, "{}", body.message),
+            RegisterError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            RegisterError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegisterError {}
+
+/// Formato basico (no unicidad, eso lo valida el backend): una arroba, con
+/// algo antes y un dominio con un punto despues.
+fn is_valid_email(email: &str) -> bool {
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    !local.is_empty() && !domain.is_empty() && domain.contains('.') && !email.contains(' ')
+}
+
+/// Formato E.164 (ver `openapi.yaml`): `+` opcional seguido de 7 a 15
+/// digitos.
+fn is_valid_phone(phone: &str) -> bool {
+    let digits = phone.strip_prefix('+').unwrap_or(phone);
+    (7..=15).contains(&digits.len()) && digits.chars().all(|c| c.is_ascii_digit())
+}
 
 /// Fallos posibles de `POST /api/v1/auth/refresh`.
 #[derive(Debug, Clone, PartialEq)]
@@ -180,6 +239,70 @@ impl ApiClient {
         }
     }
 
+    /// `POST /api/v1/auth/register/passenger`.
+    ///
+    /// El rol no se manda: lo fija el endpoint. Si la respuesta es exitosa,
+    /// la cuenta queda con sesion iniciada igual que tras un login (mismo
+    /// shape `AuthenticatedUser`).
+    pub async fn register_passenger(
+        &self,
+        name: &str,
+        email: &str,
+        phone: &str,
+        password: &str,
+    ) -> Result<AuthenticatedUser, RegisterError> {
+        let name = name.trim();
+        let email = email.trim();
+        let phone = phone.trim();
+
+        if name.is_empty() || email.is_empty() || phone.is_empty() || password.is_empty() {
+            return Err(RegisterError::EmptyFields);
+        }
+        if !is_valid_email(email) {
+            return Err(RegisterError::InvalidEmail);
+        }
+        if !is_valid_phone(phone) {
+            return Err(RegisterError::InvalidPhone);
+        }
+
+        let url = format!("{}/api/v1/auth/register/passenger", self.base_url);
+        let payload = RegisterPassengerPayload {
+            name: name.to_string(),
+            email: email.to_string(),
+            phone: phone.to_string(),
+            password: password.to_string(),
+        };
+
+        let response = self
+            .http
+            .post(url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|err| RegisterError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<AuthenticatedUser> = response
+                .json()
+                .await
+                .map_err(|err| RegisterError::Network(err.to_string()))?;
+            return Ok(envelope.data);
+        }
+
+        match status.as_u16() {
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| RegisterError::Network(err.to_string()))?;
+                Err(RegisterError::Validation(body))
+            }
+            other => Err(RegisterError::Unexpected(other)),
+        }
+    }
+
     /// `POST /api/v1/auth/refresh`.
     ///
     /// Acepta el access token vigente aunque ya haya expirado, siempre que
@@ -293,6 +416,7 @@ impl ApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -392,6 +516,172 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, LoginError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn register_passenger_rejects_empty_fields_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .register_passenger("", "ana@example.com", "+573001234567", "motoya2026")
+                .await,
+            Err(RegisterError::EmptyFields)
+        );
+        assert_eq!(
+            client
+                .register_passenger("Ana Garcia", "", "+573001234567", "motoya2026")
+                .await,
+            Err(RegisterError::EmptyFields)
+        );
+        assert_eq!(
+            client
+                .register_passenger("Ana Garcia", "ana@example.com", "", "motoya2026")
+                .await,
+            Err(RegisterError::EmptyFields)
+        );
+        assert_eq!(
+            client
+                .register_passenger("Ana Garcia", "ana@example.com", "+573001234567", "")
+                .await,
+            Err(RegisterError::EmptyFields)
+        );
+    }
+
+    #[tokio::test]
+    async fn register_passenger_rejects_invalid_email_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .register_passenger("Ana Garcia", "not-an-email", "+573001234567", "motoya2026")
+                .await,
+            Err(RegisterError::InvalidEmail)
+        );
+    }
+
+    #[tokio::test]
+    async fn register_passenger_rejects_invalid_phone_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .register_passenger("Ana Garcia", "ana@example.com", "123", "motoya2026")
+                .await,
+            Err(RegisterError::InvalidPhone)
+        );
+        assert_eq!(
+            client
+                .register_passenger(
+                    "Ana Garcia",
+                    "ana@example.com",
+                    "+57-300-123-4567",
+                    "motoya2026"
+                )
+                .await,
+            Err(RegisterError::InvalidPhone)
+        );
+    }
+
+    #[tokio::test]
+    async fn register_passenger_returns_authenticated_user_on_success() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/register/passenger"))
+            .and(body_json(serde_json::json!({
+                "name": "Ana Garcia",
+                "email": "ana@example.com",
+                "phone": "+573001234567",
+                "password": "motoya2026",
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "user": {
+                        "id": 1,
+                        "name": "Ana Garcia",
+                        "email": "ana@example.com",
+                        "phone": "+573001234567",
+                        "role": "passenger",
+                    },
+                    "token": {
+                        "access_token": "jwt-token",
+                        "token_type": "bearer",
+                        "expires_in": 900,
+                    },
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let authenticated = client
+            .register_passenger(
+                "Ana Garcia",
+                "ana@example.com",
+                "+573001234567",
+                "motoya2026",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(authenticated.user.email, "ana@example.com");
+        assert_eq!(authenticated.token.access_token, "jwt-token");
+    }
+
+    #[tokio::test]
+    async fn register_passenger_returns_validation_error_on_422() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/register/passenger"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "The email has already been taken.",
+                "errors": {
+                    "email": ["The email has already been taken."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .register_passenger(
+                "Ana Garcia",
+                "ana@example.com",
+                "+573001234567",
+                "motoya2026",
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            RegisterError::Validation(ApiErrorBody {
+                message: "The email has already been taken.".to_string(),
+                errors: Some(HashMap::from([(
+                    "email".to_string(),
+                    vec!["The email has already been taken.".to_string()]
+                )])),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn register_passenger_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .register_passenger(
+                "Ana Garcia",
+                "ana@example.com",
+                "+573001234567",
+                "motoya2026",
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RegisterError::Network(_)));
     }
 
     fn sample_token() -> AuthToken {

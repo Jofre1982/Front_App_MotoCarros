@@ -11,8 +11,14 @@ use moto_core::api::ApiClient;
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+#[derive(Props, Clone, PartialEq)]
+pub struct LoginScreenProps {
+    /// Se dispara cuando el usuario pide ir a crear una cuenta de pasajero.
+    pub on_register_click: EventHandler<()>,
+}
+
 #[component]
-pub fn LoginScreen() -> Element {
+pub fn LoginScreen(props: LoginScreenProps) -> Element {
     let api_client = use_context::<ApiClient>();
     let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context::<SessionState>();
@@ -79,6 +85,12 @@ pub fn LoginScreen() -> Element {
             }
             if let Some(message) = error_message() {
                 p { class: "login-error", role: "alert", "{message}" }
+            }
+            button {
+                r#type: "button",
+                class: "login-register-link",
+                onclick: move |_| props.on_register_click.call(()),
+                "Crear cuenta de pasajero"
             }
         }
     }
