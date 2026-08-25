@@ -4,13 +4,17 @@
 //! respuesta de `POST /api/v1/auth/login`, y es quien use este resultado
 //! (fuera de alcance de este issue) quien decide que UI mostrar despues.
 
+use std::sync::Arc;
+
 use dioxus::prelude::*;
 use moto_core::api::ApiClient;
 use moto_core::state::SessionState;
+use moto_core::storage::TokenStorage;
 
 #[component]
 pub fn LoginScreen() -> Element {
     let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context::<SessionState>();
 
     let mut email = use_signal(String::new);
@@ -24,6 +28,7 @@ pub fn LoginScreen() -> Element {
         let email_value = email();
         let password_value = password();
         let api_client = api_client.clone();
+        let storage = storage.clone();
 
         spawn(async move {
             is_loading.set(true);
@@ -31,7 +36,7 @@ pub fn LoginScreen() -> Element {
 
             match api_client.login(&email_value, &password_value).await {
                 Ok(authenticated) => {
-                    session.authenticate(authenticated);
+                    session.authenticate(authenticated, storage.as_ref());
                 }
                 Err(err) => {
                     error_message.set(Some(err.to_string()));
