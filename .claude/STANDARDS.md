@@ -71,6 +71,37 @@ en `web`/`mobile`, inyectada hacia `ui` (trait/callback), no al revés.
 El build de `mobile` no corre en el CI por PR (requiere NDK/SDK, es lento y frágil).
 Se valida aparte, no bloquea el merge salvo que el PR toque específicamente ese crate.
 
+## Mapas
+
+Proveedor elegido: **Leaflet** + tiles de **OpenStreetMap** (`tile.openstreetmap.org`),
+cargados desde CDN (`unpkg.com`) por JS embebido, invocado desde Rust con
+`dioxus::document::eval`. Ver `crates/moto_ui/src/map.rs` (`MapView`).
+
+Por que:
+
+- **Costo:** ambos son gratuitos y sin API key. Evita depender de un proveedor de
+  pago (Google Maps, Mapbox) o de gestionar credenciales antes de tener volumen real
+  de uso — se puede migrar mas adelante si el volumen de tiles lo justifica, sin
+  cambiar el contrato de props de `MapView`.
+- **Soporte en WASM:** Leaflet es una libreria JS pura que manipula el DOM
+  directamente; no hay binding nativo Rust->WASM que mantener. `MapView` solo
+  expone un `div` con id y delega la inicializacion a JS via
+  `dioxus::document::eval`, que es parte del core de Dioxus (no requiere
+  `#[cfg(target_arch = "wasm32")]` disperso).
+- **Soporte en renderer movil:** el renderer movil de Dioxus (feature `mobile`,
+  `dioxus-desktop`/`wry`) tambien es un webview — el mismo JS de Leaflet corre ahi
+  sin cambios cuando se necesite (fuera de alcance de este issue, que solo pide
+  que funcione el build `web`).
+
+`MapView` (en `moto_ui`) es puramente presentacional: recibe centro, zoom y una
+lista de marcadores por props, y no conoce nada de viajes ni de `core::api`. Quien
+lo use decide que representa cada marcador.
+
+Limitacion conocida: la inicializacion del mapa corre una sola vez al montar el
+componente (mismo patron que `App::hydrate` en `moto_ui/src/lib.rs`). Actualizar el
+mapa reactivamente cuando cambian centro/zoom/marcadores despues del montaje queda
+pendiente para la historia que lo consuma con tracking en tiempo real.
+
 ## Higiene
 
 - Nunca commitear `.env`, credenciales, tokens ni URLs del backend hardcodeadas

@@ -4,8 +4,10 @@ use dioxus::prelude::*;
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+pub mod map;
 pub mod screens;
 
+pub use map::{MapMarker, MapView};
 pub use screens::login::LoginScreen;
 
 /// Raiz de la UI, agnostica de plataforma.
