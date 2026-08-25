@@ -102,6 +102,17 @@ componente (mismo patron que `App::hydrate` en `moto_ui/src/lib.rs`). Actualizar
 mapa reactivamente cuando cambian centro/zoom/marcadores despues del montaje queda
 pendiente para la historia que lo consuma con tracking en tiempo real.
 
+**Subresource Integrity (SRI) obligatoria:** cualquier libreria JS cargada desde un
+CDN de terceros (como Leaflet desde `unpkg.com`) debe fijar `integrity` (hash
+`sha384-...` del archivo) y `crossorigin="anonymous"` en el `<link>`/`<script>` que
+la inyecta, ademas de fijar la version exacta en la URL. Sin esto, un compromiso del
+CDN o del paquete (supply chain) ejecutaria JS arbitrario en el mismo origen que la
+app — riesgo especialmente alto aca porque el mismo contexto de pagina maneja JWT y,
+mas adelante, pagos. Ver `LEAFLET_CSS_INTEGRITY`/`LEAFLET_JS_INTEGRITY` en
+`crates/moto_ui/src/map.rs` como referencia del patron a seguir. Si se sube la
+version de una libreria cargada por CDN, hay que recalcular y actualizar su hash SRI
+en el mismo cambio.
+
 ## Higiene
 
 - Nunca commitear `.env`, credenciales, tokens ni URLs del backend hardcodeadas

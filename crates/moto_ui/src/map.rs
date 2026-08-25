@@ -14,6 +14,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 const LEAFLET_CSS_URL: &str = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
 const LEAFLET_JS_URL: &str = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
 
+// Hashes de Subresource Integrity (SRI) para leaflet@1.9.4, calculados
+// directamente sobre los archivos servidos por unpkg (sha384). Fijar la
+// version Y el hash juntos: si se sube la version de Leaflet, hay que
+// recalcular estos hashes contra los nuevos archivos.
+const LEAFLET_CSS_INTEGRITY: &str =
+    "sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H";
+const LEAFLET_JS_INTEGRITY: &str =
+    "sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH";
+
 const MAP_INIT_TEMPLATE: &str = r#"
 (function () {
     function ready(cb) {
@@ -29,11 +38,15 @@ const MAP_INIT_TEMPLATE: &str = r#"
         var cssLink = document.createElement("link");
         cssLink.rel = "stylesheet";
         cssLink.href = "__MOTOYA_LEAFLET_CSS__";
+        cssLink.integrity = "__MOTOYA_LEAFLET_CSS_INTEGRITY__";
+        cssLink.crossOrigin = "anonymous";
         document.head.appendChild(cssLink);
 
         window.__motoyaLeafletLoading = new Promise(function (resolve) {
             var script = document.createElement("script");
             script.src = "__MOTOYA_LEAFLET_JS__";
+            script.integrity = "__MOTOYA_LEAFLET_JS_INTEGRITY__";
+            script.crossOrigin = "anonymous";
             script.onload = resolve;
             document.head.appendChild(script);
         });
@@ -102,6 +115,8 @@ fn build_init_script(
     MAP_INIT_TEMPLATE
         .replace("__MOTOYA_LEAFLET_CSS__", LEAFLET_CSS_URL)
         .replace("__MOTOYA_LEAFLET_JS__", LEAFLET_JS_URL)
+        .replace("__MOTOYA_LEAFLET_CSS_INTEGRITY__", LEAFLET_CSS_INTEGRITY)
+        .replace("__MOTOYA_LEAFLET_JS_INTEGRITY__", LEAFLET_JS_INTEGRITY)
         .replace("__MOTOYA_MAP_ID__", id)
         .replace("__MOTOYA_LAT__", &center_lat.to_string())
         .replace("__MOTOYA_LNG__", &center_lng.to_string())
@@ -165,6 +180,16 @@ mod tests {
         assert!(script.contains("setView([4.710989, -74.072092], 15)"));
         assert!(script.contains(LEAFLET_CSS_URL));
         assert!(script.contains(LEAFLET_JS_URL));
+    }
+
+    #[test]
+    fn build_init_script_sets_sri_integrity_and_crossorigin_on_css_and_js() {
+        let script = build_init_script("motoya-map-0", 0.0, 0.0, 13, &[]);
+
+        assert!(script.contains(&format!(r#"cssLink.integrity = "{LEAFLET_CSS_INTEGRITY}""#)));
+        assert!(script.contains(&format!(r#"script.integrity = "{LEAFLET_JS_INTEGRITY}""#)));
+        assert!(script.contains(r#"cssLink.crossOrigin = "anonymous""#));
+        assert!(script.contains(r#"script.crossOrigin = "anonymous""#));
     }
 
     #[test]
