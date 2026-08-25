@@ -7,3 +7,5 @@ edition.workspace = true
 dioxus = { workspace = true, features = ["web"] }
 moto_ui = { path = "../moto_ui" }
 moto_core = { path = "../moto_core" }
+serde_json.workspace = true
+web-sys = { version = "0.3", features = ["Window", "Storage"] }

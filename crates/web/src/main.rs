@@ -1,6 +1,13 @@
+use std::sync::Arc;
+
 use dioxus::prelude::*;
 use moto_core::api::ApiClient;
+use moto_core::storage::TokenStorage;
 use moto_ui::App;
+
+mod storage;
+
+use storage::WebTokenStorage;
 
 /// Fallback de desarrollo local. La URL real del backend se inyecta en build
 /// time via la variable de entorno `MOTOYA_API_BASE_URL` (nunca hardcodeada
@@ -14,5 +21,8 @@ fn main() {
 
     LaunchBuilder::new()
         .with_context_provider(move || Box::new(ApiClient::new(base_url.clone())))
+        .with_context_provider(|| {
+            Box::new(Arc::new(WebTokenStorage::new()) as Arc<dyn TokenStorage>)
+        })
         .launch(App);
 }

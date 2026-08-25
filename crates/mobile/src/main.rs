@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use dioxus::prelude::*;
 use moto_core::api::ApiClient;
+use moto_core::storage::{InMemoryTokenStorage, TokenStorage};
 use moto_ui::App;
 
 /// Fallback de desarrollo local. La URL real del backend se inyecta en build
@@ -14,5 +17,15 @@ fn main() {
 
     LaunchBuilder::new()
         .with_context_provider(move || Box::new(ApiClient::new(base_url.clone())))
+        // TODO(issue de seguimiento): esto deberia usar el keychain de iOS /
+        // el keystore de Android en vez de memoria. Todavia no hay puente
+        // nativo (proyecto Xcode/Gradle) en este esqueleto para exponer esas
+        // APIs a Rust — ver issue #3, "movil" en la seccion de storage.
+        // `InMemoryTokenStorage` es una eleccion explicita y documentada, no
+        // un descuido: no persiste, igual que el comportamiento actual, pero
+        // tampoco guarda el token en texto plano en disco.
+        .with_context_provider(|| {
+            Box::new(Arc::new(InMemoryTokenStorage::new()) as Arc<dyn TokenStorage>)
+        })
         .launch(App);
 }
