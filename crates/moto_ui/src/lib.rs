@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use dioxus::prelude::*;
+use moto_core::api::ApiClient;
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
@@ -59,12 +60,54 @@ pub fn App() -> Element {
     }
 }
 
+/// Pantalla placeholder tras iniciar sesion — issue #9 (perfil) reemplaza el
+/// contenido, pero el logout (issue #8) no depende de esa pantalla: cerrar
+/// sesion debe estar disponible desde el momento en que hay una sesion
+/// iniciada.
 #[component]
 fn Home() -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+    let mut is_logging_out = use_signal(|| false);
+
+    let on_logout = move |_| {
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+        let Some(token) = session.token() else {
+            // Sin token no hay nada que invalidar en el backend, pero la
+            // sesion local igual se limpia.
+            session.logout(storage.as_ref());
+            return;
+        };
+
+        spawn(async move {
+            is_logging_out.set(true);
+
+            // Cerrar sesion nunca debe dejar al usuario atrapado por un
+            // error de red o un token ya vencido: la sesion local se limpia
+            // sin importar el resultado de la request (ver issue #8).
+            let _ = api_client.logout(&token.access_token).await;
+            session.logout(storage.as_ref());
+
+            is_logging_out.set(false);
+        });
+    };
+
     rsx! {
         div {
             h1 { "MotoYa" }
             p { "Sesion iniciada." }
+            button {
+                r#type: "button",
+                disabled: is_logging_out(),
+                onclick: on_logout,
+                if is_logging_out() {
+                    "Cerrando sesion..."
+                } else {
+                    "Cerrar sesion"
+                }
+            }
         }
     }
 }
