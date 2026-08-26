@@ -73,6 +73,13 @@ impl SessionState {
         storage.save(&token);
         self.token.set(Some(token));
     }
+
+    /// Guarda los datos de cuenta que devolvio `GET /api/v1/me` (issue #9).
+    /// No toca el token: el caller que haya recibido un `refreshed_token`
+    /// junto a la respuesta debe persistirlo aparte con `update_token`.
+    pub fn set_user(&mut self, user: User) {
+        self.user.set(Some(user));
+    }
 }
 
 impl Default for SessionState {
@@ -239,5 +246,25 @@ mod tests {
         assert_eq!(session_access_token.as_deref(), Some("renewed-token"));
         assert_eq!(saved_access_token.as_deref(), Some("renewed-token"));
         assert!(has_user);
+    }
+
+    #[test]
+    fn set_user_populates_the_profile_without_touching_the_token() {
+        let (user, token) = run_in_runtime(|| {
+            let storage = InMemoryTokenStorage::new();
+            let mut session = SessionState::new();
+            session.authenticate(sample_authenticated(), &storage);
+
+            let updated = User {
+                name: "Ana Garcia Actualizada".to_string(),
+                ..sample_authenticated().user
+            };
+            session.set_user(updated.clone());
+
+            (session.user(), session.token())
+        });
+
+        assert_eq!(user.unwrap().name, "Ana Garcia Actualizada");
+        assert_eq!(token.unwrap().access_token, "jwt-token");
     }
 }
