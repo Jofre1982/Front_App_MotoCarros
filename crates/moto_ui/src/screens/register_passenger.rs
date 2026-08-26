@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use moto_core::api::ApiClient;
+use moto_core::api::{ApiClient, RegisterError};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
@@ -27,7 +27,7 @@ pub fn RegisterPassengerScreen(props: RegisterPassengerScreenProps) -> Element {
     let mut email = use_signal(String::new);
     let mut phone = use_signal(String::new);
     let mut password = use_signal(String::new);
-    let mut error_message = use_signal(|| None::<String>);
+    let mut register_error = use_signal(|| None::<RegisterError>);
     let mut is_loading = use_signal(|| false);
 
     let on_submit = move |event: FormEvent| {
@@ -42,7 +42,7 @@ pub fn RegisterPassengerScreen(props: RegisterPassengerScreenProps) -> Element {
 
         spawn(async move {
             is_loading.set(true);
-            error_message.set(None);
+            register_error.set(None);
 
             match api_client
                 .register_passenger(&name_value, &email_value, &phone_value, &password_value)
@@ -52,12 +52,38 @@ pub fn RegisterPassengerScreen(props: RegisterPassengerScreenProps) -> Element {
                     session.authenticate(authenticated, storage.as_ref());
                 }
                 Err(err) => {
-                    error_message.set(Some(err.to_string()));
+                    register_error.set(Some(err));
                 }
             }
 
             is_loading.set(false);
         });
+    };
+
+    let current_error = register_error();
+    let name_error = current_error
+        .as_ref()
+        .and_then(|err| err.field_message("name"));
+    let email_error = current_error
+        .as_ref()
+        .and_then(|err| err.field_message("email"));
+    let phone_error = current_error
+        .as_ref()
+        .and_then(|err| err.field_message("phone"));
+    let password_error = current_error
+        .as_ref()
+        .and_then(|err| err.field_message("password"));
+    // El mensaje generico solo se muestra cuando el error no trae desglose
+    // campo por campo (p. ej. red, 5xx, o EmptyFields) para no repetir el
+    // mismo texto dos veces cuando ya se pinta junto al input afectado.
+    let has_field_errors = name_error.is_some()
+        || email_error.is_some()
+        || phone_error.is_some()
+        || password_error.is_some();
+    let general_message = if has_field_errors {
+        None
+    } else {
+        current_error.as_ref().map(|err| err.to_string())
     };
 
     rsx! {
@@ -73,6 +99,9 @@ pub fn RegisterPassengerScreen(props: RegisterPassengerScreenProps) -> Element {
                     value: "{name}",
                     oninput: move |event| name.set(event.value()),
                 }
+                if let Some(message) = &name_error {
+                    p { class: "register-passenger-field-error", role: "alert", "{message}" }
+                }
                 label { r#for: "register-passenger-email", "Email" }
                 input {
                     id: "register-passenger-email",
@@ -81,6 +110,9 @@ pub fn RegisterPassengerScreen(props: RegisterPassengerScreenProps) -> Element {
                     disabled: is_loading(),
                     value: "{email}",
                     oninput: move |event| email.set(event.value()),
+                }
+                if let Some(message) = &email_error {
+                    p { class: "register-passenger-field-error", role: "alert", "{message}" }
                 }
                 label { r#for: "register-passenger-phone", "Telefono" }
                 input {
@@ -91,6 +123,9 @@ pub fn RegisterPassengerScreen(props: RegisterPassengerScreenProps) -> Element {
                     value: "{phone}",
                     oninput: move |event| phone.set(event.value()),
                 }
+                if let Some(message) = &phone_error {
+                    p { class: "register-passenger-field-error", role: "alert", "{message}" }
+                }
                 label { r#for: "register-passenger-password", "Contrasena" }
                 input {
                     id: "register-passenger-password",
@@ -100,6 +135,9 @@ pub fn RegisterPassengerScreen(props: RegisterPassengerScreenProps) -> Element {
                     value: "{password}",
                     oninput: move |event| password.set(event.value()),
                 }
+                if let Some(message) = &password_error {
+                    p { class: "register-passenger-field-error", role: "alert", "{message}" }
+                }
                 button { r#type: "submit", disabled: is_loading(),
                     if is_loading() {
                         "Creando cuenta..."
@@ -108,7 +146,7 @@ pub fn RegisterPassengerScreen(props: RegisterPassengerScreenProps) -> Element {
                     }
                 }
             }
-            if let Some(message) = error_message() {
+            if let Some(message) = general_message {
                 p { class: "register-passenger-error", role: "alert", "{message}" }
             }
             button {

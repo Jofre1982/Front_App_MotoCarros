@@ -91,6 +91,24 @@ impl std::fmt::Display for RegisterError {
 
 impl std::error::Error for RegisterError {}
 
+impl RegisterError {
+    /// Mensaje de validacion especifico para `field` (p. ej. `"email"`), tal
+    /// como lo devuelve el backend campo por campo en `ApiErrorBody.errors`
+    /// de un 422 (ver `openapi.yaml`). `None` si el error no es de
+    /// validacion o el backend no reporto ese campo.
+    pub fn field_message(&self, field: &str) -> Option<String> {
+        match self {
+            RegisterError::Validation(body) => body
+                .errors
+                .as_ref()
+                .and_then(|errors| errors.get(field))
+                .and_then(|messages| messages.first())
+                .cloned(),
+            _ => None,
+        }
+    }
+}
+
 /// Formato basico (no unicidad, eso lo valida el backend): una arroba, con
 /// algo antes y un dominio con un punto despues.
 fn is_valid_email(email: &str) -> bool {
@@ -664,6 +682,20 @@ mod tests {
                     vec!["The email has already been taken.".to_string()]
                 )])),
             })
+        );
+        assert_eq!(
+            error.field_message("email"),
+            Some("The email has already been taken.".to_string())
+        );
+        assert_eq!(error.field_message("phone"), None);
+    }
+
+    #[test]
+    fn field_message_is_none_for_non_validation_errors() {
+        assert_eq!(RegisterError::EmptyFields.field_message("email"), None);
+        assert_eq!(
+            RegisterError::Network("boom".to_string()).field_message("email"),
+            None
         );
     }
 
