@@ -6,7 +6,7 @@
 
 use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, DataEnvelope, LoginPayload,
-    RegisterPassengerPayload, User,
+    RegisterPassengerPayload, UpdateProfilePayload, User,
 };
 
 #[derive(Debug, Clone)]
@@ -242,9 +242,73 @@ impl std::fmt::Display for AuthenticatedRequestError {
 
 impl std::error::Error for AuthenticatedRequestError {}
 
+/// Fallos posibles de `PATCH /api/v1/me`.
+///
+/// `NoFields` se detecta en el cliente antes de mandar la request: un PATCH
+/// sin ningun campo no tiene nada que actualizar (ver issue #10).
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateProfileError {
+    NoFields,
+    InvalidEmail,
+    InvalidPhone,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for UpdateProfileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateProfileError::NoFields => write!(f, "No hay ningun cambio para guardar."),
+            UpdateProfileError::InvalidEmail => write!(f, "Ingresa un email valido."),
+            UpdateProfileError::InvalidPhone => {
+                write!(f, "Ingresa un telefono valido (7 a 15 digitos).")
+            }
+            UpdateProfileError::Validation(body) => write!(f, "{}", body.message),
+            UpdateProfileError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            UpdateProfileError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            UpdateProfileError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for UpdateProfileError {}
+
+impl UpdateProfileError {
+    /// Mensaje de validacion especifico para `field`, igual que
+    /// `RegisterError::field_message`.
+    pub fn field_message(&self, field: &str) -> Option<String> {
+        match self {
+            UpdateProfileError::Validation(body) => body
+                .errors
+                .as_ref()
+                .and_then(|errors| errors.get(field))
+                .and_then(|messages| messages.first())
+                .cloned(),
+            _ => None,
+        }
+    }
+}
+
 enum GetOutcome<T> {
     Success(T),
     Unauthorized,
+}
+
+enum PatchOutcome<T> {
+    Success(T),
+    Unauthorized,
+    Validation(ApiErrorBody),
 }
 
 impl ApiClient {
@@ -520,6 +584,105 @@ impl ApiClient {
         token: &AuthToken,
     ) -> Result<AuthenticatedFetch<User>, AuthenticatedRequestError> {
         self.get_authenticated::<User>("/api/v1/me", token).await
+    }
+
+    /// `PATCH /api/v1/me` — issue #10. PATCH parcial: solo los campos
+    /// presentes en `update` viajan en el body (ver `UpdateProfilePayload`).
+    /// Reintenta una vez con refresh de token ante un 401, igual que
+    /// `get_authenticated`; un 422 de validacion, en cambio, nunca se
+    /// reintenta.
+    pub async fn update_profile(
+        &self,
+        token: &AuthToken,
+        update: UpdateProfilePayload,
+    ) -> Result<AuthenticatedFetch<User>, UpdateProfileError> {
+        if update.name.is_none() && update.email.is_none() && update.phone.is_none() {
+            return Err(UpdateProfileError::NoFields);
+        }
+        if let Some(email) = &update.email
+            && !is_valid_email(email)
+        {
+            return Err(UpdateProfileError::InvalidEmail);
+        }
+        if let Some(phone) = &update.phone
+            && !is_valid_phone(phone)
+        {
+            return Err(UpdateProfileError::InvalidPhone);
+        }
+
+        match self
+            .patch_with_token::<User>("/api/v1/me", &token.access_token, &update)
+            .await?
+        {
+            PatchOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            PatchOutcome::Validation(body) => return Err(UpdateProfileError::Validation(body)),
+            PatchOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| UpdateProfileError::SessionExpired)?;
+
+        match self
+            .patch_with_token::<User>("/api/v1/me", &renewed.access_token, &update)
+            .await?
+        {
+            PatchOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            PatchOutcome::Validation(body) => Err(UpdateProfileError::Validation(body)),
+            PatchOutcome::Unauthorized => Err(UpdateProfileError::SessionExpired),
+        }
+    }
+
+    async fn patch_with_token<T>(
+        &self,
+        path: &str,
+        access_token: &str,
+        body: &UpdateProfilePayload,
+    ) -> Result<PatchOutcome<T>, UpdateProfileError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let url = format!("{}{}", self.base_url, path);
+
+        let response = self
+            .http
+            .patch(url)
+            .bearer_auth(access_token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| UpdateProfileError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<T> = response
+                .json()
+                .await
+                .map_err(|err| UpdateProfileError::Network(err.to_string()))?;
+            return Ok(PatchOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(PatchOutcome::Unauthorized),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| UpdateProfileError::Network(err.to_string()))?;
+                Ok(PatchOutcome::Validation(body))
+            }
+            other => Err(UpdateProfileError::Unexpected(other)),
+        }
     }
 }
 
@@ -1095,5 +1258,259 @@ mod tests {
         let error = client.me(&sample_token()).await.unwrap_err();
 
         assert_eq!(error, AuthenticatedRequestError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn update_profile_rejects_an_empty_patch_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        let error = client
+            .update_profile(&sample_token(), UpdateProfilePayload::default())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, UpdateProfileError::NoFields);
+    }
+
+    #[tokio::test]
+    async fn update_profile_rejects_invalid_email_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        let error = client
+            .update_profile(
+                &sample_token(),
+                UpdateProfilePayload {
+                    email: Some("not-an-email".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, UpdateProfileError::InvalidEmail);
+    }
+
+    #[tokio::test]
+    async fn update_profile_rejects_invalid_phone_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        let error = client
+            .update_profile(
+                &sample_token(),
+                UpdateProfilePayload {
+                    phone: Some("123".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, UpdateProfileError::InvalidPhone);
+    }
+
+    #[tokio::test]
+    async fn update_profile_sends_only_the_present_fields_and_returns_the_updated_account() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .and(body_json(serde_json::json!({
+                "name": "Ana Garcia Perez",
+                "phone": "+573007654321",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": 1,
+                    "name": "Ana Garcia Perez",
+                    "email": "ana@example.com",
+                    "phone": "+573007654321",
+                    "role": "passenger",
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .update_profile(
+                &sample_token(),
+                UpdateProfilePayload {
+                    name: Some("Ana Garcia Perez".to_string()),
+                    email: None,
+                    phone: Some("+573007654321".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.name, "Ana Garcia Perez");
+        assert_eq!(fetch.data.phone, "+573007654321");
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn update_profile_returns_validation_error_on_422_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "The email has already been taken.",
+                "errors": {
+                    "email": ["The email has already been taken."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .update_profile(
+                &sample_token(),
+                UpdateProfilePayload {
+                    email: Some("ana@example.com".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            UpdateProfileError::Validation(ApiErrorBody {
+                message: "The email has already been taken.".to_string(),
+                errors: Some(HashMap::from([(
+                    "email".to_string(),
+                    vec!["The email has already been taken.".to_string()]
+                )])),
+            })
+        );
+        assert_eq!(
+            error.field_message("email"),
+            Some("The email has already been taken.".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn update_profile_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": 1,
+                    "name": "Ana Garcia Perez",
+                    "email": "ana@example.com",
+                    "phone": "+573001234567",
+                    "role": "passenger",
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .update_profile(
+                &sample_token(),
+                UpdateProfilePayload {
+                    name: Some("Ana Garcia Perez".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.name, "Ana Garcia Perez");
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn update_profile_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .update_profile(
+                &sample_token(),
+                UpdateProfilePayload {
+                    name: Some("Ana Garcia Perez".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, UpdateProfileError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn update_profile_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .update_profile(
+                &sample_token(),
+                UpdateProfilePayload {
+                    name: Some("Ana Garcia Perez".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, UpdateProfileError::Network(_)));
     }
 }
