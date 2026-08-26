@@ -65,6 +65,16 @@ pub struct LoginPayload {
     pub password: String,
 }
 
+/// Body de `POST /api/v1/auth/register/passenger`
+/// (`openapi.yaml#/components/schemas/PassengerRegistrationRequest`).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RegisterPassengerPayload {
+    pub name: String,
+    pub email: String,
+    pub phone: String,
+    pub password: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

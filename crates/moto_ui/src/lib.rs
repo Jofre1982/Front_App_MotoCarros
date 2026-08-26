@@ -9,6 +9,14 @@ pub mod screens;
 
 pub use map::{MapMarker, MapView};
 pub use screens::login::LoginScreen;
+pub use screens::register_passenger::RegisterPassengerScreen;
+
+/// Pantallas del flujo de autenticacion, previas a tener sesion iniciada.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AuthScreen {
+    Login,
+    RegisterPassenger,
+}
 
 /// Raiz de la UI, agnostica de plataforma.
 ///
@@ -21,6 +29,7 @@ pub use screens::login::LoginScreen;
 pub fn App() -> Element {
     let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context_provider(SessionState::new);
+    let mut auth_screen = use_signal(|| AuthScreen::Login);
 
     // Restaura la sesion persistida (si hay una) al arrancar la app —
     // issue #3. Corre una sola vez: el closure no lee ningun signal, solo
@@ -34,7 +43,18 @@ pub fn App() -> Element {
         if session.is_authenticated() {
             Home {}
         } else {
-            LoginScreen {}
+            match auth_screen() {
+                AuthScreen::Login => rsx! {
+                    LoginScreen {
+                        on_register_click: move |_| auth_screen.set(AuthScreen::RegisterPassenger),
+                    }
+                },
+                AuthScreen::RegisterPassenger => rsx! {
+                    RegisterPassengerScreen {
+                        on_login_click: move |_| auth_screen.set(AuthScreen::Login),
+                    }
+                },
+            }
         }
     }
 }
