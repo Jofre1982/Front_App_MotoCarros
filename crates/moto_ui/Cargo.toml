@@ -6,4 +6,5 @@ edition.workspace = true
 [dependencies]
 dioxus = { workspace = true }
 moto_core = { path = "../moto_core" }
+serde.workspace = true
 serde_json.workspace = true

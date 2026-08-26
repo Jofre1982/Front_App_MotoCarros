@@ -5,8 +5,8 @@
 //! `Back_App_MotoCarros`).
 
 use crate::models::{
-    ApiErrorBody, AuthToken, AuthenticatedUser, DataEnvelope, LoginPayload,
-    RegisterPassengerPayload, UpdateProfilePayload, User,
+    ApiErrorBody, AuthToken, AuthenticatedUser, Coordinates, DataEnvelope, LoginPayload,
+    RegisterPassengerPayload, RideEstimate, RideEstimateRequestPayload, UpdateProfilePayload, User,
 };
 
 #[derive(Debug, Clone)]
@@ -300,12 +300,57 @@ impl UpdateProfileError {
     }
 }
 
+/// Fallos posibles de `POST /api/v1/rides/estimate` (issue #14, consumido
+/// desde la app en issue #13).
+///
+/// `Validation` cubre tanto un 422 de forma (coordenada fuera de rango) como
+/// uno de negocio (el proveedor de mapas no encontro ruta entre origen y
+/// destino, zona sin cobertura): el backend responde el mismo status para
+/// ambos casos a proposito (ver `openapi.yaml`), asi que el cliente no puede
+/// ni debe distinguirlos — el mensaje que trae el body ya es explicito sobre
+/// cual de los dos paso.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EstimateRideError {
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for EstimateRideError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EstimateRideError::Validation(body) => write!(f, "{}", body.message),
+            EstimateRideError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            EstimateRideError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            EstimateRideError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EstimateRideError {}
+
 enum GetOutcome<T> {
     Success(T),
     Unauthorized,
 }
 
 enum PatchOutcome<T> {
+    Success(T),
+    Unauthorized,
+    Validation(ApiErrorBody),
+}
+
+enum PostOutcome<T> {
     Success(T),
     Unauthorized,
     Validation(ApiErrorBody),
@@ -682,6 +727,93 @@ impl ApiClient {
                 Ok(PatchOutcome::Validation(body))
             }
             other => Err(UpdateProfileError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/rides/estimate` — issue #13. No manda nada a `/me`: es
+    /// una consulta puntual, no un sub-recurso de la cuenta (ver
+    /// `openapi.yaml`). Reintenta una vez con refresh de token ante un 401,
+    /// igual que `update_profile`; un 422 (validacion o ruta no encontrada)
+    /// nunca se reintenta.
+    pub async fn estimate_ride(
+        &self,
+        token: &AuthToken,
+        origin: Coordinates,
+        destination: Coordinates,
+    ) -> Result<AuthenticatedFetch<RideEstimate>, EstimateRideError> {
+        let payload = RideEstimateRequestPayload {
+            origin,
+            destination,
+        };
+
+        match self
+            .post_estimate_with_token(&token.access_token, &payload)
+            .await?
+        {
+            PostOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            PostOutcome::Validation(body) => return Err(EstimateRideError::Validation(body)),
+            PostOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| EstimateRideError::SessionExpired)?;
+
+        match self
+            .post_estimate_with_token(&renewed.access_token, &payload)
+            .await?
+        {
+            PostOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            PostOutcome::Validation(body) => Err(EstimateRideError::Validation(body)),
+            PostOutcome::Unauthorized => Err(EstimateRideError::SessionExpired),
+        }
+    }
+
+    async fn post_estimate_with_token(
+        &self,
+        access_token: &str,
+        body: &RideEstimateRequestPayload,
+    ) -> Result<PostOutcome<RideEstimate>, EstimateRideError> {
+        let url = format!("{}/api/v1/rides/estimate", self.base_url);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| EstimateRideError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<RideEstimate> = response
+                .json()
+                .await
+                .map_err(|err| EstimateRideError::Network(err.to_string()))?;
+            return Ok(PostOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(PostOutcome::Unauthorized),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| EstimateRideError::Network(err.to_string()))?;
+                Ok(PostOutcome::Validation(body))
+            }
+            other => Err(EstimateRideError::Unexpected(other)),
         }
     }
 }
@@ -1512,5 +1644,187 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, UpdateProfileError::Network(_)));
+    }
+
+    fn sample_origin() -> Coordinates {
+        Coordinates {
+            latitude: 4.710989,
+            longitude: -74.072092,
+        }
+    }
+
+    fn sample_destination() -> Coordinates {
+        Coordinates {
+            latitude: 4.698,
+            longitude: -74.061,
+        }
+    }
+
+    #[tokio::test]
+    async fn estimate_ride_sends_origin_and_destination_and_returns_the_estimate() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/estimate"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .and(body_json(serde_json::json!({
+                "origin": {"latitude": 4.710989, "longitude": -74.072092},
+                "destination": {"latitude": 4.698, "longitude": -74.061},
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "distance_meters": 7421,
+                    "duration_seconds": 842,
+                    "currency": "COP",
+                    "estimated_fare": 8850,
+                    "is_estimate": true,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .estimate_ride(&sample_token(), sample_origin(), sample_destination())
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.distance_meters, 7421);
+        assert_eq!(fetch.data.duration_seconds, 842);
+        assert_eq!(fetch.data.currency, "COP");
+        assert_eq!(fetch.data.estimated_fare, 8850);
+        assert!(fetch.data.is_estimate);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn estimate_ride_returns_validation_error_on_422_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/estimate"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "No fue posible calcular una ruta entre esas coordenadas. Puede que la zona no este cubierta por el servicio.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .estimate_ride(&sample_token(), sample_origin(), sample_destination())
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            EstimateRideError::Validation(ApiErrorBody {
+                message: "No fue posible calcular una ruta entre esas coordenadas. Puede que la zona no este cubierta por el servicio.".to_string(),
+                errors: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn estimate_ride_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/estimate"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/estimate"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "distance_meters": 7421,
+                    "duration_seconds": 842,
+                    "currency": "COP",
+                    "estimated_fare": 8850,
+                    "is_estimate": true,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .estimate_ride(&sample_token(), sample_origin(), sample_destination())
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.distance_meters, 7421);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn estimate_ride_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/estimate"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .estimate_ride(&sample_token(), sample_origin(), sample_destination())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, EstimateRideError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn estimate_ride_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .estimate_ride(&sample_token(), sample_origin(), sample_destination())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, EstimateRideError::Network(_)));
     }
 }

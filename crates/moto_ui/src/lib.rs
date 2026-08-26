@@ -12,6 +12,7 @@ pub use map::{MapMarker, MapView};
 pub use screens::login::LoginScreen;
 pub use screens::profile::ProfileScreen;
 pub use screens::register_passenger::RegisterPassengerScreen;
+pub use screens::ride_estimate::RideEstimateScreen;
 
 /// Pantallas del flujo de autenticacion, previas a tener sesion iniciada.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -61,15 +62,27 @@ pub fn App() -> Element {
     }
 }
 
-/// Pantalla principal tras iniciar sesion: perfil (issue #9) mas el logout
-/// (issue #8), que no depende de la pantalla de perfil — cerrar sesion debe
-/// estar disponible desde el momento en que hay una sesion iniciada.
+/// Secciones de `Home` una vez hay sesion iniciada. No es un router: es el
+/// mismo patron de navegacion manual por signal que `AuthScreen`, todavia
+/// suficiente para las pocas pantallas que existen (ver
+/// `.claude/STANDARDS.md`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum HomeSection {
+    Profile,
+    RideEstimate,
+}
+
+/// Pantalla principal tras iniciar sesion: perfil (issue #9), tarifa
+/// estimada (issue #13), mas el logout (issue #8), que no depende de ninguna
+/// seccion — cerrar sesion debe estar disponible desde el momento en que hay
+/// una sesion iniciada.
 #[component]
 fn Home() -> Element {
     let api_client = use_context::<ApiClient>();
     let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context::<SessionState>();
     let mut is_logging_out = use_signal(|| false);
+    let mut section = use_signal(|| HomeSection::Profile);
 
     let on_logout = move |_| {
         let api_client = api_client.clone();
@@ -97,7 +110,28 @@ fn Home() -> Element {
     rsx! {
         div {
             h1 { "MotoYa" }
-            ProfileScreen {}
+            nav { class: "home-nav",
+                button {
+                    r#type: "button",
+                    disabled: section() == HomeSection::Profile,
+                    onclick: move |_| section.set(HomeSection::Profile),
+                    "Mi perfil"
+                }
+                button {
+                    r#type: "button",
+                    disabled: section() == HomeSection::RideEstimate,
+                    onclick: move |_| section.set(HomeSection::RideEstimate),
+                    "Ver tarifa estimada"
+                }
+            }
+            match section() {
+                HomeSection::Profile => rsx! {
+                    ProfileScreen {}
+                },
+                HomeSection::RideEstimate => rsx! {
+                    RideEstimateScreen {}
+                },
+            }
             button {
                 r#type: "button",
                 disabled: is_logging_out(),
