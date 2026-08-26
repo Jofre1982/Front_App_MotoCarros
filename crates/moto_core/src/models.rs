@@ -195,6 +195,20 @@ pub struct Ride {
     pub payment: Option<Payment>,
 }
 
+/// `openapi.yaml#/components/schemas/Ride` + `cancellation_fee_applies` —
+/// respuesta de `POST /api/v1/rides/{ride}/cancel` (issue #15).
+///
+/// `cancellation_fee_applies` esta ausente cuando quien cancela es el
+/// conductor asignado (historia #23, fuera de alcance de #15): ese caso no
+/// cancela el viaje, solo lo devuelve al pool sin conductor. `#[serde(flatten)]`
+/// reutiliza `Ride` en vez de repetir sus campos.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RideCancellation {
+    #[serde(flatten)]
+    pub ride: Ride,
+    pub cancellation_fee_applies: Option<bool>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +406,58 @@ mod tests {
                 status: PaymentStatus::Paid,
             })
         );
+    }
+
+    #[test]
+    fn deserializes_ride_cancellation_envelope_with_the_fee_flag() {
+        let json = r#"{
+            "data": {
+                "id": 1,
+                "status": "cancelled",
+                "origin": {"latitude": 4.710989, "longitude": -74.072092},
+                "destination": {"latitude": 4.698, "longitude": -74.061},
+                "distance_meters": 7421,
+                "duration_seconds": 842,
+                "currency": "COP",
+                "estimated_fare": 8850,
+                "driver": null,
+                "requested_at": "2026-07-31T14:03:21+00:00",
+                "started_at": null,
+                "completed_at": null,
+                "final_fare": null,
+                "payment": null,
+                "cancellation_fee_applies": false
+            }
+        }"#;
+
+        let envelope: DataEnvelope<RideCancellation> = serde_json::from_str(json).unwrap();
+
+        assert_eq!(envelope.data.ride.status, RideStatus::Cancelled);
+        assert_eq!(envelope.data.cancellation_fee_applies, Some(false));
+    }
+
+    #[test]
+    fn deserializes_ride_cancellation_without_the_fee_flag_when_the_driver_cancels() {
+        let json = r#"{
+            "id": 1,
+            "status": "requested",
+            "origin": {"latitude": 4.710989, "longitude": -74.072092},
+            "destination": {"latitude": 4.698, "longitude": -74.061},
+            "distance_meters": 7421,
+            "duration_seconds": 842,
+            "currency": "COP",
+            "estimated_fare": 8850,
+            "driver": null,
+            "requested_at": "2026-07-31T14:03:21+00:00",
+            "started_at": null,
+            "completed_at": null,
+            "final_fare": null,
+            "payment": null
+        }"#;
+
+        let cancellation: RideCancellation = serde_json::from_str(json).unwrap();
+
+        assert_eq!(cancellation.ride.status, RideStatus::Requested);
+        assert_eq!(cancellation.cancellation_fee_applies, None);
     }
 }
