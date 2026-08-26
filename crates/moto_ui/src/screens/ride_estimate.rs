@@ -1,10 +1,14 @@
-//! Pantalla de tarifa estimada (pasajero) — issue #13.
+//! Pantalla de tarifa estimada y solicitud de viaje (pasajero) — issues #13
+//! y #14.
 //!
-//! Consume `POST /api/v1/rides/estimate` a traves de
-//! `ApiClient::estimate_ride`. No solicita el viaje ni persiste nada: es solo
-//! una consulta para que el pasajero decida si continua. Para pedir el viaje
-//! de verdad esta `POST /rides` (historia #15), que vuelve a calcular estos
-//! mismos numeros.
+//! Consume `POST /api/v1/rides/estimate` (`ApiClient::estimate_ride`) para la
+//! tarifa estimada, sin solicitar nada todavia. Una vez que hay una
+//! estimacion, el pasajero puede confirmar y solicitar el viaje de verdad
+//! con `POST /api/v1/rides` (`ApiClient::request_ride`, issue #14) — el
+//! backend vuelve a calcular estos mismos numeros al crear el viaje. Mientras
+//! el viaje solicitado sigue activo, esta pantalla no vuelve a ofrecer el
+//! flujo de estimar/solicitar (un pasajero solo puede tener un viaje activo a
+//! la vez, ver `openapi.yaml`).
 //!
 //! Origen y destino se eligen tocando el mapa (`MapView::on_click`, ver
 //! `moto_ui/src/map.rs`), no con campos de texto: la historia depende
@@ -13,8 +17,8 @@
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use moto_core::api::{ApiClient, EstimateRideError};
-use moto_core::models::{Coordinates, RideEstimate};
+use moto_core::api::{ApiClient, EstimateRideError, RequestRideError};
+use moto_core::models::{Coordinates, Ride, RideEstimate, RideStatus};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
@@ -44,6 +48,9 @@ pub fn RideEstimateScreen() -> Element {
     let mut estimate_error = use_signal(|| None::<EstimateRideError>);
     let mut estimate = use_signal(|| None::<RideEstimate>);
     let mut is_loading = use_signal(|| false);
+    let mut ride_error = use_signal(|| None::<RequestRideError>);
+    let mut requested_ride = use_signal(|| None::<Ride>);
+    let mut is_requesting = use_signal(|| false);
 
     let on_map_click = move |(lat, lng): (f64, f64)| {
         estimate.set(None);
@@ -60,7 +67,59 @@ pub fn RideEstimateScreen() -> Element {
         }
     };
 
-    let on_estimate_click = move |_| {
+    let on_estimate_click = {
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+        move |_| {
+            let Some(token) = session.token() else {
+                return;
+            };
+            let Some((origin_lat, origin_lng)) = origin() else {
+                return;
+            };
+            let Some((destination_lat, destination_lng)) = destination() else {
+                return;
+            };
+            let api_client = api_client.clone();
+            let storage = storage.clone();
+
+            spawn(async move {
+                is_loading.set(true);
+                estimate_error.set(None);
+
+                let origin_coords = Coordinates {
+                    latitude: origin_lat,
+                    longitude: origin_lng,
+                };
+                let destination_coords = Coordinates {
+                    latitude: destination_lat,
+                    longitude: destination_lng,
+                };
+
+                match api_client
+                    .estimate_ride(&token, origin_coords, destination_coords)
+                    .await
+                {
+                    Ok(fetch) => {
+                        if let Some(refreshed) = fetch.refreshed_token {
+                            session.update_token(refreshed, storage.as_ref());
+                        }
+                        estimate.set(Some(fetch.data));
+                    }
+                    Err(EstimateRideError::SessionExpired) => {
+                        session.logout(storage.as_ref());
+                    }
+                    Err(err) => {
+                        estimate_error.set(Some(err));
+                    }
+                }
+
+                is_loading.set(false);
+            });
+        }
+    };
+
+    let on_request_click = move |_| {
         let Some(token) = session.token() else {
             return;
         };
@@ -74,8 +133,8 @@ pub fn RideEstimateScreen() -> Element {
         let storage = storage.clone();
 
         spawn(async move {
-            is_loading.set(true);
-            estimate_error.set(None);
+            is_requesting.set(true);
+            ride_error.set(None);
 
             let origin_coords = Coordinates {
                 latitude: origin_lat,
@@ -87,24 +146,24 @@ pub fn RideEstimateScreen() -> Element {
             };
 
             match api_client
-                .estimate_ride(&token, origin_coords, destination_coords)
+                .request_ride(&token, origin_coords, destination_coords)
                 .await
             {
                 Ok(fetch) => {
                     if let Some(refreshed) = fetch.refreshed_token {
                         session.update_token(refreshed, storage.as_ref());
                     }
-                    estimate.set(Some(fetch.data));
+                    requested_ride.set(Some(fetch.data));
                 }
-                Err(EstimateRideError::SessionExpired) => {
+                Err(RequestRideError::SessionExpired) => {
                     session.logout(storage.as_ref());
                 }
                 Err(err) => {
-                    estimate_error.set(Some(err));
+                    ride_error.set(Some(err));
                 }
             }
 
-            is_loading.set(false);
+            is_requesting.set(false);
         });
     };
 
@@ -130,6 +189,23 @@ pub fn RideEstimateScreen() -> Element {
         PickTarget::Origin => "Toca el mapa para elegir el origen.",
         PickTarget::Destination => "Toca el mapa para elegir el destino.",
     };
+
+    if let Some(ride) = requested_ride() {
+        return rsx! {
+            div { class: "ride-estimate-screen",
+                h2 { "Viaje solicitado" }
+                p { class: "ride-request-status", "{ride_status_label(ride.status)}" }
+                dl { class: "ride-request-result",
+                    dt { "Distancia" }
+                    dd { "{ride.distance_meters} m" }
+                    dt { "Duracion" }
+                    dd { "{ride.duration_seconds / 60} min" }
+                    dt { "Tarifa estimada" }
+                    dd { "{ride.currency} {ride.estimated_fare}" }
+                }
+            }
+        };
+    }
 
     rsx! {
         div { class: "ride-estimate-screen",
@@ -179,11 +255,40 @@ pub fn RideEstimateScreen() -> Element {
                     dt { "Tarifa estimada" }
                     dd { "{value.currency} {value.estimated_fare}" }
                 }
+                button {
+                    r#type: "button",
+                    class: "ride-request-button",
+                    disabled: is_requesting(),
+                    onclick: on_request_click,
+                    if is_requesting() {
+                        "Solicitando..."
+                    } else {
+                        "Confirmar y solicitar viaje"
+                    }
+                }
+                if let Some(err) = ride_error() {
+                    p { class: "ride-request-error", role: "alert", "{err}" }
+                }
             } else if !can_estimate {
                 p { class: "ride-estimate-empty",
                     "Elige un origen y un destino en el mapa para ver la tarifa."
                 }
             }
         }
+    }
+}
+
+/// Texto para el pasajero segun el estado del viaje recien solicitado
+/// (`Ride::status`). Justo despues de `POST /api/v1/rides` el viaje siempre
+/// nace `requested`; los demas casos quedan cubiertos para cuando esta misma
+/// pantalla se reutilice con datos de un viaje ya en curso (historia #20,
+/// fuera de alcance de #14).
+fn ride_status_label(status: RideStatus) -> &'static str {
+    match status {
+        RideStatus::Requested => "Esperando a que un conductor lo acepte.",
+        RideStatus::Accepted => "Un conductor acepto tu viaje.",
+        RideStatus::InProgress => "Tu viaje esta en curso.",
+        RideStatus::Completed => "Tu viaje ya se completo.",
+        RideStatus::Cancelled => "Este viaje fue cancelado.",
     }
 }
