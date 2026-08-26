@@ -13,11 +13,19 @@
 //! Origen y destino se eligen tocando el mapa (`MapView::on_click`, ver
 //! `moto_ui/src/map.rs`), no con campos de texto: la historia depende
 //! explicitamente del componente de mapa (issue #4).
+//!
+//! Mientras el viaje solicitado sigue en `requested` (nadie lo acepto
+//! todavia), el pasajero puede desistir con `POST /api/v1/rides/{ride}/cancel`
+//! (`ApiClient::cancel_ride`, issue #15), lo que devuelve la pantalla al
+//! estado inicial para poder solicitar otro viaje. Una vez que el viaje pasa
+//! a `accepted` este boton deja de ofrecerse — cancelar un viaje ya aceptado
+//! es la historia "Cancelar un viaje aceptado (pasajero)" (#21), fuera de
+//! alcance aca.
 
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use moto_core::api::{ApiClient, EstimateRideError, RequestRideError};
+use moto_core::api::{ApiClient, CancelRideError, EstimateRideError, RequestRideError};
 use moto_core::models::{Coordinates, Ride, RideEstimate, RideStatus};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
@@ -51,6 +59,8 @@ pub fn RideEstimateScreen() -> Element {
     let mut ride_error = use_signal(|| None::<RequestRideError>);
     let mut requested_ride = use_signal(|| None::<Ride>);
     let mut is_requesting = use_signal(|| false);
+    let mut cancel_error = use_signal(|| None::<CancelRideError>);
+    let mut is_cancelling = use_signal(|| false);
 
     let on_map_click = move |(lat, lng): (f64, f64)| {
         estimate.set(None);
@@ -119,51 +129,94 @@ pub fn RideEstimateScreen() -> Element {
         }
     };
 
-    let on_request_click = move |_| {
+    let on_request_click = {
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+        move |_| {
+            let Some(token) = session.token() else {
+                return;
+            };
+            let Some((origin_lat, origin_lng)) = origin() else {
+                return;
+            };
+            let Some((destination_lat, destination_lng)) = destination() else {
+                return;
+            };
+            let api_client = api_client.clone();
+            let storage = storage.clone();
+
+            spawn(async move {
+                is_requesting.set(true);
+                ride_error.set(None);
+
+                let origin_coords = Coordinates {
+                    latitude: origin_lat,
+                    longitude: origin_lng,
+                };
+                let destination_coords = Coordinates {
+                    latitude: destination_lat,
+                    longitude: destination_lng,
+                };
+
+                match api_client
+                    .request_ride(&token, origin_coords, destination_coords)
+                    .await
+                {
+                    Ok(fetch) => {
+                        if let Some(refreshed) = fetch.refreshed_token {
+                            session.update_token(refreshed, storage.as_ref());
+                        }
+                        requested_ride.set(Some(fetch.data));
+                    }
+                    Err(RequestRideError::SessionExpired) => {
+                        session.logout(storage.as_ref());
+                    }
+                    Err(err) => {
+                        ride_error.set(Some(err));
+                    }
+                }
+
+                is_requesting.set(false);
+            });
+        }
+    };
+
+    let on_cancel_click = move |_| {
         let Some(token) = session.token() else {
             return;
         };
-        let Some((origin_lat, origin_lng)) = origin() else {
-            return;
-        };
-        let Some((destination_lat, destination_lng)) = destination() else {
+        let Some(ride) = requested_ride() else {
             return;
         };
         let api_client = api_client.clone();
         let storage = storage.clone();
 
         spawn(async move {
-            is_requesting.set(true);
-            ride_error.set(None);
+            is_cancelling.set(true);
+            cancel_error.set(None);
 
-            let origin_coords = Coordinates {
-                latitude: origin_lat,
-                longitude: origin_lng,
-            };
-            let destination_coords = Coordinates {
-                latitude: destination_lat,
-                longitude: destination_lng,
-            };
-
-            match api_client
-                .request_ride(&token, origin_coords, destination_coords)
-                .await
-            {
+            match api_client.cancel_ride(&token, ride.id).await {
                 Ok(fetch) => {
                     if let Some(refreshed) = fetch.refreshed_token {
                         session.update_token(refreshed, storage.as_ref());
                     }
-                    requested_ride.set(Some(fetch.data));
+                    requested_ride.set(None);
+                    estimate.set(None);
+                    estimate_error.set(None);
+                    ride_error.set(None);
+                    origin.set(None);
+                    destination.set(None);
+                    pick_target.set(PickTarget::Origin);
                 }
-                Err(RequestRideError::SessionExpired) => {
+                Err(CancelRideError::SessionExpired) => {
                     session.logout(storage.as_ref());
                 }
                 Err(err) => {
-                    ride_error.set(Some(err));
+                    cancel_error.set(Some(err));
                 }
             }
 
-            is_requesting.set(false);
+            is_cancelling.set(false);
         });
     };
 
@@ -202,6 +255,22 @@ pub fn RideEstimateScreen() -> Element {
                     dd { "{ride.duration_seconds / 60} min" }
                     dt { "Tarifa estimada" }
                     dd { "{ride.currency} {ride.estimated_fare}" }
+                }
+                if ride.status == RideStatus::Requested {
+                    button {
+                        r#type: "button",
+                        class: "ride-cancel-button",
+                        disabled: is_cancelling(),
+                        onclick: on_cancel_click,
+                        if is_cancelling() {
+                            "Cancelando..."
+                        } else {
+                            "Cancelar solicitud"
+                        }
+                    }
+                    if let Some(err) = cancel_error() {
+                        p { class: "ride-cancel-error", role: "alert", "{err}" }
+                    }
                 }
             }
         };

@@ -6,8 +6,8 @@
 
 use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, Coordinates, DataEnvelope, LoginPayload,
-    RegisterPassengerPayload, Ride, RideEstimate, RideEstimateRequestPayload, RideRequestPayload,
-    UpdateProfilePayload, User,
+    RegisterPassengerPayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
+    RideRequestPayload, UpdateProfilePayload, User,
 };
 
 #[derive(Debug, Clone)]
@@ -384,6 +384,53 @@ impl std::fmt::Display for RequestRideError {
 
 impl std::error::Error for RequestRideError {}
 
+/// Fallos posibles de `POST /api/v1/rides/{ride}/cancel` (issue #15).
+///
+/// El mismo endpoint sirve tanto para que el pasajero cancele (historias
+/// #16/#22) como para que el conductor asignado libere el viaje (historia
+/// #23) — el cliente no distingue esos dos casos, los resuelve el backend
+/// segun quien llama (ver `openapi.yaml`). `Validation` cubre que el viaje ya
+/// no este en un estado cancelable (`in_progress`, `completed` o ya
+/// `cancelled`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CancelRideError {
+    /// El viaje no le pertenece al pasajero autenticado ni esta asignado al
+    /// conductor autenticado.
+    Forbidden,
+    /// No existe ningun viaje con ese id.
+    NotFound,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for CancelRideError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CancelRideError::Forbidden => {
+                write!(f, "Este viaje no te pertenece.")
+            }
+            CancelRideError::NotFound => write!(f, "El viaje ya no existe."),
+            CancelRideError::Validation(body) => write!(f, "{}", body.message),
+            CancelRideError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            CancelRideError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            CancelRideError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CancelRideError {}
+
 enum GetOutcome<T> {
     Success(T),
     Unauthorized,
@@ -405,6 +452,14 @@ enum PostRideOutcome<T> {
     Success(T),
     Unauthorized,
     Forbidden,
+    Validation(ApiErrorBody),
+}
+
+enum CancelRideOutcome {
+    Success(RideCancellation),
+    Unauthorized,
+    Forbidden,
+    NotFound,
     Validation(ApiErrorBody),
 }
 
@@ -957,6 +1012,92 @@ impl ApiClient {
                 Ok(PostRideOutcome::Validation(body))
             }
             other => Err(RequestRideError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/rides/{ride}/cancel` — issue #15. No manda body: todo lo
+    /// que decide esta operacion es el id del viaje y quien la pide. Reintenta
+    /// una vez con refresh de token ante un 401, igual que `request_ride`; un
+    /// 403 (viaje ajeno), 404 (no existe) o 422 (estado no cancelable) nunca
+    /// se reintentan.
+    pub async fn cancel_ride(
+        &self,
+        token: &AuthToken,
+        ride_id: u64,
+    ) -> Result<AuthenticatedFetch<RideCancellation>, CancelRideError> {
+        match self
+            .post_cancel_with_token(ride_id, &token.access_token)
+            .await?
+        {
+            CancelRideOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            CancelRideOutcome::Forbidden => return Err(CancelRideError::Forbidden),
+            CancelRideOutcome::NotFound => return Err(CancelRideError::NotFound),
+            CancelRideOutcome::Validation(body) => return Err(CancelRideError::Validation(body)),
+            CancelRideOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| CancelRideError::SessionExpired)?;
+
+        match self
+            .post_cancel_with_token(ride_id, &renewed.access_token)
+            .await?
+        {
+            CancelRideOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            CancelRideOutcome::Forbidden => Err(CancelRideError::Forbidden),
+            CancelRideOutcome::NotFound => Err(CancelRideError::NotFound),
+            CancelRideOutcome::Validation(body) => Err(CancelRideError::Validation(body)),
+            CancelRideOutcome::Unauthorized => Err(CancelRideError::SessionExpired),
+        }
+    }
+
+    async fn post_cancel_with_token(
+        &self,
+        ride_id: u64,
+        access_token: &str,
+    ) -> Result<CancelRideOutcome, CancelRideError> {
+        let url = format!("{}/api/v1/rides/{}/cancel", self.base_url, ride_id);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|err| CancelRideError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<RideCancellation> = response
+                .json()
+                .await
+                .map_err(|err| CancelRideError::Network(err.to_string()))?;
+            return Ok(CancelRideOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(CancelRideOutcome::Unauthorized),
+            403 => Ok(CancelRideOutcome::Forbidden),
+            404 => Ok(CancelRideOutcome::NotFound),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| CancelRideError::Network(err.to_string()))?;
+                Ok(CancelRideOutcome::Validation(body))
+            }
+            other => Err(CancelRideError::Unexpected(other)),
         }
     }
 }
@@ -2173,5 +2314,189 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, RequestRideError::Network(_)));
+    }
+
+    fn sample_cancelled_ride_json() -> serde_json::Value {
+        let mut ride = sample_ride_json();
+        ride["status"] = serde_json::json!("cancelled");
+        ride["cancellation_fee_applies"] = serde_json::json!(false);
+        ride
+    }
+
+    #[tokio::test]
+    async fn cancel_ride_returns_the_cancelled_ride_without_a_fee_when_no_driver_was_assigned() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/cancel"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_cancelled_ride_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.cancel_ride(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.ride.id, 1);
+        assert_eq!(fetch.data.ride.status, crate::models::RideStatus::Cancelled);
+        assert_eq!(fetch.data.cancellation_fee_applies, Some(false));
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn cancel_ride_returns_forbidden_on_403_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/cancel"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.cancel_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, CancelRideError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn cancel_ride_returns_not_found_on_404_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/999/cancel"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No query results for model [App\\Models\\Ride] 999.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.cancel_ride(&sample_token(), 999).await.unwrap_err();
+
+        assert_eq!(error, CancelRideError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn cancel_ride_returns_validation_error_on_422_when_the_ride_is_not_cancellable() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/cancel"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "El viaje está en curso; no se puede cancelar de esta forma.",
+                "errors": {
+                    "ride": ["El viaje está en curso; no se puede cancelar de esta forma."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.cancel_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(
+            error,
+            CancelRideError::Validation(ApiErrorBody {
+                message: "El viaje está en curso; no se puede cancelar de esta forma.".to_string(),
+                errors: Some(HashMap::from([(
+                    "ride".to_string(),
+                    vec!["El viaje está en curso; no se puede cancelar de esta forma.".to_string()]
+                )])),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_ride_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/cancel"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/cancel"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_cancelled_ride_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.cancel_ride(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.ride.id, 1);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn cancel_ride_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/cancel"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.cancel_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, CancelRideError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn cancel_ride_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client.cancel_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert!(matches!(error, CancelRideError::Network(_)));
     }
 }
