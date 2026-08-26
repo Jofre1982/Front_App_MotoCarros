@@ -6,7 +6,7 @@
 
 use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, DataEnvelope, LoginPayload,
-    RegisterPassengerPayload,
+    RegisterPassengerPayload, User,
 };
 
 #[derive(Debug, Clone)]
@@ -220,6 +220,27 @@ pub enum AuthenticatedRequestError {
     Network(String),
     Unexpected(u16),
 }
+
+impl std::fmt::Display for AuthenticatedRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthenticatedRequestError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            AuthenticatedRequestError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            AuthenticatedRequestError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AuthenticatedRequestError {}
 
 enum GetOutcome<T> {
     Success(T),
@@ -490,6 +511,15 @@ impl ApiClient {
         }
 
         Err(AuthenticatedRequestError::Unexpected(status.as_u16()))
+    }
+
+    /// `GET /api/v1/me` — issue #9. Reintenta una vez con refresh de token
+    /// (ver `get_authenticated`) antes de forzar `SessionExpired`.
+    pub async fn me(
+        &self,
+        token: &AuthToken,
+    ) -> Result<AuthenticatedFetch<User>, AuthenticatedRequestError> {
+        self.get_authenticated::<User>("/api/v1/me", token).await
     }
 }
 
@@ -1007,6 +1037,62 @@ mod tests {
             .get_authenticated::<Probe>("/api/v1/_probe", &sample_token())
             .await
             .unwrap_err();
+
+        assert_eq!(error, AuthenticatedRequestError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn me_returns_the_authenticated_account() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": 1,
+                    "name": "Ana Garcia",
+                    "email": "ana@example.com",
+                    "phone": "+573001234567",
+                    "role": "passenger",
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.me(&sample_token()).await.unwrap();
+
+        assert_eq!(fetch.data.name, "Ana Garcia");
+        assert_eq!(fetch.data.role, crate::models::Role::Passenger);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn me_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.me(&sample_token()).await.unwrap_err();
 
         assert_eq!(error, AuthenticatedRequestError::SessionExpired);
     }

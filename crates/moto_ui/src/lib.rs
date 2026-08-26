@@ -10,6 +10,7 @@ pub mod screens;
 
 pub use map::{MapMarker, MapView};
 pub use screens::login::LoginScreen;
+pub use screens::profile::ProfileScreen;
 pub use screens::register_passenger::RegisterPassengerScreen;
 
 /// Pantallas del flujo de autenticacion, previas a tener sesion iniciada.
@@ -60,10 +61,9 @@ pub fn App() -> Element {
     }
 }
 
-/// Pantalla placeholder tras iniciar sesion — issue #9 (perfil) reemplaza el
-/// contenido, pero el logout (issue #8) no depende de esa pantalla: cerrar
-/// sesion debe estar disponible desde el momento en que hay una sesion
-/// iniciada.
+/// Pantalla principal tras iniciar sesion: perfil (issue #9) mas el logout
+/// (issue #8), que no depende de la pantalla de perfil — cerrar sesion debe
+/// estar disponible desde el momento en que hay una sesion iniciada.
 #[component]
 fn Home() -> Element {
     let api_client = use_context::<ApiClient>();
@@ -97,7 +97,7 @@ fn Home() -> Element {
     rsx! {
         div {
             h1 { "MotoYa" }
-            p { "Sesion iniciada." }
+            ProfileScreen {}
             button {
                 r#type: "button",
                 disabled: is_logging_out(),
