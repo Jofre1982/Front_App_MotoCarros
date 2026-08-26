@@ -64,9 +64,17 @@ const MAP_INIT_TEMPLATE: &str = r#"
             attribution: "&copy; OpenStreetMap contributors",
         }).addTo(map);
         __MOTOYA_MARKERS__
+        __MOTOYA_CLICK_HANDLER__
     });
 })();
 "#;
+
+/// Se agrega al script solo cuando `MapView` recibe `on_click` (issue #13):
+/// sin el, el mapa no se suscribe a clicks y `dioxus.send` nunca se llama, asi
+/// que el `Eval::recv` del lado de Rust simplemente no tiene nada que leer.
+const CLICK_HANDLER_TEMPLATE: &str = r#"map.on("click", function (e) {
+            dioxus.send({ lat: e.latlng.lat, lng: e.latlng.lng });
+        });"#;
 
 /// Un marcador a dibujar en el mapa. Agnostico de dominio: quien use
 /// `MapView` decide que representa cada marcador (origen, destino,
@@ -105,12 +113,18 @@ fn build_init_script(
     center_lng: f64,
     zoom: u8,
     markers: &[MapMarker],
+    clickable: bool,
 ) -> String {
     let markers_js: String = markers
         .iter()
         .map(MapMarker::to_js_statement)
         .collect::<Vec<_>>()
         .join("\n        ");
+    let click_handler_js = if clickable {
+        CLICK_HANDLER_TEMPLATE
+    } else {
+        ""
+    };
 
     MAP_INIT_TEMPLATE
         .replace("__MOTOYA_LEAFLET_CSS__", LEAFLET_CSS_URL)
@@ -122,6 +136,14 @@ fn build_init_script(
         .replace("__MOTOYA_LNG__", &center_lng.to_string())
         .replace("__MOTOYA_ZOOM__", &zoom.to_string())
         .replace("__MOTOYA_MARKERS__", &markers_js)
+        .replace("__MOTOYA_CLICK_HANDLER__", click_handler_js)
+}
+
+/// Payload que manda `dioxus.send` desde `CLICK_HANDLER_TEMPLATE`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+struct MapClickPayload {
+    lat: f64,
+    lng: f64,
 }
 
 static MAP_INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -136,6 +158,11 @@ fn next_map_id() -> String {
 /// via `dioxus::document::eval`, que funciona tanto en el build web (WASM)
 /// como en renderers basados en webview.
 ///
+/// `on_click`, si se pasa, se llama con `(lat, lng)` cada vez que el usuario
+/// hace click en el mapa (issue #13: elegir origen/destino de un viaje).
+/// Sigue siendo agnostico de dominio — no sabe que representa el punto
+/// elegido, eso lo decide quien use `MapView`.
+///
 /// Limitacion conocida (documentada, no un descuido): la inicializacion
 /// corre una sola vez al montar el componente, igual que el patron ya usado
 /// en `App::hydrate` (ver `moto_ui/src/lib.rs`). Si `center`/`zoom`/
@@ -148,14 +175,30 @@ pub fn MapView(
     center_lng: f64,
     #[props(default = 13)] zoom: u8,
     #[props(default = Vec::new())] markers: Vec<MapMarker>,
+    #[props(default)] on_click: Option<EventHandler<(f64, f64)>>,
 ) -> Element {
     let map_id = use_hook(next_map_id);
 
     {
         let map_id = map_id.clone();
         use_effect(move || {
-            let script = build_init_script(&map_id, center_lat, center_lng, zoom, &markers);
-            document::eval(&script);
+            let script = build_init_script(
+                &map_id,
+                center_lat,
+                center_lng,
+                zoom,
+                &markers,
+                on_click.is_some(),
+            );
+            let mut eval = document::eval(&script);
+
+            if let Some(on_click) = on_click {
+                spawn(async move {
+                    while let Ok(payload) = eval.recv::<MapClickPayload>().await {
+                        on_click.call((payload.lat, payload.lng));
+                    }
+                });
+            }
         });
     }
 
@@ -174,7 +217,7 @@ mod tests {
 
     #[test]
     fn build_init_script_embeds_id_center_and_zoom() {
-        let script = build_init_script("motoya-map-0", 4.710989, -74.072092, 15, &[]);
+        let script = build_init_script("motoya-map-0", 4.710989, -74.072092, 15, &[], false);
 
         assert!(script.contains(r#"document.getElementById("motoya-map-0")"#));
         assert!(script.contains("setView([4.710989, -74.072092], 15)"));
@@ -184,7 +227,7 @@ mod tests {
 
     #[test]
     fn build_init_script_sets_sri_integrity_and_crossorigin_on_css_and_js() {
-        let script = build_init_script("motoya-map-0", 0.0, 0.0, 13, &[]);
+        let script = build_init_script("motoya-map-0", 0.0, 0.0, 13, &[], false);
 
         assert!(script.contains(&format!(r#"cssLink.integrity = "{LEAFLET_CSS_INTEGRITY}""#)));
         assert!(script.contains(&format!(r#"script.integrity = "{LEAFLET_JS_INTEGRITY}""#)));
@@ -194,7 +237,7 @@ mod tests {
 
     #[test]
     fn build_init_script_with_no_markers_has_no_marker_statements() {
-        let script = build_init_script("motoya-map-0", 0.0, 0.0, 13, &[]);
+        let script = build_init_script("motoya-map-0", 0.0, 0.0, 13, &[], false);
 
         assert!(!script.contains("L.marker"));
     }
@@ -214,7 +257,7 @@ mod tests {
             },
         ];
 
-        let script = build_init_script("motoya-map-1", 4.71, -74.07, 13, &markers);
+        let script = build_init_script("motoya-map-1", 4.71, -74.07, 13, &markers, false);
 
         assert_eq!(script.matches("L.marker(").count(), 2);
         assert!(script.contains("L.marker([4.71, -74.07]).bindPopup(\"Origen\").addTo(map);"));
@@ -229,11 +272,27 @@ mod tests {
             label: Some(r#""); alert("xss"); ("#.to_string()),
         }];
 
-        let script = build_init_script("motoya-map-2", 1.0, 2.0, 13, &markers);
+        let script = build_init_script("motoya-map-2", 1.0, 2.0, 13, &markers, false);
 
         // El label queda como un literal JSON escapado (comillas escapadas
         // con `\"`), no como codigo JS suelto que rompa fuera del string.
         assert!(script.contains(r#".bindPopup("\"); alert(\"xss\"); (")"#));
+    }
+
+    #[test]
+    fn build_init_script_without_on_click_has_no_click_handler() {
+        let script = build_init_script("motoya-map-0", 0.0, 0.0, 13, &[], false);
+
+        assert!(!script.contains("map.on(\"click\""));
+        assert!(!script.contains("dioxus.send"));
+    }
+
+    #[test]
+    fn build_init_script_with_on_click_binds_a_click_handler_that_sends_lat_lng() {
+        let script = build_init_script("motoya-map-0", 0.0, 0.0, 13, &[], true);
+
+        assert!(script.contains("map.on(\"click\""));
+        assert!(script.contains("dioxus.send({ lat: e.latlng.lat, lng: e.latlng.lng });"));
     }
 
     #[test]

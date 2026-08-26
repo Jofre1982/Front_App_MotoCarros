@@ -91,6 +91,38 @@ pub struct UpdateProfilePayload {
     pub phone: Option<String>,
 }
 
+/// Un punto geografico (`openapi.yaml#/components/schemas/Coordinates`), usado
+/// tanto en el origen como en el destino de `POST /api/v1/rides/estimate`
+/// (issue #13).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct Coordinates {
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+/// Body de `POST /api/v1/rides/estimate`
+/// (`openapi.yaml#/components/schemas/RideEstimateRequest`).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct RideEstimateRequestPayload {
+    pub origin: Coordinates,
+    pub destination: Coordinates,
+}
+
+/// `openapi.yaml#/components/schemas/RideEstimate` — respuesta de
+/// `POST /api/v1/rides/estimate` (issue #13).
+///
+/// `estimated_fare` es un entero en la unidad minima de `currency`, nunca un
+/// decimal: el backend nunca lo devuelve fraccionado (ver `FareBreakdown` de
+/// `Back_App_MotoCarros`).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RideEstimate {
+    pub distance_meters: u32,
+    pub duration_seconds: u32,
+    pub currency: String,
+    pub estimated_fare: i64,
+    pub is_estimate: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +183,50 @@ mod tests {
 
         assert_eq!(error.message, "El email o la contrasena no son correctos.");
         assert!(error.errors.is_none());
+    }
+
+    #[test]
+    fn ride_estimate_request_payload_serializes_origin_and_destination() {
+        let payload = RideEstimateRequestPayload {
+            origin: Coordinates {
+                latitude: 4.710989,
+                longitude: -74.072092,
+            },
+            destination: Coordinates {
+                latitude: 4.698,
+                longitude: -74.061,
+            },
+        };
+
+        let json = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "origin": {"latitude": 4.710989, "longitude": -74.072092},
+                "destination": {"latitude": 4.698, "longitude": -74.061},
+            })
+        );
+    }
+
+    #[test]
+    fn deserializes_ride_estimate_envelope() {
+        let json = r#"{
+            "data": {
+                "distance_meters": 7421,
+                "duration_seconds": 842,
+                "currency": "COP",
+                "estimated_fare": 8850,
+                "is_estimate": true
+            }
+        }"#;
+
+        let envelope: DataEnvelope<RideEstimate> = serde_json::from_str(json).unwrap();
+
+        assert_eq!(envelope.data.distance_meters, 7421);
+        assert_eq!(envelope.data.duration_seconds, 842);
+        assert_eq!(envelope.data.currency, "COP");
+        assert_eq!(envelope.data.estimated_fare, 8850);
+        assert!(envelope.data.is_estimate);
     }
 }
