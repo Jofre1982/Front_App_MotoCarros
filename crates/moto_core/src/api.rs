@@ -166,6 +166,39 @@ impl std::fmt::Display for RefreshError {
 
 impl std::error::Error for RefreshError {}
 
+/// Fallos posibles de `POST /api/v1/auth/logout`.
+///
+/// El caller (`SessionState::logout`, ver issue #8) nunca deja de cerrar la
+/// sesion local por estos errores — solo le sirven para decidir si vale la
+/// pena loguearlos.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogoutError {
+    /// El token ya no era valido para el guard (`auth:api`): no hay nada que
+    /// cerrar del lado del backend, pero la sesion local igual se limpia.
+    Unauthorized,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for LogoutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogoutError::Unauthorized => write!(f, "La sesion ya no era valida."),
+            LogoutError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            LogoutError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LogoutError {}
+
 /// Resultado de una request autenticada que pudo haber renovado el token en
 /// el camino.
 #[derive(Debug, Clone, PartialEq)]
@@ -358,6 +391,35 @@ impl ApiClient {
             }
             429 => Err(RefreshError::RateLimited),
             other => Err(RefreshError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/auth/logout`.
+    ///
+    /// Invalida `access_token` del lado del backend (204 sin cuerpo). El
+    /// caller debe limpiar `SessionState` localmente sin importar el
+    /// resultado (ver issue #8) — cerrar sesion nunca debe dejar al usuario
+    /// atrapado por un error de red o un token ya vencido.
+    pub async fn logout(&self, access_token: &str) -> Result<(), LogoutError> {
+        let url = format!("{}/api/v1/auth/logout", self.base_url);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|err| LogoutError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            return Ok(());
+        }
+
+        match status.as_u16() {
+            401 => Err(LogoutError::Unauthorized),
+            other => Err(LogoutError::Unexpected(other)),
         }
     }
 
@@ -785,6 +847,52 @@ mod tests {
         let error = client.refresh("jwt-token").await.unwrap_err();
 
         assert_eq!(error, RefreshError::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn logout_succeeds_on_204() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/logout"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+
+        assert_eq!(client.logout("jwt-token").await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn logout_returns_unauthorized_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/logout"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+
+        assert_eq!(
+            client.logout("stale-token").await,
+            Err(LogoutError::Unauthorized)
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client.logout("jwt-token").await.unwrap_err();
+
+        assert!(matches!(error, LogoutError::Network(_)));
     }
 
     #[derive(Debug, serde::Deserialize, PartialEq)]
