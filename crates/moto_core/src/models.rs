@@ -75,6 +75,22 @@ pub struct RegisterPassengerPayload {
     pub password: String,
 }
 
+/// Body de `PATCH /api/v1/me`
+/// (`openapi.yaml#/components/schemas/UpdateProfileRequest`).
+///
+/// PATCH parcial: cada campo ausente (`None`) se omite del JSON en vez de
+/// viajar como `null`, para que el backend conserve el valor actual en vez
+/// de interpretarlo como "borrar este dato" (ver issue #10).
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct UpdateProfilePayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +122,25 @@ mod tests {
             "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9"
         );
         assert_eq!(envelope.data.token.expires_in, Some(900));
+    }
+
+    #[test]
+    fn update_profile_payload_omits_absent_fields_from_the_json() {
+        let payload = UpdateProfilePayload {
+            name: Some("Ana Garcia Perez".to_string()),
+            email: None,
+            phone: Some("+573007654321".to_string()),
+        };
+
+        let json = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "name": "Ana Garcia Perez",
+                "phone": "+573007654321",
+            })
+        );
     }
 
     #[test]
