@@ -93,8 +93,8 @@ pub struct UpdateProfilePayload {
 
 /// Un punto geografico (`openapi.yaml#/components/schemas/Coordinates`), usado
 /// tanto en el origen como en el destino de `POST /api/v1/rides/estimate`
-/// (issue #13).
-#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+/// (issue #13) y de `POST /api/v1/rides` (issue #14).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Coordinates {
     pub latitude: f64,
     pub longitude: f64,
@@ -121,6 +121,78 @@ pub struct RideEstimate {
     pub currency: String,
     pub estimated_fare: i64,
     pub is_estimate: bool,
+}
+
+/// Estado de un viaje (`openapi.yaml#/components/schemas/Ride.status`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RideStatus {
+    Requested,
+    Accepted,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+/// Body de `POST /api/v1/rides`
+/// (`openapi.yaml#/components/schemas/RideRequest`).
+///
+/// Misma forma que `RideEstimateRequestPayload` a proposito (el backend lo
+/// documenta asi para que la app mande el mismo cuerpo con el que estimo la
+/// tarifa), pero es un tipo aparte porque son la entrada de dos operaciones
+/// distintas que pueden divergir mas adelante (issue #14).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct RideRequestPayload {
+    pub origin: Coordinates,
+    pub destination: Coordinates,
+}
+
+/// `openapi.yaml#/components/schemas/RideDriver` — el conductor asignado a un
+/// viaje, visto desde el viaje. `None` mientras nadie lo haya aceptado
+/// todavia (historia #17, fuera de alcance de #14).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RideDriver {
+    pub id: u64,
+    pub name: String,
+}
+
+/// Resultado del cobro de un viaje completado
+/// (`openapi.yaml#/components/schemas/Payment`, historia #25).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentStatus {
+    Pending,
+    Paid,
+    Failed,
+}
+
+/// `openapi.yaml#/components/schemas/Payment`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Payment {
+    pub status: PaymentStatus,
+}
+
+/// `openapi.yaml#/components/schemas/Ride` — respuesta de `POST /api/v1/rides`
+/// (issue #14). `driver`, `started_at`, `completed_at`, `final_fare` y
+/// `payment` viajan siempre presentes pero en `null` hasta que la historia
+/// correspondiente los produzca (aceptar #17, iniciar #18, completar #23,
+/// pagar #24) — por eso son `Option` en vez de campos opcionales del struct.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Ride {
+    pub id: u64,
+    pub status: RideStatus,
+    pub origin: Coordinates,
+    pub destination: Coordinates,
+    pub distance_meters: u32,
+    pub duration_seconds: u32,
+    pub currency: String,
+    pub estimated_fare: i64,
+    pub driver: Option<RideDriver>,
+    pub requested_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub final_fare: Option<i64>,
+    pub payment: Option<Payment>,
 }
 
 #[cfg(test)]
@@ -228,5 +300,97 @@ mod tests {
         assert_eq!(envelope.data.currency, "COP");
         assert_eq!(envelope.data.estimated_fare, 8850);
         assert!(envelope.data.is_estimate);
+    }
+
+    #[test]
+    fn ride_request_payload_serializes_origin_and_destination() {
+        let payload = RideRequestPayload {
+            origin: Coordinates {
+                latitude: 4.710989,
+                longitude: -74.072092,
+            },
+            destination: Coordinates {
+                latitude: 4.698,
+                longitude: -74.061,
+            },
+        };
+
+        let json = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "origin": {"latitude": 4.710989, "longitude": -74.072092},
+                "destination": {"latitude": 4.698, "longitude": -74.061},
+            })
+        );
+    }
+
+    #[test]
+    fn deserializes_ride_envelope_with_no_driver_yet() {
+        let json = r#"{
+            "data": {
+                "id": 1,
+                "status": "requested",
+                "origin": {"latitude": 4.710989, "longitude": -74.072092},
+                "destination": {"latitude": 4.698, "longitude": -74.061},
+                "distance_meters": 7421,
+                "duration_seconds": 842,
+                "currency": "COP",
+                "estimated_fare": 8850,
+                "driver": null,
+                "requested_at": "2026-07-31T14:03:21+00:00",
+                "started_at": null,
+                "completed_at": null,
+                "final_fare": null,
+                "payment": null
+            }
+        }"#;
+
+        let envelope: DataEnvelope<Ride> = serde_json::from_str(json).unwrap();
+
+        assert_eq!(envelope.data.id, 1);
+        assert_eq!(envelope.data.status, RideStatus::Requested);
+        assert_eq!(envelope.data.estimated_fare, 8850);
+        assert_eq!(envelope.data.driver, None);
+        assert_eq!(envelope.data.started_at, None);
+        assert_eq!(envelope.data.payment, None);
+    }
+
+    #[test]
+    fn deserializes_ride_with_an_assigned_driver_and_payment() {
+        let json = r#"{
+            "id": 1,
+            "status": "completed",
+            "origin": {"latitude": 4.710989, "longitude": -74.072092},
+            "destination": {"latitude": 4.698, "longitude": -74.061},
+            "distance_meters": 7421,
+            "duration_seconds": 842,
+            "currency": "COP",
+            "estimated_fare": 8850,
+            "driver": {"id": 42, "name": "Carlos Perez"},
+            "requested_at": "2026-07-31T14:03:21+00:00",
+            "started_at": "2026-07-31T14:05:00+00:00",
+            "completed_at": "2026-07-31T14:20:00+00:00",
+            "final_fare": 9100,
+            "payment": {"status": "paid"}
+        }"#;
+
+        let ride: Ride = serde_json::from_str(json).unwrap();
+
+        assert_eq!(ride.status, RideStatus::Completed);
+        assert_eq!(
+            ride.driver,
+            Some(RideDriver {
+                id: 42,
+                name: "Carlos Perez".to_string(),
+            })
+        );
+        assert_eq!(
+            ride.payment,
+            Some(Payment {
+                status: PaymentStatus::Paid,
+            })
+        );
     }
 }
