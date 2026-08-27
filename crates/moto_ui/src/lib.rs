@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use moto_core::api::ApiClient;
+use moto_core::models::Role;
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
@@ -13,6 +14,7 @@ pub use screens::login::LoginScreen;
 pub use screens::profile::ProfileScreen;
 pub use screens::register_driver::RegisterDriverScreen;
 pub use screens::register_passenger::RegisterPassengerScreen;
+pub use screens::register_vehicle::RegisterVehicleScreen;
 pub use screens::ride_estimate::RideEstimateScreen;
 
 /// Pantallas del flujo de autenticacion, previas a tener sesion iniciada.
@@ -78,12 +80,18 @@ pub fn App() -> Element {
 enum HomeSection {
     Profile,
     RideEstimate,
+    Vehicle,
 }
 
 /// Pantalla principal tras iniciar sesion: perfil (issue #9), tarifa
 /// estimada (issue #13), mas el logout (issue #8), que no depende de ninguna
 /// seccion — cerrar sesion debe estar disponible desde el momento en que hay
 /// una sesion iniciada.
+///
+/// La seccion de vehiculo (issue #11) solo se ofrece cuando `session.user()`
+/// ya cargo (`GET /api/v1/me`, issue #9) y es una cuenta de conductor: un
+/// pasajero nunca ve el boton, y estructuralmente no puede llegar a
+/// `RegisterVehicleScreen` desde esta navegacion.
 #[component]
 fn Home() -> Element {
     let api_client = use_context::<ApiClient>();
@@ -91,6 +99,7 @@ fn Home() -> Element {
     let mut session = use_context::<SessionState>();
     let mut is_logging_out = use_signal(|| false);
     let mut section = use_signal(|| HomeSection::Profile);
+    let is_driver = session.user().is_some_and(|user| user.role == Role::Driver);
 
     let on_logout = move |_| {
         let api_client = api_client.clone();
@@ -131,6 +140,14 @@ fn Home() -> Element {
                     onclick: move |_| section.set(HomeSection::RideEstimate),
                     "Ver tarifa estimada"
                 }
+                if is_driver {
+                    button {
+                        r#type: "button",
+                        disabled: section() == HomeSection::Vehicle,
+                        onclick: move |_| section.set(HomeSection::Vehicle),
+                        "Registrar mi vehiculo"
+                    }
+                }
             }
             match section() {
                 HomeSection::Profile => rsx! {
@@ -138,6 +155,9 @@ fn Home() -> Element {
                 },
                 HomeSection::RideEstimate => rsx! {
                     RideEstimateScreen {}
+                },
+                HomeSection::Vehicle => rsx! {
+                    RegisterVehicleScreen {}
                 },
             }
             button {

@@ -108,6 +108,31 @@ pub struct UpdateProfilePayload {
     pub phone: Option<String>,
 }
 
+/// Body de `POST /api/v1/me/vehicle`
+/// (`openapi.yaml#/components/schemas/VehicleRegistrationRequest`).
+///
+/// `plate` viaja ya normalizada (recortada y en mayusculas): el backend hace
+/// lo mismo antes de validar (`RegisterVehicleRequest::prepareForValidation`
+/// en `Back_App_MotoCarros`), asi que el cliente lo hace antes de mandar la
+/// request para que el valor mostrado y el guardado coincidan (issue #11).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RegisterVehiclePayload {
+    pub plate: String,
+    pub model: String,
+    pub year: u16,
+}
+
+/// `openapi.yaml#/components/schemas/Vehicle` — respuesta de
+/// `POST /api/v1/me/vehicle` (issue #11). Solo estos tres campos: el backend
+/// no expone `id`/`user_id`/timestamps en este recurso (`VehicleResource` en
+/// `Back_App_MotoCarros`).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Vehicle {
+    pub plate: String,
+    pub model: String,
+    pub year: u16,
+}
+
 /// Un punto geografico (`openapi.yaml#/components/schemas/Coordinates`), usado
 /// tanto en el origen como en el destino de `POST /api/v1/rides/estimate`
 /// (issue #13) y de `POST /api/v1/rides` (issue #14).
@@ -306,6 +331,43 @@ mod tests {
 
         assert_eq!(error.message, "El email o la contrasena no son correctos.");
         assert!(error.errors.is_none());
+    }
+
+    #[test]
+    fn register_vehicle_payload_serializes_plate_model_and_year() {
+        let payload = RegisterVehiclePayload {
+            plate: "ABC12D".to_string(),
+            model: "Bajaj Boxer CT 100".to_string(),
+            year: 2022,
+        };
+
+        let json = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "plate": "ABC12D",
+                "model": "Bajaj Boxer CT 100",
+                "year": 2022,
+            })
+        );
+    }
+
+    #[test]
+    fn deserializes_vehicle_envelope() {
+        let json = r#"{
+            "data": {
+                "plate": "ABC12D",
+                "model": "Bajaj Boxer CT 100",
+                "year": 2022
+            }
+        }"#;
+
+        let envelope: DataEnvelope<Vehicle> = serde_json::from_str(json).unwrap();
+
+        assert_eq!(envelope.data.plate, "ABC12D");
+        assert_eq!(envelope.data.model, "Bajaj Boxer CT 100");
+        assert_eq!(envelope.data.year, 2022);
     }
 
     #[test]
