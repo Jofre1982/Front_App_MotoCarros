@@ -209,6 +209,26 @@ pub struct RideCancellation {
     pub cancellation_fee_applies: Option<bool>,
 }
 
+/// Body de `POST /api/v1/broadcasting/auth`
+/// (`openapi.yaml#/components/schemas/BroadcastAuthRequest`).
+///
+/// Los nombres de los campos los fija el protocolo Pusher que habla Reverb,
+/// no esta API (issue #5).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BroadcastAuthPayload {
+    pub socket_id: String,
+    pub channel_name: String,
+}
+
+/// `openapi.yaml#/components/schemas/BroadcastAuthResponse` — respuesta de
+/// `POST /api/v1/broadcasting/auth` (issue #5). Sin el envelope `data` del
+/// resto de la API: el formato lo fija el protocolo Pusher, que lo espera
+/// asi para reenviarlo tal cual a Reverb.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct BroadcastAuthResponse {
+    pub auth: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +479,32 @@ mod tests {
 
         assert_eq!(cancellation.ride.status, RideStatus::Requested);
         assert_eq!(cancellation.cancellation_fee_applies, None);
+    }
+
+    #[test]
+    fn broadcast_auth_payload_serializes_socket_id_and_channel_name() {
+        let payload = BroadcastAuthPayload {
+            socket_id: "123456.789012".to_string(),
+            channel_name: "private-ride.7".to_string(),
+        };
+
+        let json = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "socket_id": "123456.789012",
+                "channel_name": "private-ride.7",
+            })
+        );
+    }
+
+    #[test]
+    fn deserializes_broadcast_auth_response() {
+        let json = r#"{"auth": "motoya-local:8f3c1a2b4d5e6f70"}"#;
+
+        let response: BroadcastAuthResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(response.auth, "motoya-local:8f3c1a2b4d5e6f70");
     }
 }
