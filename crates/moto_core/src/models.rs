@@ -75,6 +75,23 @@ pub struct RegisterPassengerPayload {
     pub password: String,
 }
 
+/// Body de `POST /api/v1/auth/register/driver`
+/// (`openapi.yaml#/components/schemas/DriverRegistrationRequest`).
+///
+/// `license_number` es obligatorio en el backend (`RegisterDriverRequest`,
+/// ver `Back_App_MotoCarros`) — sin el, la request siempre responde 422. En
+/// esta etapa de pruebas la UI lo pide como "Numero de documento" en vez de
+/// "licencia" (ver issue #7), pero viaja tal cual bajo el nombre de campo que
+/// espera el backend.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RegisterDriverPayload {
+    pub name: String,
+    pub email: String,
+    pub phone: String,
+    pub password: String,
+    pub license_number: String,
+}
+
 /// Body de `PATCH /api/v1/me`
 /// (`openapi.yaml#/components/schemas/UpdateProfileRequest`).
 ///

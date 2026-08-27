@@ -6,9 +6,13 @@
 
 use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload, BroadcastAuthResponse,
-    Coordinates, DataEnvelope, LoginPayload, RegisterPassengerPayload, Ride, RideCancellation,
-    RideEstimate, RideEstimateRequestPayload, RideRequestPayload, UpdateProfilePayload, User,
+    Coordinates, DataEnvelope, LoginPayload, RegisterDriverPayload, RegisterPassengerPayload, Ride,
+    RideCancellation, RideEstimate, RideEstimateRequestPayload, RideRequestPayload,
+    UpdateProfilePayload, User,
 };
+
+#[cfg(test)]
+use crate::models::Role;
 
 #[derive(Debug, Clone)]
 pub struct ApiClient {
@@ -52,17 +56,24 @@ impl std::fmt::Display for LoginError {
 
 impl std::error::Error for LoginError {}
 
-/// Fallos posibles de `POST /api/v1/auth/register/passenger`.
+/// Fallos posibles de `POST /api/v1/auth/register/passenger` y de
+/// `POST /api/v1/auth/register/driver` (issue #7) — comparten forma porque
+/// ambos registros validan el mismo tipo de errores, salvo
+/// `InvalidLicenseNumber`, que solo aplica al registro de conductor.
 ///
-/// `InvalidEmail`/`InvalidPhone` se detectan en el cliente antes de mandar la
-/// request (formato basico), sin duplicar las reglas completas del backend
-/// (unicidad, normalizacion) — esas siguen viajando como `Validation` en un
-/// 422 (ver `openapi.yaml` de `Back_App_MotoCarros`).
+/// `InvalidEmail`/`InvalidPhone`/`InvalidLicenseNumber` se detectan en el
+/// cliente antes de mandar la request (formato basico), sin duplicar las
+/// reglas completas del backend (unicidad, normalizacion) — esas siguen
+/// viajando como `Validation` en un 422 (ver `openapi.yaml` de
+/// `Back_App_MotoCarros`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegisterError {
     EmptyFields,
     InvalidEmail,
     InvalidPhone,
+    /// `license_number` no cumple el formato que exige el backend
+    /// (`RegisterDriverRequest`, regex `^[A-Z0-9-]{5,50}$`).
+    InvalidLicenseNumber,
     Validation(ApiErrorBody),
     Network(String),
     Unexpected(u16),
@@ -75,6 +86,12 @@ impl std::fmt::Display for RegisterError {
             RegisterError::InvalidEmail => write!(f, "Ingresa un email valido."),
             RegisterError::InvalidPhone => {
                 write!(f, "Ingresa un telefono valido (7 a 15 digitos).")
+            }
+            RegisterError::InvalidLicenseNumber => {
+                write!(
+                    f,
+                    "Ingresa un numero de documento valido (5 a 50 caracteres, solo letras mayusculas, numeros y guiones)."
+                )
             }
             RegisterError::Validation(body) => write!(f, "{}", body.message),
             RegisterError::Network(_) => {
@@ -124,6 +141,16 @@ fn is_valid_email(email: &str) -> bool {
 fn is_valid_phone(phone: &str) -> bool {
     let digits = phone.strip_prefix('+').unwrap_or(phone);
     (7..=15).contains(&digits.len()) && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Mismo regex que `RegisterDriverRequest` en el backend
+/// (`^[A-Z0-9-]{5,50}$`, ver issue #7): 5 a 50 caracteres, solo letras
+/// mayusculas ASCII, digitos y guiones.
+fn is_valid_license_number(license_number: &str) -> bool {
+    (5..=50).contains(&license_number.len())
+        && license_number
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// Fallos posibles de `POST /api/v1/auth/refresh`.
@@ -599,6 +626,83 @@ impl ApiClient {
             email: email.to_string(),
             phone: phone.to_string(),
             password: password.to_string(),
+        };
+
+        let response = self
+            .http
+            .post(url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|err| RegisterError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<AuthenticatedUser> = response
+                .json()
+                .await
+                .map_err(|err| RegisterError::Network(err.to_string()))?;
+            return Ok(envelope.data);
+        }
+
+        match status.as_u16() {
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| RegisterError::Network(err.to_string()))?;
+                Err(RegisterError::Validation(body))
+            }
+            other => Err(RegisterError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/auth/register/driver` — issue #7.
+    ///
+    /// El rol no se manda: lo fija el endpoint. `license_number` es
+    /// obligatorio para el backend (`RegisterDriverRequest`) — sin el,
+    /// siempre responde 422, sin importar el resto del formulario. Si la
+    /// respuesta es exitosa, la cuenta queda con sesion iniciada igual que
+    /// tras un login (mismo shape `AuthenticatedUser`).
+    pub async fn register_driver(
+        &self,
+        name: &str,
+        email: &str,
+        phone: &str,
+        password: &str,
+        license_number: &str,
+    ) -> Result<AuthenticatedUser, RegisterError> {
+        let name = name.trim();
+        let email = email.trim();
+        let phone = phone.trim();
+        let license_number = license_number.trim();
+
+        if name.is_empty()
+            || email.is_empty()
+            || phone.is_empty()
+            || password.is_empty()
+            || license_number.is_empty()
+        {
+            return Err(RegisterError::EmptyFields);
+        }
+        if !is_valid_email(email) {
+            return Err(RegisterError::InvalidEmail);
+        }
+        if !is_valid_phone(phone) {
+            return Err(RegisterError::InvalidPhone);
+        }
+        if !is_valid_license_number(license_number) {
+            return Err(RegisterError::InvalidLicenseNumber);
+        }
+
+        let url = format!("{}/api/v1/auth/register/driver", self.base_url);
+        let payload = RegisterDriverPayload {
+            name: name.to_string(),
+            email: email.to_string(),
+            phone: phone.to_string(),
+            password: password.to_string(),
+            license_number: license_number.to_string(),
         };
 
         let response = self
@@ -1462,6 +1566,258 @@ mod tests {
                 "ana@example.com",
                 "+573001234567",
                 "motoya2026",
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RegisterError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn register_driver_rejects_empty_fields_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .register_driver(
+                    "",
+                    "carlos@example.com",
+                    "+573001234567",
+                    "motoya2026",
+                    "ABC1234"
+                )
+                .await,
+            Err(RegisterError::EmptyFields)
+        );
+        assert_eq!(
+            client
+                .register_driver("Carlos Perez", "", "+573001234567", "motoya2026", "ABC1234")
+                .await,
+            Err(RegisterError::EmptyFields)
+        );
+        assert_eq!(
+            client
+                .register_driver(
+                    "Carlos Perez",
+                    "carlos@example.com",
+                    "",
+                    "motoya2026",
+                    "ABC1234"
+                )
+                .await,
+            Err(RegisterError::EmptyFields)
+        );
+        assert_eq!(
+            client
+                .register_driver(
+                    "Carlos Perez",
+                    "carlos@example.com",
+                    "+573001234567",
+                    "",
+                    "ABC1234"
+                )
+                .await,
+            Err(RegisterError::EmptyFields)
+        );
+        assert_eq!(
+            client
+                .register_driver(
+                    "Carlos Perez",
+                    "carlos@example.com",
+                    "+573001234567",
+                    "motoya2026",
+                    ""
+                )
+                .await,
+            Err(RegisterError::EmptyFields)
+        );
+    }
+
+    #[tokio::test]
+    async fn register_driver_rejects_invalid_email_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .register_driver(
+                    "Carlos Perez",
+                    "not-an-email",
+                    "+573001234567",
+                    "motoya2026",
+                    "ABC1234"
+                )
+                .await,
+            Err(RegisterError::InvalidEmail)
+        );
+    }
+
+    #[tokio::test]
+    async fn register_driver_rejects_invalid_phone_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .register_driver(
+                    "Carlos Perez",
+                    "carlos@example.com",
+                    "123",
+                    "motoya2026",
+                    "ABC1234"
+                )
+                .await,
+            Err(RegisterError::InvalidPhone)
+        );
+    }
+
+    #[tokio::test]
+    async fn register_driver_rejects_invalid_license_number_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        // Muy corto.
+        assert_eq!(
+            client
+                .register_driver(
+                    "Carlos Perez",
+                    "carlos@example.com",
+                    "+573001234567",
+                    "motoya2026",
+                    "AB1"
+                )
+                .await,
+            Err(RegisterError::InvalidLicenseNumber)
+        );
+        // Minusculas: el backend solo acepta mayusculas (regex
+        // `^[A-Z0-9-]{5,50}$`).
+        assert_eq!(
+            client
+                .register_driver(
+                    "Carlos Perez",
+                    "carlos@example.com",
+                    "+573001234567",
+                    "motoya2026",
+                    "abc1234"
+                )
+                .await,
+            Err(RegisterError::InvalidLicenseNumber)
+        );
+        // Caracter fuera del set permitido.
+        assert_eq!(
+            client
+                .register_driver(
+                    "Carlos Perez",
+                    "carlos@example.com",
+                    "+573001234567",
+                    "motoya2026",
+                    "ABC 1234"
+                )
+                .await,
+            Err(RegisterError::InvalidLicenseNumber)
+        );
+    }
+
+    #[tokio::test]
+    async fn register_driver_returns_authenticated_user_on_success() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/register/driver"))
+            .and(body_json(serde_json::json!({
+                "name": "Carlos Perez",
+                "email": "carlos@example.com",
+                "phone": "+573001234567",
+                "password": "motoya2026",
+                "license_number": "ABC1234",
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "user": {
+                        "id": 2,
+                        "name": "Carlos Perez",
+                        "email": "carlos@example.com",
+                        "phone": "+573001234567",
+                        "role": "driver",
+                    },
+                    "token": {
+                        "access_token": "jwt-token",
+                        "token_type": "bearer",
+                        "expires_in": 900,
+                    },
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let authenticated = client
+            .register_driver(
+                "Carlos Perez",
+                "carlos@example.com",
+                "+573001234567",
+                "motoya2026",
+                "ABC1234",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(authenticated.user.email, "carlos@example.com");
+        assert_eq!(authenticated.user.role, Role::Driver);
+        assert_eq!(authenticated.token.access_token, "jwt-token");
+    }
+
+    #[tokio::test]
+    async fn register_driver_returns_validation_error_on_422() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/register/driver"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "The license number has already been taken.",
+                "errors": {
+                    "license_number": ["The license number has already been taken."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .register_driver(
+                "Carlos Perez",
+                "carlos@example.com",
+                "+573001234567",
+                "motoya2026",
+                "ABC1234",
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            RegisterError::Validation(ApiErrorBody {
+                message: "The license number has already been taken.".to_string(),
+                errors: Some(HashMap::from([(
+                    "license_number".to_string(),
+                    vec!["The license number has already been taken.".to_string()]
+                )])),
+            })
+        );
+        assert_eq!(
+            error.field_message("license_number"),
+            Some("The license number has already been taken.".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn register_driver_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .register_driver(
+                "Carlos Perez",
+                "carlos@example.com",
+                "+573001234567",
+                "motoya2026",
+                "ABC1234",
             )
             .await
             .unwrap_err();
