@@ -15,6 +15,9 @@ use moto_core::storage::TokenStorage;
 pub struct LoginScreenProps {
     /// Se dispara cuando el usuario pide ir a crear una cuenta de pasajero.
     pub on_register_click: EventHandler<()>,
+    /// Se dispara cuando el usuario pide ir a crear una cuenta de conductor
+    /// (issue #7).
+    pub on_register_driver_click: EventHandler<()>,
 }
 
 #[component]
@@ -91,6 +94,12 @@ pub fn LoginScreen(props: LoginScreenProps) -> Element {
                 class: "login-register-link",
                 onclick: move |_| props.on_register_click.call(()),
                 "Crear cuenta de pasajero"
+            }
+            button {
+                r#type: "button",
+                class: "login-register-driver-link",
+                onclick: move |_| props.on_register_driver_click.call(()),
+                "Crear cuenta de conductor"
             }
         }
     }
