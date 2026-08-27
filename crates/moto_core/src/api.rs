@@ -5,9 +5,9 @@
 //! `Back_App_MotoCarros`).
 
 use crate::models::{
-    ApiErrorBody, AuthToken, AuthenticatedUser, Coordinates, DataEnvelope, LoginPayload,
-    RegisterPassengerPayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
-    RideRequestPayload, UpdateProfilePayload, User,
+    ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload, BroadcastAuthResponse,
+    Coordinates, DataEnvelope, LoginPayload, RegisterPassengerPayload, Ride, RideCancellation,
+    RideEstimate, RideEstimateRequestPayload, RideRequestPayload, UpdateProfilePayload, User,
 };
 
 #[derive(Debug, Clone)]
@@ -430,6 +430,46 @@ impl std::fmt::Display for CancelRideError {
 }
 
 impl std::error::Error for CancelRideError {}
+
+/// Fallos posibles de `POST /api/v1/broadcasting/auth` (issue #5).
+///
+/// A diferencia del resto de las requests autenticadas, esta nunca reintenta
+/// con un refresh de token: el endpoint exige explicitamente un access token
+/// vigente (ver `openapi.yaml`), asi que un 401 aca es directamente un fallo
+/// de autenticacion, no una senal de "token vencido, renovar y reintentar".
+#[derive(Debug, Clone, PartialEq)]
+pub enum BroadcastAuthError {
+    Unauthorized,
+    /// El usuario autenticado no participa de la entidad del canal (no es el
+    /// conductor de `driver.{id}`, o no participa del viaje de `ride.{id}`).
+    Forbidden,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for BroadcastAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BroadcastAuthError::Unauthorized => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            BroadcastAuthError::Forbidden => {
+                write!(f, "No tienes permiso para suscribirte a este canal.")
+            }
+            BroadcastAuthError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            BroadcastAuthError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BroadcastAuthError {}
 
 enum GetOutcome<T> {
     Success(T),
@@ -1098,6 +1138,48 @@ impl ApiClient {
                 Ok(CancelRideOutcome::Validation(body))
             }
             other => Err(CancelRideError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/broadcasting/auth` — issue #5. Firma la suscripcion de
+    /// `channel_name` (ya con el prefijo `private-` que espera el protocolo
+    /// Pusher, ver `crate::realtime`) para el `socket_id` que asigno Reverb
+    /// al abrir la conexion de WebSocket. No reintenta con refresh de token:
+    /// este endpoint exige un access token vigente (ver `openapi.yaml`).
+    pub async fn authenticate_broadcast_channel(
+        &self,
+        token: &AuthToken,
+        socket_id: &str,
+        channel_name: &str,
+    ) -> Result<BroadcastAuthResponse, BroadcastAuthError> {
+        let url = format!("{}/api/v1/broadcasting/auth", self.base_url);
+        let payload = BroadcastAuthPayload {
+            socket_id: socket_id.to_string(),
+            channel_name: channel_name.to_string(),
+        };
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&token.access_token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|err| BroadcastAuthError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            return response
+                .json()
+                .await
+                .map_err(|err| BroadcastAuthError::Network(err.to_string()));
+        }
+
+        match status.as_u16() {
+            401 => Err(BroadcastAuthError::Unauthorized),
+            403 => Err(BroadcastAuthError::Forbidden),
+            other => Err(BroadcastAuthError::Unexpected(other)),
         }
     }
 }
@@ -2498,5 +2580,88 @@ mod tests {
         let error = client.cancel_ride(&sample_token(), 1).await.unwrap_err();
 
         assert!(matches!(error, CancelRideError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn authenticate_broadcast_channel_returns_the_signature_on_success() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/broadcasting/auth"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .and(body_json(serde_json::json!({
+                "socket_id": "123456.789012",
+                "channel_name": "private-ride.7",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "auth": "motoya-local:8f3c1a2b4d5e6f70",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let response = client
+            .authenticate_broadcast_channel(&sample_token(), "123456.789012", "private-ride.7")
+            .await
+            .unwrap();
+
+        assert_eq!(response.auth, "motoya-local:8f3c1a2b4d5e6f70");
+    }
+
+    #[tokio::test]
+    async fn authenticate_broadcast_channel_returns_unauthorized_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/broadcasting/auth"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .authenticate_broadcast_channel(&sample_token(), "123456.789012", "private-ride.7")
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, BroadcastAuthError::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn authenticate_broadcast_channel_returns_forbidden_on_403() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/broadcasting/auth"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .authenticate_broadcast_channel(&sample_token(), "123456.789012", "private-ride.7")
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, BroadcastAuthError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn authenticate_broadcast_channel_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .authenticate_broadcast_channel(&sample_token(), "123456.789012", "private-ride.7")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, BroadcastAuthError::Network(_)));
     }
 }
