@@ -6,9 +6,9 @@
 
 use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload, BroadcastAuthResponse,
-    Coordinates, DataEnvelope, LoginPayload, RegisterDriverPayload, RegisterPassengerPayload, Ride,
-    RideCancellation, RideEstimate, RideEstimateRequestPayload, RideRequestPayload,
-    UpdateProfilePayload, User,
+    Coordinates, DataEnvelope, LoginPayload, RegisterDriverPayload, RegisterPassengerPayload,
+    RegisterVehiclePayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
+    RideRequestPayload, UpdateProfilePayload, User, Vehicle,
 };
 
 #[cfg(test)]
@@ -149,6 +149,17 @@ fn is_valid_phone(phone: &str) -> bool {
 fn is_valid_license_number(license_number: &str) -> bool {
     (5..=50).contains(&license_number.len())
         && license_number
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Mismo regex que `RegisterVehicleRequest` en el backend
+/// (`^[A-Z0-9-]{5,10}$`, ver issue #11): 5 a 10 caracteres, solo letras
+/// mayusculas ASCII, digitos y guiones. Se valida despues de normalizar a
+/// mayusculas (ver `RegisterVehiclePayload`), igual que hace el backend.
+fn is_valid_plate(plate: &str) -> bool {
+    (5..=10).contains(&plate.len())
+        && plate
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
 }
@@ -318,6 +329,83 @@ impl UpdateProfileError {
     pub fn field_message(&self, field: &str) -> Option<String> {
         match self {
             UpdateProfileError::Validation(body) => body
+                .errors
+                .as_ref()
+                .and_then(|errors| errors.get(field))
+                .and_then(|messages| messages.first())
+                .cloned(),
+            _ => None,
+        }
+    }
+}
+
+/// Fallos posibles de `POST /api/v1/me/vehicle` (issue #11).
+///
+/// `EmptyFields`/`InvalidPlate`/`InvalidYear` se detectan en el cliente antes
+/// de mandar la request (formato basico), sin duplicar las reglas completas
+/// del backend (unicidad de la placa, limite superior dinamico del anio) —
+/// esas siguen viajando como `Validation` en un 422. Un conductor que ya
+/// tiene vehiculo registrado tambien recibe un 422 de `Validation`, pero bajo
+/// la clave sintetica `vehicle` en vez de un campo del formulario
+/// (`RegisterVehicleRequest::after` en `Back_App_MotoCarros`) — actualizar el
+/// vehiculo existente es la historia #12, fuera de alcance aca.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RegisterVehicleError {
+    EmptyFields,
+    /// `plate` no cumple el formato que exige el backend
+    /// (`RegisterVehicleRequest`, regex `^[A-Z0-9-]{5,10}$`).
+    InvalidPlate,
+    /// `year` no es un numero de 4 digitos no anterior a 1970.
+    InvalidYear,
+    /// La cuenta no es de conductor (`VehiclePolicy::create` en el backend).
+    Forbidden,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for RegisterVehicleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegisterVehicleError::EmptyFields => write!(f, "Completa todos los campos."),
+            RegisterVehicleError::InvalidPlate => {
+                write!(
+                    f,
+                    "Ingresa una placa valida (5 a 10 caracteres, solo letras, numeros y guiones)."
+                )
+            }
+            RegisterVehicleError::InvalidYear => {
+                write!(f, "Ingresa un anio valido (4 digitos, no anterior a 1970).")
+            }
+            RegisterVehicleError::Forbidden => {
+                write!(f, "Esta cuenta no puede registrar un vehiculo.")
+            }
+            RegisterVehicleError::Validation(body) => write!(f, "{}", body.message),
+            RegisterVehicleError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            RegisterVehicleError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            RegisterVehicleError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegisterVehicleError {}
+
+impl RegisterVehicleError {
+    /// Mensaje de validacion especifico para `field`, igual que
+    /// `RegisterError::field_message`.
+    pub fn field_message(&self, field: &str) -> Option<String> {
+        match self {
+            RegisterVehicleError::Validation(body) => body
                 .errors
                 .as_ref()
                 .and_then(|errors| errors.get(field))
@@ -516,6 +604,13 @@ enum PostOutcome<T> {
 }
 
 enum PostRideOutcome<T> {
+    Success(T),
+    Unauthorized,
+    Forbidden,
+    Validation(ApiErrorBody),
+}
+
+enum PostVehicleOutcome<T> {
     Success(T),
     Unauthorized,
     Forbidden,
@@ -978,6 +1073,119 @@ impl ApiClient {
                 Ok(PatchOutcome::Validation(body))
             }
             other => Err(UpdateProfileError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/me/vehicle` — issue #11. El backend no acepta un
+    /// segundo registro para la misma cuenta (responde 422 bajo la clave
+    /// sintetica `vehicle`, ver `RegisterVehicleError`) — actualizar un
+    /// vehiculo ya registrado es la historia #12, fuera de alcance aca.
+    /// Reintenta una vez con refresh de token ante un 401, igual que
+    /// `request_ride`; un 403 (cuenta no conductora) o un 422 (validacion,
+    /// incluido el caso de vehiculo duplicado) nunca se reintentan.
+    pub async fn register_vehicle(
+        &self,
+        token: &AuthToken,
+        plate: &str,
+        model: &str,
+        year: &str,
+    ) -> Result<AuthenticatedFetch<Vehicle>, RegisterVehicleError> {
+        let plate = plate.trim().to_uppercase();
+        let model = model.trim();
+        let year = year.trim();
+
+        if plate.is_empty() || model.is_empty() || year.is_empty() {
+            return Err(RegisterVehicleError::EmptyFields);
+        }
+        if !is_valid_plate(&plate) {
+            return Err(RegisterVehicleError::InvalidPlate);
+        }
+        let Ok(year_number) = year.parse::<u16>() else {
+            return Err(RegisterVehicleError::InvalidYear);
+        };
+        if year_number < 1970 {
+            return Err(RegisterVehicleError::InvalidYear);
+        }
+
+        let payload = RegisterVehiclePayload {
+            plate,
+            model: model.to_string(),
+            year: year_number,
+        };
+
+        match self
+            .post_vehicle_with_token(&token.access_token, &payload)
+            .await?
+        {
+            PostVehicleOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            PostVehicleOutcome::Forbidden => return Err(RegisterVehicleError::Forbidden),
+            PostVehicleOutcome::Validation(body) => {
+                return Err(RegisterVehicleError::Validation(body));
+            }
+            PostVehicleOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| RegisterVehicleError::SessionExpired)?;
+
+        match self
+            .post_vehicle_with_token(&renewed.access_token, &payload)
+            .await?
+        {
+            PostVehicleOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            PostVehicleOutcome::Forbidden => Err(RegisterVehicleError::Forbidden),
+            PostVehicleOutcome::Validation(body) => Err(RegisterVehicleError::Validation(body)),
+            PostVehicleOutcome::Unauthorized => Err(RegisterVehicleError::SessionExpired),
+        }
+    }
+
+    async fn post_vehicle_with_token(
+        &self,
+        access_token: &str,
+        body: &RegisterVehiclePayload,
+    ) -> Result<PostVehicleOutcome<Vehicle>, RegisterVehicleError> {
+        let url = format!("{}/api/v1/me/vehicle", self.base_url);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| RegisterVehicleError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<Vehicle> = response
+                .json()
+                .await
+                .map_err(|err| RegisterVehicleError::Network(err.to_string()))?;
+            return Ok(PostVehicleOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(PostVehicleOutcome::Unauthorized),
+            403 => Ok(PostVehicleOutcome::Forbidden),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| RegisterVehicleError::Network(err.to_string()))?;
+                Ok(PostVehicleOutcome::Validation(body))
+            }
+            other => Err(RegisterVehicleError::Unexpected(other)),
         }
     }
 
@@ -2366,6 +2574,266 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, UpdateProfileError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn register_vehicle_rejects_empty_fields_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .register_vehicle(&sample_token(), "", "Bajaj Boxer CT 100", "2022")
+                .await,
+            Err(RegisterVehicleError::EmptyFields)
+        );
+        assert_eq!(
+            client
+                .register_vehicle(&sample_token(), "ABC12D", "", "2022")
+                .await,
+            Err(RegisterVehicleError::EmptyFields)
+        );
+        assert_eq!(
+            client
+                .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "")
+                .await,
+            Err(RegisterVehicleError::EmptyFields)
+        );
+    }
+
+    #[tokio::test]
+    async fn register_vehicle_rejects_invalid_plate_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .register_vehicle(&sample_token(), "AB", "Bajaj Boxer CT 100", "2022")
+                .await,
+            Err(RegisterVehicleError::InvalidPlate)
+        );
+        assert_eq!(
+            client
+                .register_vehicle(&sample_token(), "ABC 12D!", "Bajaj Boxer CT 100", "2022")
+                .await,
+            Err(RegisterVehicleError::InvalidPlate)
+        );
+    }
+
+    #[tokio::test]
+    async fn register_vehicle_rejects_invalid_year_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .register_vehicle(
+                    &sample_token(),
+                    "ABC12D",
+                    "Bajaj Boxer CT 100",
+                    "not-a-year"
+                )
+                .await,
+            Err(RegisterVehicleError::InvalidYear)
+        );
+        assert_eq!(
+            client
+                .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "1969")
+                .await,
+            Err(RegisterVehicleError::InvalidYear)
+        );
+    }
+
+    #[tokio::test]
+    async fn register_vehicle_normalizes_the_plate_and_returns_the_created_vehicle() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/vehicle"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .and(body_json(serde_json::json!({
+                "plate": "ABC12D",
+                "model": "Bajaj Boxer CT 100",
+                "year": 2022,
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "plate": "ABC12D",
+                    "model": "Bajaj Boxer CT 100",
+                    "year": 2022,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .register_vehicle(&sample_token(), " abc12d ", "Bajaj Boxer CT 100", "2022")
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.plate, "ABC12D");
+        assert_eq!(fetch.data.year, 2022);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn register_vehicle_returns_forbidden_on_403_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/vehicle"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "2022")
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, RegisterVehicleError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn register_vehicle_returns_validation_error_on_422_when_the_driver_already_has_a_vehicle()
+     {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/vehicle"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "Ya tienes un vehiculo registrado; actualiza el existente en vez de registrar otro.",
+                "errors": {
+                    "vehicle": ["Ya tienes un vehiculo registrado; actualiza el existente en vez de registrar otro."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "2022")
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            RegisterVehicleError::Validation(ApiErrorBody {
+                message: "Ya tienes un vehiculo registrado; actualiza el existente en vez de registrar otro."
+                    .to_string(),
+                errors: Some(HashMap::from([(
+                    "vehicle".to_string(),
+                    vec![
+                        "Ya tienes un vehiculo registrado; actualiza el existente en vez de registrar otro."
+                            .to_string()
+                    ]
+                )])),
+            })
+        );
+        assert_eq!(error.field_message("plate"), None);
+    }
+
+    #[tokio::test]
+    async fn register_vehicle_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/vehicle"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/vehicle"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "plate": "ABC12D",
+                    "model": "Bajaj Boxer CT 100",
+                    "year": 2022,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "2022")
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.plate, "ABC12D");
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn register_vehicle_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/vehicle"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "2022")
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, RegisterVehicleError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn register_vehicle_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "2022")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RegisterVehicleError::Network(_)));
     }
 
     fn sample_origin() -> Coordinates {
