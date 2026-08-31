@@ -16,6 +16,7 @@ pub use screens::register_driver::RegisterDriverScreen;
 pub use screens::register_passenger::RegisterPassengerScreen;
 pub use screens::register_vehicle::RegisterVehicleScreen;
 pub use screens::ride_estimate::RideEstimateScreen;
+pub use screens::vehicle::VehicleScreen;
 
 /// Pantallas del flujo de autenticacion, previas a tener sesion iniciada.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -88,10 +89,10 @@ enum HomeSection {
 /// seccion — cerrar sesion debe estar disponible desde el momento en que hay
 /// una sesion iniciada.
 ///
-/// La seccion de vehiculo (issue #11) solo se ofrece cuando `session.user()`
-/// ya cargo (`GET /api/v1/me`, issue #9) y es una cuenta de conductor: un
-/// pasajero nunca ve el boton, y estructuralmente no puede llegar a
-/// `RegisterVehicleScreen` desde esta navegacion.
+/// La seccion de vehiculo (issues #11 y #12, `VehicleScreen`) solo se ofrece
+/// cuando `session.user()` ya cargo (`GET /api/v1/me`, issue #9) y es una
+/// cuenta de conductor: un pasajero nunca ve el boton, y estructuralmente no
+/// puede llegar a esa pantalla desde esta navegacion.
 #[component]
 fn Home() -> Element {
     let api_client = use_context::<ApiClient>();
@@ -145,7 +146,7 @@ fn Home() -> Element {
                         r#type: "button",
                         disabled: section() == HomeSection::Vehicle,
                         onclick: move |_| section.set(HomeSection::Vehicle),
-                        "Registrar mi vehiculo"
+                        "Mi vehiculo"
                     }
                 }
             }
@@ -157,7 +158,7 @@ fn Home() -> Element {
                     RideEstimateScreen {}
                 },
                 HomeSection::Vehicle => rsx! {
-                    RegisterVehicleScreen {}
+                    VehicleScreen {}
                 },
             }
             button {

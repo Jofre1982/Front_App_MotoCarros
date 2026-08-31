@@ -123,14 +123,31 @@ pub struct RegisterVehiclePayload {
 }
 
 /// `openapi.yaml#/components/schemas/Vehicle` — respuesta de
-/// `POST /api/v1/me/vehicle` (issue #11). Solo estos tres campos: el backend
-/// no expone `id`/`user_id`/timestamps en este recurso (`VehicleResource` en
-/// `Back_App_MotoCarros`).
+/// `POST /api/v1/me/vehicle` (issue #11) y tambien de `GET`/`PATCH
+/// /api/v1/me/vehicle` (issue #12): las tres operaciones comparten el mismo
+/// `VehicleResource` del lado del backend. Solo estos tres campos: no expone
+/// `id`/`user_id`/timestamps.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Vehicle {
     pub plate: String,
     pub model: String,
     pub year: u16,
+}
+
+/// Body de `PATCH /api/v1/me/vehicle` (issue #12).
+///
+/// PATCH parcial, mismo criterio que `UpdateProfilePayload` (issue #10):
+/// cada campo ausente se omite del JSON en vez de viajar como `null`, para
+/// que el backend conserve el valor actual en vez de interpretarlo como
+/// "borrar este dato".
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct UpdateVehiclePayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub year: Option<u16>,
 }
 
 /// Un punto geografico (`openapi.yaml#/components/schemas/Coordinates`), usado
