@@ -311,6 +311,42 @@ pub struct RideNoLongerAvailable {
     pub ride_id: u64,
 }
 
+/// Aplica un evento del canal `driver.{id}` (issue #16) a la lista de
+/// solicitudes cercanas que ve un conductor, deduplicando por `ride_id`.
+///
+/// Logica pura y sincronica a proposito: es la maquina de estados que
+/// consume `NearbyRidesList` (`moto_ui`) en cada vuelta de su loop de
+/// sondeo sobre `RealtimeClient::poll_events()`, extraida de la pantalla
+/// para poder testearla sin Dioxus ni un socket real (ver review de la PR
+/// del issue #16: dos bugs de esta clase — `Reconnecting` que nunca
+/// reconectaba y `subscribe()` reintentado para siempre tras un fallo de
+/// auth — se detectaron solo por revision manual). `event_name`/`data` ya
+/// vienen filtrados por `channel` en el caller; un `data` que no
+/// deserializa al tipo esperado (frame corrupto o version del protocolo
+/// que este cliente no entiende) se ignora sin error, igual que
+/// `RealtimeClient::handle_frame`.
+pub fn apply_nearby_ride_event(
+    requests: &mut Vec<NearbyRideRequest>,
+    event_name: &str,
+    data: &str,
+) {
+    match event_name {
+        "ride.requested" => {
+            if let Ok(request) = serde_json::from_str::<NearbyRideRequest>(data)
+                && !requests.iter().any(|r| r.ride_id == request.ride_id)
+            {
+                requests.push(request);
+            }
+        }
+        "ride.unavailable" => {
+            if let Ok(gone) = serde_json::from_str::<RideNoLongerAvailable>(data) {
+                requests.retain(|r| r.ride_id != gone.ride_id);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,5 +688,87 @@ mod tests {
         let event: RideNoLongerAvailable = serde_json::from_str(json).unwrap();
 
         assert_eq!(event.ride_id, 7);
+    }
+
+    fn nearby_ride_request_json(ride_id: u64) -> String {
+        serde_json::json!({
+            "ride_id": ride_id,
+            "origin": {"latitude": 4.710989, "longitude": -74.072092},
+            "destination": {"latitude": 4.698, "longitude": -74.061},
+            "currency": "COP",
+            "estimated_fare": 8850,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn apply_nearby_ride_event_adds_a_ride_requested_event() {
+        let mut requests = Vec::new();
+
+        apply_nearby_ride_event(
+            &mut requests,
+            "ride.requested",
+            &nearby_ride_request_json(7),
+        );
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].ride_id, 7);
+    }
+
+    #[test]
+    fn apply_nearby_ride_event_deduplicates_by_ride_id() {
+        let mut requests = Vec::new();
+        apply_nearby_ride_event(
+            &mut requests,
+            "ride.requested",
+            &nearby_ride_request_json(7),
+        );
+
+        apply_nearby_ride_event(
+            &mut requests,
+            "ride.requested",
+            &nearby_ride_request_json(7),
+        );
+
+        assert_eq!(requests.len(), 1);
+    }
+
+    #[test]
+    fn apply_nearby_ride_event_removes_on_ride_unavailable() {
+        let mut requests = Vec::new();
+        apply_nearby_ride_event(
+            &mut requests,
+            "ride.requested",
+            &nearby_ride_request_json(7),
+        );
+        apply_nearby_ride_event(
+            &mut requests,
+            "ride.requested",
+            &nearby_ride_request_json(9),
+        );
+
+        apply_nearby_ride_event(&mut requests, "ride.unavailable", r#"{"ride_id": 7}"#);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].ride_id, 9);
+    }
+
+    #[test]
+    fn apply_nearby_ride_event_ignores_an_unknown_event_name() {
+        let mut requests = Vec::new();
+
+        apply_nearby_ride_event(&mut requests, "pusher_internal:subscription_succeeded", "");
+
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn apply_nearby_ride_event_ignores_malformed_data_without_panicking() {
+        let mut requests = Vec::new();
+
+        apply_nearby_ride_event(&mut requests, "ride.requested", "not json at all");
+        apply_nearby_ride_event(&mut requests, "ride.unavailable", "not json at all");
+
+        assert!(requests.is_empty());
     }
 }

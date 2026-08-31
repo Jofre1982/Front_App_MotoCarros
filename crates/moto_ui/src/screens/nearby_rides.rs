@@ -11,20 +11,25 @@
 //! escucha dos eventos, documentados por el backend en el propio issue:
 //! `ride.requested` (agrega una solicitud a la lista) y `ride.unavailable`
 //! (otro conductor la acepto primero, se quita de la lista). El transporte
-//! de tiempo real no reconecta ni resuscribe solo (ver
-//! `RealtimeClient`), asi que esta pantalla lo hace por su cuenta: llama
-//! `reconnect()` explicitamente cada vez que el estado pasa a
-//! `Reconnecting` y vuelve a suscribirse cada vez que pasa a `Connected`
-//! sin una suscripcion vigente.
+//! de tiempo real no reconecta ni resuscribe solo (ver `RealtimeClient`),
+//! asi que esta pantalla lo hace por su cuenta en cada vuelta de su loop de
+//! sondeo — pero la decision de *cuando* suscribirse, reconectar o cortar
+//! el loop, y el dedup de eventos por `ride_id`, vive en
+//! `moto_core::realtime` (`decide_poll_action`, `decide_subscribe_failure`)
+//! y `moto_core::models` (`apply_nearby_ride_event`): logica pura y
+//! testeada ahi, no en este componente Dioxus.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
 use futures_timer::Delay;
-use moto_core::api::{ApiClient, AuthenticatedRequestError, BroadcastAuthError, GetVehicleError};
-use moto_core::models::{NearbyRideRequest, RideNoLongerAvailable};
-use moto_core::realtime::{ConnectionState, RealtimeClient, RealtimeConfig, SubscribeError};
+use moto_core::api::{ApiClient, AuthenticatedRequestError, GetVehicleError};
+use moto_core::models::{NearbyRideRequest, apply_nearby_ride_event};
+use moto_core::realtime::{
+    ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
+    decide_poll_action, decide_subscribe_failure,
+};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
@@ -204,78 +209,57 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                     if event.channel != full_channel {
                         continue;
                     }
-                    match event.event.as_str() {
-                        "ride.requested" => {
-                            if let Ok(request) =
-                                serde_json::from_str::<NearbyRideRequest>(&event.data)
-                            {
-                                requests.with_mut(|list| {
-                                    if !list.iter().any(|r| r.ride_id == request.ride_id) {
-                                        list.push(request);
-                                    }
-                                });
-                            }
-                        }
-                        "ride.unavailable" => {
-                            if let Ok(gone) =
-                                serde_json::from_str::<RideNoLongerAvailable>(&event.data)
-                            {
-                                requests.with_mut(|list| {
-                                    list.retain(|r| r.ride_id != gone.ride_id);
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
+                    requests.with_mut(|list| {
+                        apply_nearby_ride_event(list, &event.event, &event.data);
+                    });
                 }
 
-                match client.state() {
-                    ConnectionState::Connected if !subscribed => {
-                        match client.subscribe(&token, &bare_channel).await {
-                            Ok(()) => {
-                                subscribed = true;
-                                status.set(RealtimeStatus::Connected);
-                            }
-                            // `POST /api/v1/broadcasting/auth` nunca reintenta
-                            // con refresh de token (ver doc comment de
-                            // `broadcast_auth` en `moto_core::api`): un fallo
-                            // de auth aqui es determinístico y va a repetirse
-                            // en cada vuelta del loop con el mismo token, asi
-                            // que se corta en vez de reintentar sin backoff
-                            // cada `POLL_INTERVAL`. `Unauthorized` ademas
-                            // implica que la sesion ya no es valida en
-                            // absoluto, igual que `SessionExpired` mas arriba.
-                            Err(SubscribeError::Auth(auth_err)) => {
-                                let unauthorized =
-                                    matches!(auth_err, BroadcastAuthError::Unauthorized);
-                                status.set(RealtimeStatus::Unavailable(auth_err.to_string()));
-                                if unauthorized {
-                                    session.logout(storage.as_ref());
-                                }
-                                break;
-                            }
-                            Err(err @ SubscribeError::NotConnected) => {
-                                status.set(RealtimeStatus::Unavailable(err.to_string()));
-                            }
-                        }
+                // La decision de cuando suscribirse/reconectar/cortar el
+                // loop vive en `moto_core::realtime` (`decide_poll_action`,
+                // `decide_subscribe_failure`) para poder testearla sin
+                // Dioxus ni un socket real — este bloque solo ejecuta esa
+                // decision y actualiza el estado visible.
+                let state = client.state();
+                match &state {
+                    ConnectionState::Connecting => status.set(RealtimeStatus::Connecting),
+                    ConnectionState::Reconnecting { .. } => {
+                        status.set(RealtimeStatus::Reconnecting)
                     }
                     ConnectionState::Connected => {}
-                    ConnectionState::Connecting => {
-                        subscribed = false;
-                        status.set(RealtimeStatus::Connecting);
-                    }
-                    ConnectionState::Reconnecting { .. } => {
-                        subscribed = false;
-                        status.set(RealtimeStatus::Reconnecting);
-                        // `RealtimeClient` no reconecta solo (ver doc comment
-                        // de `reconnect()`): el caller debe reabrir la
-                        // conexion explicitamente. El `Delay` de mas abajo ya
-                        // espacia estos intentos a `POLL_INTERVAL`, asi que no
-                        // hace falta backoff propio. Un fallo aqui suele ser
-                        // la misma URL invalida que fallaria en cada intento
-                        // (igual que el `connect()` inicial de mas arriba),
-                        // asi que se reporta como no disponible y se corta el
-                        // loop en vez de reintentar para siempre.
+                }
+
+                let decision = decide_poll_action(&state, subscribed);
+                subscribed = decision.subscribed;
+
+                match decision.action {
+                    PollAction::Wait => {}
+                    PollAction::Subscribe => match client.subscribe(&token, &bare_channel).await {
+                        Ok(()) => {
+                            subscribed = true;
+                            status.set(RealtimeStatus::Connected);
+                        }
+                        Err(err) => {
+                            status.set(RealtimeStatus::Unavailable(err.to_string()));
+                            match decide_subscribe_failure(&err) {
+                                SubscribeFailureAction::Retry => {}
+                                SubscribeFailureAction::LogoutAndStop => {
+                                    session.logout(storage.as_ref());
+                                    break;
+                                }
+                                SubscribeFailureAction::Stop => break,
+                            }
+                        }
+                    },
+                    // `RealtimeClient` no reconecta solo (ver doc comment de
+                    // `reconnect()`): el caller debe reabrir la conexion
+                    // explicitamente. El `Delay` de mas abajo ya espacia
+                    // estos intentos a `POLL_INTERVAL`, asi que no hace
+                    // falta backoff propio. Un fallo aqui suele ser la misma
+                    // URL invalida que fallaria en cada intento (igual que
+                    // el `connect()` inicial de mas arriba), asi que se
+                    // reporta como no disponible y se corta el loop en vez
+                    // de reintentar para siempre.
+                    PollAction::Reconnect => {
                         if let Err(err) = client.reconnect() {
                             status.set(RealtimeStatus::Unavailable(err));
                             break;
