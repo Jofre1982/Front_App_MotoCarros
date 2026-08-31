@@ -288,6 +288,29 @@ pub struct BroadcastAuthResponse {
     pub auth: String,
 }
 
+/// Payload del evento `ride.requested`, publicado sobre el canal privado
+/// `driver.{id}` (`id` = `User.id` del conductor, no el de `driver_profiles`)
+/// cuando hay un viaje nuevo cerca (issue #16). Sin envelope `data`: viaja tal
+/// cual lo publica `app/Events/Realtime/RideRequested.php` de
+/// `Back_App_MotoCarros` dentro del frame de Pusher, no como respuesta HTTP.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct NearbyRideRequest {
+    pub ride_id: u64,
+    pub origin: Coordinates,
+    pub destination: Coordinates,
+    pub currency: String,
+    pub estimated_fare: i64,
+}
+
+/// Payload del evento `ride.unavailable` sobre el mismo canal `driver.{id}`:
+/// otro conductor acepto `ride_id` primero, asi que ya no esta disponible
+/// (`app/Events/Realtime/RideNoLongerAvailable.php` de
+/// `Back_App_MotoCarros`, issue #16).
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub struct RideNoLongerAvailable {
+    pub ride_id: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,5 +625,32 @@ mod tests {
         let response: BroadcastAuthResponse = serde_json::from_str(json).unwrap();
 
         assert_eq!(response.auth, "motoya-local:8f3c1a2b4d5e6f70");
+    }
+
+    #[test]
+    fn deserializes_nearby_ride_request_without_a_data_envelope() {
+        let json = r#"{
+            "ride_id": 7,
+            "origin": {"latitude": 4.710989, "longitude": -74.072092},
+            "destination": {"latitude": 4.698, "longitude": -74.061},
+            "currency": "COP",
+            "estimated_fare": 8850
+        }"#;
+
+        let request: NearbyRideRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(request.ride_id, 7);
+        assert_eq!(request.currency, "COP");
+        assert_eq!(request.estimated_fare, 8850);
+        assert_eq!(request.origin.latitude, 4.710989);
+    }
+
+    #[test]
+    fn deserializes_ride_no_longer_available() {
+        let json = r#"{"ride_id": 7}"#;
+
+        let event: RideNoLongerAvailable = serde_json::from_str(json).unwrap();
+
+        assert_eq!(event.ride_id, 7);
     }
 }

@@ -49,6 +49,21 @@ impl WsTransport for EwebsockTransport {
     }
 }
 
+/// URL del servidor Reverb (p.ej. `wss://host/app/{key}`), inyectada por el
+/// binario de plataforma (`web`/`mobile`) via contexto de Dioxus, igual que
+/// `ApiClient` (ver `.claude/STANDARDS.md`). A diferencia de la URL base de
+/// la API, esta URL incluye la app key de Reverb, que es un secreto por
+/// entorno sin valor por defecto (`REVERB_APP_KEY` en el `.env.example` de
+/// `Back_App_MotoCarros`) — por eso no hay un fallback de desarrollo local
+/// hardcodeado como con `MOTOYA_API_BASE_URL`. `ws_url` es `None` cuando el
+/// entorno no configuro `MOTOYA_WS_URL`; las pantallas que dependan de
+/// tiempo real (issue #16 y siguientes) deben mostrar un estado explicito en
+/// vez de intentar conectar.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RealtimeConfig {
+    pub ws_url: Option<String>,
+}
+
 /// Estado de la conexion de WebSocket con Reverb.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionState {

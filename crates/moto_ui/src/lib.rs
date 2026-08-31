@@ -11,6 +11,7 @@ pub mod screens;
 
 pub use map::{MapMarker, MapView};
 pub use screens::login::LoginScreen;
+pub use screens::nearby_rides::NearbyRidesScreen;
 pub use screens::profile::ProfileScreen;
 pub use screens::register_driver::RegisterDriverScreen;
 pub use screens::register_passenger::RegisterPassengerScreen;
@@ -82,6 +83,7 @@ enum HomeSection {
     Profile,
     RideEstimate,
     Vehicle,
+    NearbyRides,
 }
 
 /// Pantalla principal tras iniciar sesion: perfil (issue #9), tarifa
@@ -89,10 +91,11 @@ enum HomeSection {
 /// seccion — cerrar sesion debe estar disponible desde el momento en que hay
 /// una sesion iniciada.
 ///
-/// La seccion de vehiculo (issues #11 y #12, `VehicleScreen`) solo se ofrece
+/// Las secciones de vehiculo (issues #11 y #12, `VehicleScreen`) y de
+/// solicitudes cercanas (issue #16, `NearbyRidesScreen`) solo se ofrecen
 /// cuando `session.user()` ya cargo (`GET /api/v1/me`, issue #9) y es una
-/// cuenta de conductor: un pasajero nunca ve el boton, y estructuralmente no
-/// puede llegar a esa pantalla desde esta navegacion.
+/// cuenta de conductor: un pasajero nunca ve esos botones, y
+/// estructuralmente no puede llegar a esas pantallas desde esta navegacion.
 #[component]
 fn Home() -> Element {
     let api_client = use_context::<ApiClient>();
@@ -148,6 +151,12 @@ fn Home() -> Element {
                         onclick: move |_| section.set(HomeSection::Vehicle),
                         "Mi vehiculo"
                     }
+                    button {
+                        r#type: "button",
+                        disabled: section() == HomeSection::NearbyRides,
+                        onclick: move |_| section.set(HomeSection::NearbyRides),
+                        "Solicitudes cercanas"
+                    }
                 }
             }
             match section() {
@@ -159,6 +168,9 @@ fn Home() -> Element {
                 },
                 HomeSection::Vehicle => rsx! {
                     VehicleScreen {}
+                },
+                HomeSection::NearbyRides => rsx! {
+                    NearbyRidesScreen {}
                 },
             }
             button {
