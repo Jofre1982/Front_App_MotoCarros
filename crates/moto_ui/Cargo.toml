@@ -5,6 +5,16 @@ edition.workspace = true
 
 [dependencies]
 dioxus = { workspace = true }
+# `futures-timer` da el intervalo de polling de `NearbyRidesScreen` (issue #16)
+# sin recurrir a `#[cfg(target_arch = "wasm32")]` disperso en el codigo: la
+# feature `wasm-bindgen` (que activa el temporizador del navegador via
+# `gloo-timers`) se activa solo para ese target aca, centralizado en el
+# manifiesto — en el resto de targets usa el temporizador nativo por
+# defecto de la crate.
+futures-timer = "3.0.4"
 moto_core = { path = "../moto_core" }
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures-timer = { version = "3.0.4", features = ["wasm-bindgen"] }

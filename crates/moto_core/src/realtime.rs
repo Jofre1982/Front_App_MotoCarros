@@ -49,6 +49,21 @@ impl WsTransport for EwebsockTransport {
     }
 }
 
+/// URL del servidor Reverb (p.ej. `wss://host/app/{key}`), inyectada por el
+/// binario de plataforma (`web`/`mobile`) via contexto de Dioxus, igual que
+/// `ApiClient` (ver `.claude/STANDARDS.md`). A diferencia de la URL base de
+/// la API, esta URL incluye la app key de Reverb, que es un secreto por
+/// entorno sin valor por defecto (`REVERB_APP_KEY` en el `.env.example` de
+/// `Back_App_MotoCarros`) — por eso no hay un fallback de desarrollo local
+/// hardcodeado como con `MOTOYA_API_BASE_URL`. `ws_url` es `None` cuando el
+/// entorno no configuro `MOTOYA_WS_URL`; las pantallas que dependan de
+/// tiempo real (issue #16 y siguientes) deben mostrar un estado explicito en
+/// vez de intentar conectar.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RealtimeConfig {
+    pub ws_url: Option<String>,
+}
+
 /// Estado de la conexion de WebSocket con Reverb.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionState {
@@ -97,6 +112,84 @@ impl std::fmt::Display for SubscribeError {
 }
 
 impl std::error::Error for SubscribeError {}
+
+/// Que hacer en la siguiente vuelta del loop de sondeo de un caller que
+/// consume `RealtimeClient::poll_events()` (p.ej. `NearbyRidesList`,
+/// `moto_ui`, issue #16), decidido puramente a partir del `ConnectionState`
+/// actual y de si ya hay una suscripcion vigente. `subscribed` es el nuevo
+/// valor que el caller debe guardar para la proxima vuelta: se resetea a
+/// `false` cada vez que se sale de `Connected`, porque una reconexion
+/// invalida cualquier suscripcion previa (el servidor no la recuerda tras
+/// un socket nuevo).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollDecision {
+    pub action: PollAction,
+    pub subscribed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollAction {
+    /// Seguir esperando: ya esta suscripto y conectado, o el handshake
+    /// todavia esta en curso.
+    Wait,
+    /// Llamar `RealtimeClient::subscribe(token, channel)`.
+    Subscribe,
+    /// Llamar `RealtimeClient::reconnect()` — el transporte no reconecta
+    /// solo (ver doc comment de `reconnect()`).
+    Reconnect,
+}
+
+pub fn decide_poll_action(state: &ConnectionState, subscribed: bool) -> PollDecision {
+    match state {
+        ConnectionState::Connected if subscribed => PollDecision {
+            action: PollAction::Wait,
+            subscribed: true,
+        },
+        ConnectionState::Connected => PollDecision {
+            action: PollAction::Subscribe,
+            subscribed: false,
+        },
+        ConnectionState::Connecting => PollDecision {
+            action: PollAction::Wait,
+            subscribed: false,
+        },
+        ConnectionState::Reconnecting { .. } => PollDecision {
+            action: PollAction::Reconnect,
+            subscribed: false,
+        },
+    }
+}
+
+/// Que hacer cuando `RealtimeClient::subscribe()` devuelve un error, decidido
+/// puramente a partir de la variante de `SubscribeError`.
+///
+/// `POST /api/v1/broadcasting/auth` nunca reintenta con refresh de token
+/// (ver doc comment de `ApiClient::authenticate_broadcast_channel`): un
+/// fallo de auth es deterministico y va a repetirse igual en cada vuelta
+/// del loop con el mismo token, asi que el caller debe cortarlo en vez de
+/// reintentar sin backoff cada vuelta. `Unauthorized` ademas implica que la
+/// sesion ya no es valida en absoluto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscribeFailureAction {
+    /// Fallo transitorio (el handshake todavia no llego): reintentar en la
+    /// siguiente vuelta del loop.
+    Retry,
+    /// La sesion ya no es valida: hacer logout y cortar el loop.
+    LogoutAndStop,
+    /// Fallo determinístico e irrecuperable que no es cuestion de sesion:
+    /// cortar el loop sin logout.
+    Stop,
+}
+
+pub fn decide_subscribe_failure(error: &SubscribeError) -> SubscribeFailureAction {
+    match error {
+        SubscribeError::NotConnected => SubscribeFailureAction::Retry,
+        SubscribeError::Auth(BroadcastAuthError::Unauthorized) => {
+            SubscribeFailureAction::LogoutAndStop
+        }
+        SubscribeError::Auth(_) => SubscribeFailureAction::Stop,
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct PusherFrame {
@@ -519,5 +612,68 @@ mod tests {
 
         assert_eq!(client.state(), ConnectionState::Connecting);
         assert_eq!(client.socket_id(), None);
+    }
+
+    #[test]
+    fn decide_poll_action_subscribes_when_connected_and_not_subscribed_yet() {
+        let decision = decide_poll_action(&ConnectionState::Connected, false);
+
+        assert_eq!(decision.action, PollAction::Subscribe);
+        assert!(!decision.subscribed);
+    }
+
+    #[test]
+    fn decide_poll_action_waits_when_connected_and_already_subscribed() {
+        let decision = decide_poll_action(&ConnectionState::Connected, true);
+
+        assert_eq!(decision.action, PollAction::Wait);
+        assert!(decision.subscribed);
+    }
+
+    #[test]
+    fn decide_poll_action_waits_while_connecting_and_clears_subscribed() {
+        let decision = decide_poll_action(&ConnectionState::Connecting, true);
+
+        assert_eq!(decision.action, PollAction::Wait);
+        assert!(!decision.subscribed);
+    }
+
+    #[test]
+    fn decide_poll_action_reconnects_while_reconnecting_and_clears_subscribed() {
+        let decision = decide_poll_action(&ConnectionState::Reconnecting { attempt: 3 }, true);
+
+        assert_eq!(decision.action, PollAction::Reconnect);
+        assert!(!decision.subscribed);
+    }
+
+    #[test]
+    fn decide_subscribe_failure_retries_when_not_connected_yet() {
+        let action = decide_subscribe_failure(&SubscribeError::NotConnected);
+
+        assert_eq!(action, SubscribeFailureAction::Retry);
+    }
+
+    #[test]
+    fn decide_subscribe_failure_logs_out_and_stops_when_unauthorized() {
+        let action =
+            decide_subscribe_failure(&SubscribeError::Auth(BroadcastAuthError::Unauthorized));
+
+        assert_eq!(action, SubscribeFailureAction::LogoutAndStop);
+    }
+
+    #[test]
+    fn decide_subscribe_failure_stops_without_logout_when_forbidden() {
+        let action = decide_subscribe_failure(&SubscribeError::Auth(BroadcastAuthError::Forbidden));
+
+        assert_eq!(action, SubscribeFailureAction::Stop);
+    }
+
+    #[test]
+    fn decide_subscribe_failure_stops_without_logout_on_network_error() {
+        let action = decide_subscribe_failure(&SubscribeError::Auth(BroadcastAuthError::Network(
+            "boom".to_string(),
+        )));
+
+        assert_eq!(action, SubscribeFailureAction::Stop);
     }
 }

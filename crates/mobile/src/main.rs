@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use moto_core::api::ApiClient;
+use moto_core::realtime::RealtimeConfig;
 use moto_core::storage::{InMemoryTokenStorage, TokenStorage};
 use moto_ui::App;
 
@@ -14,9 +15,19 @@ fn main() {
     let base_url = option_env!("MOTOYA_API_BASE_URL")
         .unwrap_or(DEFAULT_API_BASE_URL)
         .to_string();
+    // Sin fallback de desarrollo local a proposito: la URL incluye la app key
+    // de Reverb, un secreto por entorno sin valor por defecto (ver
+    // `RealtimeConfig`). `None` hasta que el entorno configure
+    // `MOTOYA_WS_URL`.
+    let ws_url = option_env!("MOTOYA_WS_URL").map(str::to_string);
 
     LaunchBuilder::new()
         .with_context_provider(move || Box::new(ApiClient::new(base_url.clone())))
+        .with_context_provider(move || {
+            Box::new(RealtimeConfig {
+                ws_url: ws_url.clone(),
+            })
+        })
         // TODO(issue de seguimiento): esto deberia usar el keychain de iOS /
         // el keystore de Android en vez de memoria. Todavia no hay puente
         // nativo (proyecto Xcode/Gradle) en este esqueleto para exponer esas
