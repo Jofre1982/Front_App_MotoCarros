@@ -12,9 +12,10 @@
 //! `ride.requested` (agrega una solicitud a la lista) y `ride.unavailable`
 //! (otro conductor la acepto primero, se quita de la lista). El transporte
 //! de tiempo real no reconecta ni resuscribe solo (ver
-//! `RealtimeClient`), asi que esta pantalla lo hace por su cuenta: sondea el
-//! estado de la conexion y vuelve a suscribirse cada vez que pasa a
-//! `Connected` sin una suscripcion vigente.
+//! `RealtimeClient`), asi que esta pantalla lo hace por su cuenta: llama
+//! `reconnect()` explicitamente cada vez que el estado pasa a
+//! `Reconnecting` y vuelve a suscribirse cada vez que pasa a `Connected`
+//! sin una suscripcion vigente.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -246,6 +247,19 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                     ConnectionState::Reconnecting { .. } => {
                         subscribed = false;
                         status.set(RealtimeStatus::Reconnecting);
+                        // `RealtimeClient` no reconecta solo (ver doc comment
+                        // de `reconnect()`): el caller debe reabrir la
+                        // conexion explicitamente. El `Delay` de mas abajo ya
+                        // espacia estos intentos a `POLL_INTERVAL`, asi que no
+                        // hace falta backoff propio. Un fallo aqui suele ser
+                        // la misma URL invalida que fallaria en cada intento
+                        // (igual que el `connect()` inicial de mas arriba),
+                        // asi que se reporta como no disponible y se corta el
+                        // loop en vez de reintentar para siempre.
+                        if let Err(err) = client.reconnect() {
+                            status.set(RealtimeStatus::Unavailable(err));
+                            break;
+                        }
                     }
                 }
 
