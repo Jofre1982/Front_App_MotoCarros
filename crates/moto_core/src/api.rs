@@ -8,7 +8,7 @@ use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload, BroadcastAuthResponse,
     Coordinates, DataEnvelope, LoginPayload, RegisterDriverPayload, RegisterPassengerPayload,
     RegisterVehiclePayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
-    RideRequestPayload, UpdateProfilePayload, User, Vehicle,
+    RideRequestPayload, UpdateProfilePayload, UpdateVehiclePayload, User, Vehicle,
 };
 
 #[cfg(test)]
@@ -416,6 +416,125 @@ impl RegisterVehicleError {
     }
 }
 
+/// Fallos posibles de `GET /api/v1/me/vehicle` (issue #12).
+///
+/// `NotFound` es la senal que usa la UI para decidir si mostrar el
+/// formulario de registro (issue #11) o el de edicion (issue #12): un
+/// conductor sin vehiculo todavia recibe 404, no una lista vacia.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GetVehicleError {
+    /// La cuenta no es de conductor (`VehiclePolicy::create` en el backend).
+    Forbidden,
+    /// El conductor todavia no registro ningun vehiculo.
+    NotFound,
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for GetVehicleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GetVehicleError::Forbidden => {
+                write!(f, "Esta cuenta no puede tener un vehiculo registrado.")
+            }
+            GetVehicleError::NotFound => write!(f, "No tienes un vehiculo registrado."),
+            GetVehicleError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            GetVehicleError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            GetVehicleError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GetVehicleError {}
+
+/// Fallos posibles de `PATCH /api/v1/me/vehicle` (issue #12).
+///
+/// `NoFields` se detecta en el cliente antes de mandar la request, igual que
+/// `UpdateProfileError::NoFields` (issue #10). `InvalidPlate`/`InvalidYear`
+/// validan el mismo formato basico que `register_vehicle` (issue #11) antes
+/// de mandar la request — el resto (unicidad de la placa, limite superior
+/// dinamico del anio, cuenta sin vehiculo todavia) sigue viajando desde el
+/// backend (`Validation`/`NotFound`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateVehicleError {
+    NoFields,
+    /// `plate` no cumple el formato que exige el backend
+    /// (`UpdateVehicleRequest`, regex `^[A-Z0-9-]{5,10}$`).
+    InvalidPlate,
+    /// `year` no es un numero de 4 digitos no anterior a 1970.
+    InvalidYear,
+    /// La cuenta no es de conductor (`VehiclePolicy::create` en el backend).
+    Forbidden,
+    /// El conductor todavia no registro ningun vehiculo (issue #11).
+    NotFound,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for UpdateVehicleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateVehicleError::NoFields => write!(f, "No hay ningun cambio para guardar."),
+            UpdateVehicleError::InvalidPlate => {
+                write!(
+                    f,
+                    "Ingresa una placa valida (5 a 10 caracteres, solo letras, numeros y guiones)."
+                )
+            }
+            UpdateVehicleError::InvalidYear => {
+                write!(f, "Ingresa un anio valido (4 digitos, no anterior a 1970).")
+            }
+            UpdateVehicleError::Forbidden => {
+                write!(f, "Esta cuenta no puede actualizar un vehiculo.")
+            }
+            UpdateVehicleError::NotFound => write!(f, "No tienes un vehiculo registrado."),
+            UpdateVehicleError::Validation(body) => write!(f, "{}", body.message),
+            UpdateVehicleError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            UpdateVehicleError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            UpdateVehicleError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for UpdateVehicleError {}
+
+impl UpdateVehicleError {
+    /// Mensaje de validacion especifico para `field`, igual que
+    /// `RegisterVehicleError::field_message`.
+    pub fn field_message(&self, field: &str) -> Option<String> {
+        match self {
+            UpdateVehicleError::Validation(body) => body
+                .errors
+                .as_ref()
+                .and_then(|errors| errors.get(field))
+                .and_then(|messages| messages.first())
+                .cloned(),
+            _ => None,
+        }
+    }
+}
+
 /// Fallos posibles de `POST /api/v1/rides/estimate` (issue #14, consumido
 /// desde la app en issue #13).
 ///
@@ -614,6 +733,21 @@ enum PostVehicleOutcome<T> {
     Success(T),
     Unauthorized,
     Forbidden,
+    Validation(ApiErrorBody),
+}
+
+enum GetVehicleOutcome<T> {
+    Success(T),
+    Unauthorized,
+    Forbidden,
+    NotFound,
+}
+
+enum PatchVehicleOutcome<T> {
+    Success(T),
+    Unauthorized,
+    Forbidden,
+    NotFound,
     Validation(ApiErrorBody),
 }
 
@@ -1186,6 +1320,200 @@ impl ApiClient {
                 Ok(PostVehicleOutcome::Validation(body))
             }
             other => Err(RegisterVehicleError::Unexpected(other)),
+        }
+    }
+
+    /// `GET /api/v1/me/vehicle` — issue #12. Un `NotFound` (404) significa
+    /// que el conductor todavia no registro ningun vehiculo — la UI lo usa
+    /// para decidir entre mostrar el registro (issue #11) o la edicion
+    /// (issue #12). Reintenta una vez con refresh de token ante un 401,
+    /// igual que `me`; un 403 (cuenta no conductora) o un 404 nunca se
+    /// reintentan.
+    pub async fn get_vehicle(
+        &self,
+        token: &AuthToken,
+    ) -> Result<AuthenticatedFetch<Vehicle>, GetVehicleError> {
+        match self.get_vehicle_with_token(&token.access_token).await? {
+            GetVehicleOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            GetVehicleOutcome::Forbidden => return Err(GetVehicleError::Forbidden),
+            GetVehicleOutcome::NotFound => return Err(GetVehicleError::NotFound),
+            GetVehicleOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| GetVehicleError::SessionExpired)?;
+
+        match self.get_vehicle_with_token(&renewed.access_token).await? {
+            GetVehicleOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            GetVehicleOutcome::Forbidden => Err(GetVehicleError::Forbidden),
+            GetVehicleOutcome::NotFound => Err(GetVehicleError::NotFound),
+            GetVehicleOutcome::Unauthorized => Err(GetVehicleError::SessionExpired),
+        }
+    }
+
+    async fn get_vehicle_with_token(
+        &self,
+        access_token: &str,
+    ) -> Result<GetVehicleOutcome<Vehicle>, GetVehicleError> {
+        let url = format!("{}/api/v1/me/vehicle", self.base_url);
+
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|err| GetVehicleError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<Vehicle> = response
+                .json()
+                .await
+                .map_err(|err| GetVehicleError::Network(err.to_string()))?;
+            return Ok(GetVehicleOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(GetVehicleOutcome::Unauthorized),
+            403 => Ok(GetVehicleOutcome::Forbidden),
+            404 => Ok(GetVehicleOutcome::NotFound),
+            other => Err(GetVehicleError::Unexpected(other)),
+        }
+    }
+
+    /// `PATCH /api/v1/me/vehicle` — issue #12. Mismo criterio que
+    /// `update_profile` (issue #10): PATCH parcial, reintenta una vez con
+    /// refresh de token ante un 401. A diferencia de `update_profile`,
+    /// valida `plate`/`year` con el mismo formato basico que
+    /// `register_vehicle` antes de mandar la request — el resto (unicidad de
+    /// la placa, limite superior del anio, cuenta sin vehiculo todavia)
+    /// sigue viajando desde el backend (403/404/422); esos nunca se
+    /// reintentan.
+    pub async fn update_vehicle(
+        &self,
+        token: &AuthToken,
+        plate: Option<&str>,
+        model: Option<&str>,
+        year: Option<&str>,
+    ) -> Result<AuthenticatedFetch<Vehicle>, UpdateVehicleError> {
+        if plate.is_none() && model.is_none() && year.is_none() {
+            return Err(UpdateVehicleError::NoFields);
+        }
+
+        let plate = match plate {
+            Some(value) => {
+                let value = value.trim().to_uppercase();
+                if !is_valid_plate(&value) {
+                    return Err(UpdateVehicleError::InvalidPlate);
+                }
+                Some(value)
+            }
+            None => None,
+        };
+        let model = model.map(|value| value.trim().to_string());
+        let year = match year {
+            Some(value) => {
+                let Ok(year_number) = value.trim().parse::<u16>() else {
+                    return Err(UpdateVehicleError::InvalidYear);
+                };
+                if year_number < 1970 {
+                    return Err(UpdateVehicleError::InvalidYear);
+                }
+                Some(year_number)
+            }
+            None => None,
+        };
+
+        let payload = UpdateVehiclePayload { plate, model, year };
+
+        match self
+            .patch_vehicle_with_token(&token.access_token, &payload)
+            .await?
+        {
+            PatchVehicleOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            PatchVehicleOutcome::Forbidden => return Err(UpdateVehicleError::Forbidden),
+            PatchVehicleOutcome::NotFound => return Err(UpdateVehicleError::NotFound),
+            PatchVehicleOutcome::Validation(body) => {
+                return Err(UpdateVehicleError::Validation(body));
+            }
+            PatchVehicleOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| UpdateVehicleError::SessionExpired)?;
+
+        match self
+            .patch_vehicle_with_token(&renewed.access_token, &payload)
+            .await?
+        {
+            PatchVehicleOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            PatchVehicleOutcome::Forbidden => Err(UpdateVehicleError::Forbidden),
+            PatchVehicleOutcome::NotFound => Err(UpdateVehicleError::NotFound),
+            PatchVehicleOutcome::Validation(body) => Err(UpdateVehicleError::Validation(body)),
+            PatchVehicleOutcome::Unauthorized => Err(UpdateVehicleError::SessionExpired),
+        }
+    }
+
+    async fn patch_vehicle_with_token(
+        &self,
+        access_token: &str,
+        body: &UpdateVehiclePayload,
+    ) -> Result<PatchVehicleOutcome<Vehicle>, UpdateVehicleError> {
+        let url = format!("{}/api/v1/me/vehicle", self.base_url);
+
+        let response = self
+            .http
+            .patch(url)
+            .bearer_auth(access_token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| UpdateVehicleError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<Vehicle> = response
+                .json()
+                .await
+                .map_err(|err| UpdateVehicleError::Network(err.to_string()))?;
+            return Ok(PatchVehicleOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(PatchVehicleOutcome::Unauthorized),
+            403 => Ok(PatchVehicleOutcome::Forbidden),
+            404 => Ok(PatchVehicleOutcome::NotFound),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| UpdateVehicleError::Network(err.to_string()))?;
+                Ok(PatchVehicleOutcome::Validation(body))
+            }
+            other => Err(UpdateVehicleError::Unexpected(other)),
         }
     }
 
@@ -2834,6 +3162,392 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, RegisterVehicleError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn get_vehicle_returns_the_registered_vehicle() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/vehicle"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "plate": "ABC12D",
+                    "model": "Bajaj Boxer CT 100",
+                    "year": 2022,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.get_vehicle(&sample_token()).await.unwrap();
+
+        assert_eq!(fetch.data.plate, "ABC12D");
+        assert_eq!(fetch.data.year, 2022);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn get_vehicle_returns_not_found_when_the_driver_has_no_vehicle() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/vehicle"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No tienes un vehiculo registrado.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.get_vehicle(&sample_token()).await.unwrap_err();
+
+        assert_eq!(error, GetVehicleError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn get_vehicle_returns_forbidden_on_403_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/vehicle"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.get_vehicle(&sample_token()).await.unwrap_err();
+
+        assert_eq!(error, GetVehicleError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn get_vehicle_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/vehicle"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/vehicle"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "plate": "ABC12D",
+                    "model": "Bajaj Boxer CT 100",
+                    "year": 2022,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.get_vehicle(&sample_token()).await.unwrap();
+
+        assert_eq!(fetch.data.plate, "ABC12D");
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn get_vehicle_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/vehicle"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.get_vehicle(&sample_token()).await.unwrap_err();
+
+        assert_eq!(error, GetVehicleError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn get_vehicle_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client.get_vehicle(&sample_token()).await.unwrap_err();
+
+        assert!(matches!(error, GetVehicleError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn update_vehicle_rejects_an_empty_patch_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        let error = client
+            .update_vehicle(&sample_token(), None, None, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, UpdateVehicleError::NoFields);
+    }
+
+    #[tokio::test]
+    async fn update_vehicle_rejects_invalid_plate_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        let error = client
+            .update_vehicle(&sample_token(), Some("AB"), None, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, UpdateVehicleError::InvalidPlate);
+    }
+
+    #[tokio::test]
+    async fn update_vehicle_rejects_invalid_year_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .update_vehicle(&sample_token(), None, None, Some("not-a-year"))
+                .await,
+            Err(UpdateVehicleError::InvalidYear)
+        );
+        assert_eq!(
+            client
+                .update_vehicle(&sample_token(), None, None, Some("1969"))
+                .await,
+            Err(UpdateVehicleError::InvalidYear)
+        );
+    }
+
+    #[tokio::test]
+    async fn update_vehicle_sends_only_the_present_fields_and_returns_the_updated_vehicle() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/vehicle"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .and(body_json(serde_json::json!({
+                "plate": "ABC12D",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "plate": "ABC12D",
+                    "model": "Bajaj Boxer CT 100",
+                    "year": 2022,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .update_vehicle(&sample_token(), Some(" abc12d "), None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.plate, "ABC12D");
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn update_vehicle_returns_not_found_when_the_driver_has_no_vehicle() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/vehicle"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No tienes un vehiculo registrado; registralo antes de actualizarlo.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .update_vehicle(&sample_token(), Some("ABC12D"), None, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, UpdateVehicleError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn update_vehicle_returns_validation_error_on_422_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/vehicle"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "The plate has already been taken.",
+                "errors": {
+                    "plate": ["The plate has already been taken."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .update_vehicle(&sample_token(), Some("ABC12D"), None, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            UpdateVehicleError::Validation(ApiErrorBody {
+                message: "The plate has already been taken.".to_string(),
+                errors: Some(HashMap::from([(
+                    "plate".to_string(),
+                    vec!["The plate has already been taken.".to_string()]
+                )])),
+            })
+        );
+        assert_eq!(
+            error.field_message("plate"),
+            Some("The plate has already been taken.".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn update_vehicle_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/vehicle"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/vehicle"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "plate": "ABC12D",
+                    "model": "Bajaj Boxer CT 100",
+                    "year": 2022,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .update_vehicle(&sample_token(), Some("ABC12D"), None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.plate, "ABC12D");
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn update_vehicle_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/vehicle"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .update_vehicle(&sample_token(), Some("ABC12D"), None, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, UpdateVehicleError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn update_vehicle_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .update_vehicle(&sample_token(), Some("ABC12D"), None, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, UpdateVehicleError::Network(_)));
     }
 
     fn sample_origin() -> Coordinates {
