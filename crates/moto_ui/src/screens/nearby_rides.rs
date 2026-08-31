@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use futures_timer::Delay;
-use moto_core::api::{ApiClient, AuthenticatedRequestError, GetVehicleError};
+use moto_core::api::{ApiClient, AuthenticatedRequestError, BroadcastAuthError, GetVehicleError};
 use moto_core::models::{NearbyRideRequest, RideNoLongerAvailable};
-use moto_core::realtime::{ConnectionState, RealtimeClient, RealtimeConfig};
+use moto_core::realtime::{ConnectionState, RealtimeClient, RealtimeConfig, SubscribeError};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
@@ -153,7 +153,8 @@ struct NearbyRidesListProps {
 #[component]
 fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
     let api_client = use_context::<ApiClient>();
-    let session = use_context::<SessionState>();
+    let mut session = use_context::<SessionState>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
     let realtime_config = use_context::<RealtimeConfig>();
 
     let mut status = use_signal(|| RealtimeStatus::Connecting);
@@ -184,6 +185,7 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
         };
 
         let api_client = api_client.clone();
+        let storage = storage.clone();
         let bare_channel = format!("driver.{}", props.driver_id);
         let full_channel = format!("private-{bare_channel}");
 
@@ -234,7 +236,25 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                                 subscribed = true;
                                 status.set(RealtimeStatus::Connected);
                             }
-                            Err(err) => {
+                            // `POST /api/v1/broadcasting/auth` nunca reintenta
+                            // con refresh de token (ver doc comment de
+                            // `broadcast_auth` en `moto_core::api`): un fallo
+                            // de auth aqui es determinístico y va a repetirse
+                            // en cada vuelta del loop con el mismo token, asi
+                            // que se corta en vez de reintentar sin backoff
+                            // cada `POLL_INTERVAL`. `Unauthorized` ademas
+                            // implica que la sesion ya no es valida en
+                            // absoluto, igual que `SessionExpired` mas arriba.
+                            Err(SubscribeError::Auth(auth_err)) => {
+                                let unauthorized =
+                                    matches!(auth_err, BroadcastAuthError::Unauthorized);
+                                status.set(RealtimeStatus::Unavailable(auth_err.to_string()));
+                                if unauthorized {
+                                    session.logout(storage.as_ref());
+                                }
+                                break;
+                            }
+                            Err(err @ SubscribeError::NotConnected) => {
                                 status.set(RealtimeStatus::Unavailable(err.to_string()));
                             }
                         }
