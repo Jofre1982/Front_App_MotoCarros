@@ -6,10 +6,10 @@
 
 use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload, BroadcastAuthResponse,
-    Coordinates, DataEnvelope, LoginPayload, RateDriverPayload, RegisterDriverPayload,
-    RegisterPassengerPayload, RegisterVehiclePayload, Ride, RideCancellation, RideEstimate,
-    RideEstimateRequestPayload, RideRating, RideRequestPayload, UpdateProfilePayload,
-    UpdateVehiclePayload, User, Vehicle,
+    Coordinates, DataEnvelope, DriverEarningsSummary, LoginPayload, RateDriverPayload,
+    RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload, Ride,
+    RideCancellation, RideEstimate, RideEstimateRequestPayload, RideRating, RideRequestPayload,
+    UpdateProfilePayload, UpdateVehiclePayload, User, Vehicle,
 };
 
 #[cfg(test)]
@@ -977,6 +977,48 @@ impl std::fmt::Display for BroadcastAuthError {
 
 impl std::error::Error for BroadcastAuthError {}
 
+/// Fallos posibles de `GET /api/v1/me/earnings` (historia #29).
+///
+/// `Validation` cubre tanto `from`/`to` ausentes o con formato invalido como
+/// `to` anterior a `from` (`ShowDriverEarningsRequest::rules()` en el
+/// backend): el backend responde el mismo 422 para los tres casos, asi que
+/// el cliente no los distingue — el mensaje que trae el body ya es explicito
+/// sobre cual de los tres paso.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GetDriverEarningsError {
+    /// La cuenta no es de conductor (`RidePolicy::viewEarnings` en el backend).
+    Forbidden,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for GetDriverEarningsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GetDriverEarningsError::Forbidden => {
+                write!(f, "Esta cuenta no puede consultar ganancias.")
+            }
+            GetDriverEarningsError::Validation(body) => write!(f, "{}", body.message),
+            GetDriverEarningsError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            GetDriverEarningsError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            GetDriverEarningsError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GetDriverEarningsError {}
+
 enum GetOutcome<T> {
     Success(T),
     Unauthorized,
@@ -1077,6 +1119,13 @@ enum GetRideOutcome<T> {
     Unauthorized,
     Forbidden,
     NotFound,
+}
+
+enum GetEarningsOutcome<T> {
+    Success(T),
+    Unauthorized,
+    Forbidden,
+    Validation(ApiErrorBody),
 }
 
 impl ApiClient {
@@ -1444,6 +1493,96 @@ impl ApiClient {
     ) -> Result<AuthenticatedFetch<Vec<Ride>>, AuthenticatedRequestError> {
         self.get_authenticated::<Vec<Ride>>("/api/v1/me/rides", token)
             .await
+    }
+
+    /// `GET /api/v1/me/earnings` — historia #29. `from`/`to` viajan tal cual
+    /// los eligio el usuario (formato `YYYY-MM-DD` de un `<input type="date">`,
+    /// ver `DriverEarningsScreen`): el backend es quien valida formato y
+    /// orden (`ShowDriverEarningsRequest`), asi que el cliente no duplica esa
+    /// regla. Reintenta una vez con refresh de token ante un 401, igual que
+    /// `get_vehicle`; un 403 (cuenta no conductora) o un 422 (validacion)
+    /// nunca se reintentan.
+    pub async fn driver_earnings(
+        &self,
+        token: &AuthToken,
+        from: &str,
+        to: &str,
+    ) -> Result<AuthenticatedFetch<DriverEarningsSummary>, GetDriverEarningsError> {
+        match self
+            .get_earnings_with_token(&token.access_token, from, to)
+            .await?
+        {
+            GetEarningsOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            GetEarningsOutcome::Forbidden => return Err(GetDriverEarningsError::Forbidden),
+            GetEarningsOutcome::Validation(body) => {
+                return Err(GetDriverEarningsError::Validation(body));
+            }
+            GetEarningsOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| GetDriverEarningsError::SessionExpired)?;
+
+        match self
+            .get_earnings_with_token(&renewed.access_token, from, to)
+            .await?
+        {
+            GetEarningsOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            GetEarningsOutcome::Forbidden => Err(GetDriverEarningsError::Forbidden),
+            GetEarningsOutcome::Validation(body) => Err(GetDriverEarningsError::Validation(body)),
+            GetEarningsOutcome::Unauthorized => Err(GetDriverEarningsError::SessionExpired),
+        }
+    }
+
+    async fn get_earnings_with_token(
+        &self,
+        access_token: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<GetEarningsOutcome<DriverEarningsSummary>, GetDriverEarningsError> {
+        let url = format!("{}/api/v1/me/earnings", self.base_url);
+
+        let response = self
+            .http
+            .get(url)
+            .query(&[("from", from), ("to", to)])
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|err| GetDriverEarningsError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<DriverEarningsSummary> = response
+                .json()
+                .await
+                .map_err(|err| GetDriverEarningsError::Network(err.to_string()))?;
+            return Ok(GetEarningsOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(GetEarningsOutcome::Unauthorized),
+            403 => Ok(GetEarningsOutcome::Forbidden),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| GetDriverEarningsError::Network(err.to_string()))?;
+                Ok(GetEarningsOutcome::Validation(body))
+            }
+            other => Err(GetDriverEarningsError::Unexpected(other)),
+        }
     }
 
     /// `PATCH /api/v1/me` — issue #10. PATCH parcial: solo los campos
@@ -3632,6 +3771,213 @@ mod tests {
         let error = client.ride_history(&sample_token()).await.unwrap_err();
 
         assert_eq!(error, AuthenticatedRequestError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn driver_earnings_returns_the_summary_for_the_requested_range() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/earnings"))
+            .and(wiremock::matchers::query_param("from", "2026-07-01"))
+            .and(wiremock::matchers::query_param("to", "2026-07-31"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "from": "2026-07-01",
+                    "to": "2026-07-31",
+                    "currency": "COP",
+                    "total_earned": 17500,
+                    "completed_rides": 2,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .driver_earnings(&sample_token(), "2026-07-01", "2026-07-31")
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.total_earned, 17500);
+        assert_eq!(fetch.data.completed_rides, 2);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn driver_earnings_returns_zero_when_the_account_has_no_completed_rides_in_range() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/earnings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "from": "2026-07-01",
+                    "to": "2026-07-31",
+                    "currency": "COP",
+                    "total_earned": 0,
+                    "completed_rides": 0,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .driver_earnings(&sample_token(), "2026-07-01", "2026-07-31")
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.total_earned, 0);
+        assert_eq!(fetch.data.completed_rides, 0);
+    }
+
+    #[tokio::test]
+    async fn driver_earnings_returns_forbidden_on_403_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/earnings"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .driver_earnings(&sample_token(), "2026-07-01", "2026-07-31")
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, GetDriverEarningsError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn driver_earnings_returns_validation_when_from_is_after_to() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/earnings"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "The to field must be a date after or equal to from.",
+                "errors": { "to": ["The to field must be a date after or equal to from."] },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .driver_earnings(&sample_token(), "2026-07-31", "2026-07-01")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, GetDriverEarningsError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn driver_earnings_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/earnings"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/earnings"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "from": "2026-07-01",
+                    "to": "2026-07-31",
+                    "currency": "COP",
+                    "total_earned": 17500,
+                    "completed_rides": 2,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .driver_earnings(&sample_token(), "2026-07-01", "2026-07-31")
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.total_earned, 17500);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn driver_earnings_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/earnings"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .driver_earnings(&sample_token(), "2026-07-01", "2026-07-31")
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, GetDriverEarningsError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn driver_earnings_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .driver_earnings(&sample_token(), "2026-07-01", "2026-07-31")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, GetDriverEarningsError::Network(_)));
     }
 
     #[tokio::test]

@@ -310,6 +310,21 @@ pub struct BroadcastAuthResponse {
     pub auth: String,
 }
 
+/// `openapi.yaml#/components/schemas/DriverEarningsSummary` — respuesta de
+/// `GET /api/v1/me/earnings` (historia #29). `from`/`to` vuelven tal como los
+/// normalizo el backend (`toDateString()`, formato `YYYY-MM-DD`), no
+/// necesariamente iguales en formato al string que mando el cliente en la
+/// query string. `total_earned` es un entero en la unidad minima de
+/// `currency`, mismo criterio que `RideEstimate::estimated_fare`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DriverEarningsSummary {
+    pub from: String,
+    pub to: String,
+    pub currency: String,
+    pub total_earned: i64,
+    pub completed_rides: u32,
+}
+
 /// Payload del evento `ride.requested`, publicado sobre el canal privado
 /// `driver.{id}` (`id` = `User.id` del conductor, no el de `driver_profiles`)
 /// cuando hay un viaje nuevo cerca (issue #16). Sin envelope `data`: viaja tal
@@ -700,6 +715,27 @@ mod tests {
                 status: PaymentStatus::Paid,
             })
         );
+    }
+
+    #[test]
+    fn deserializes_driver_earnings_summary_envelope() {
+        let json = r#"{
+            "data": {
+                "from": "2026-07-01",
+                "to": "2026-07-31",
+                "currency": "COP",
+                "total_earned": 17500,
+                "completed_rides": 2
+            }
+        }"#;
+
+        let envelope: DataEnvelope<DriverEarningsSummary> = serde_json::from_str(json).unwrap();
+
+        assert_eq!(envelope.data.from, "2026-07-01");
+        assert_eq!(envelope.data.to, "2026-07-31");
+        assert_eq!(envelope.data.currency, "COP");
+        assert_eq!(envelope.data.total_earned, 17500);
+        assert_eq!(envelope.data.completed_rides, 2);
     }
 
     #[test]

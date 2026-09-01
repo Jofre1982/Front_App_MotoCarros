@@ -10,6 +10,7 @@ pub mod map;
 pub mod screens;
 
 pub use map::{MapMarker, MapView};
+pub use screens::driver_earnings::DriverEarningsScreen;
 pub use screens::login::LoginScreen;
 pub use screens::nearby_rides::NearbyRidesScreen;
 pub use screens::profile::ProfileScreen;
@@ -86,6 +87,7 @@ enum HomeSection {
     Vehicle,
     NearbyRides,
     RideHistory,
+    DriverEarnings,
 }
 
 /// Pantalla principal tras iniciar sesion: perfil (issue #9), tarifa
@@ -93,14 +95,16 @@ enum HomeSection {
 /// seccion — cerrar sesion debe estar disponible desde el momento en que hay
 /// una sesion iniciada.
 ///
-/// Las secciones de vehiculo (issues #11 y #12, `VehicleScreen`) y de
-/// solicitudes cercanas (issue #16, `NearbyRidesScreen`) solo se ofrecen
-/// cuando `session.user()` ya cargo (`GET /api/v1/me`, issue #9) y es una
-/// cuenta de conductor: un pasajero nunca ve esos botones, y
-/// estructuralmente no puede llegar a esas pantallas desde esta navegacion.
-/// El historial de viajes (issue #28, `RideHistoryScreen`) es al reves:
-/// solo se ofrece a pasajero — el equivalente para conductor es la historia
-/// #29, todavia sin implementar.
+/// Las secciones de vehiculo (issues #11 y #12, `VehicleScreen`), de
+/// solicitudes cercanas (issue #16, `NearbyRidesScreen`) y de historial y
+/// ganancias (historia #29, `DriverEarningsScreen`) solo se ofrecen cuando
+/// `session.user()` ya cargo (`GET /api/v1/me`, issue #9) y es una cuenta de
+/// conductor: un pasajero nunca ve esos botones, y estructuralmente no puede
+/// llegar a esas pantallas desde esta navegacion. El historial de viajes
+/// simple (issue #28, `RideHistoryScreen`) es al reves: solo se ofrece a
+/// pasajero — el equivalente para conductor no reutiliza esa pantalla porque
+/// tambien necesita el resumen de ganancias, asi que vive en
+/// `DriverEarningsScreen`.
 #[component]
 fn Home() -> Element {
     let api_client = use_context::<ApiClient>();
@@ -162,6 +166,12 @@ fn Home() -> Element {
                         onclick: move |_| section.set(HomeSection::NearbyRides),
                         "Solicitudes cercanas"
                     }
+                    button {
+                        r#type: "button",
+                        disabled: section() == HomeSection::DriverEarnings,
+                        onclick: move |_| section.set(HomeSection::DriverEarnings),
+                        "Historial y ganancias"
+                    }
                 } else {
                     button {
                         r#type: "button",
@@ -186,6 +196,9 @@ fn Home() -> Element {
                 },
                 HomeSection::RideHistory => rsx! {
                     RideHistoryScreen {}
+                },
+                HomeSection::DriverEarnings => rsx! {
+                    DriverEarningsScreen {}
                 },
             }
             button {
