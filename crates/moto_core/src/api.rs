@@ -621,8 +621,8 @@ impl std::error::Error for RequestRideError {}
 /// Fallos posibles de `POST /api/v1/rides/{ride}/cancel` (issue #15).
 ///
 /// El mismo endpoint sirve tanto para que el pasajero cancele (historias
-/// #16/#22) como para que el conductor asignado libere el viaje (historia
-/// #23) — el cliente no distingue esos dos casos, los resuelve el backend
+/// #15/#21) como para que el conductor asignado libere el viaje (historia
+/// #22) — el cliente no distingue esos dos casos, los resuelve el backend
 /// segun quien llama (ver `openapi.yaml`). `Validation` cubre que el viaje ya
 /// no este en un estado cancelable (`in_progress`, `completed` o ya
 /// `cancelled`).
