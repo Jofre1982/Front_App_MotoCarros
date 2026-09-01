@@ -665,6 +665,58 @@ impl std::fmt::Display for CancelRideError {
 
 impl std::error::Error for CancelRideError {}
 
+/// Fallos posibles de `POST /api/v1/rides/{ride}/accept` (issue #17).
+///
+/// `Conflict` (409) es la carrera documentada en `openapi.yaml`: dos
+/// conductores intentan aceptar el mismo viaje casi al mismo tiempo, y el que
+/// llega segundo recibe este error en vez de uno generico — el caller lo usa
+/// para sacar la solicitud de la lista con un mensaje explicito en vez de un
+/// error de servidor. `Validation` cubre en cambio que el conductor
+/// autenticado ya tenga un viaje propio activo (`accepted` o `in_progress`):
+/// tiene permiso para aceptar, pero no puede mientras no libere el que ya
+/// tiene.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AcceptRideError {
+    /// La cuenta autenticada no es de un conductor.
+    Forbidden,
+    /// No existe ningun viaje con ese id.
+    NotFound,
+    /// El viaje ya no esta disponible: otro conductor lo acepto primero, o
+    /// cambio de estado por otro motivo.
+    Conflict,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for AcceptRideError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AcceptRideError::Forbidden => {
+                write!(f, "Esta cuenta no puede aceptar viajes.")
+            }
+            AcceptRideError::NotFound => write!(f, "El viaje ya no existe."),
+            AcceptRideError::Conflict => write!(f, "Este viaje ya no esta disponible."),
+            AcceptRideError::Validation(body) => write!(f, "{}", body.message),
+            AcceptRideError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            AcceptRideError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            AcceptRideError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AcceptRideError {}
+
 /// Fallos posibles de `POST /api/v1/broadcasting/auth` (issue #5).
 ///
 /// A diferencia del resto de las requests autenticadas, esta nunca reintenta
@@ -756,6 +808,15 @@ enum CancelRideOutcome {
     Unauthorized,
     Forbidden,
     NotFound,
+    Validation(ApiErrorBody),
+}
+
+enum AcceptRideOutcome {
+    Success(Ride),
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Conflict,
     Validation(ApiErrorBody),
 }
 
@@ -1778,6 +1839,96 @@ impl ApiClient {
                 Ok(CancelRideOutcome::Validation(body))
             }
             other => Err(CancelRideError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/rides/{ride}/accept` — issue #17. No manda body: como
+    /// `cancel_ride`, todo lo que decide esta operacion es el id del viaje y
+    /// quien la pide. Reintenta una vez con refresh de token ante un 401,
+    /// igual que `cancel_ride`; un 403 (cuenta no conductora), 404 (no
+    /// existe), 409 (otro conductor lo acepto primero) o 422 (el conductor ya
+    /// tiene un viaje propio activo) nunca se reintentan.
+    pub async fn accept_ride(
+        &self,
+        token: &AuthToken,
+        ride_id: u64,
+    ) -> Result<AuthenticatedFetch<Ride>, AcceptRideError> {
+        match self
+            .post_accept_with_token(ride_id, &token.access_token)
+            .await?
+        {
+            AcceptRideOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            AcceptRideOutcome::Forbidden => return Err(AcceptRideError::Forbidden),
+            AcceptRideOutcome::NotFound => return Err(AcceptRideError::NotFound),
+            AcceptRideOutcome::Conflict => return Err(AcceptRideError::Conflict),
+            AcceptRideOutcome::Validation(body) => return Err(AcceptRideError::Validation(body)),
+            AcceptRideOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| AcceptRideError::SessionExpired)?;
+
+        match self
+            .post_accept_with_token(ride_id, &renewed.access_token)
+            .await?
+        {
+            AcceptRideOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            AcceptRideOutcome::Forbidden => Err(AcceptRideError::Forbidden),
+            AcceptRideOutcome::NotFound => Err(AcceptRideError::NotFound),
+            AcceptRideOutcome::Conflict => Err(AcceptRideError::Conflict),
+            AcceptRideOutcome::Validation(body) => Err(AcceptRideError::Validation(body)),
+            AcceptRideOutcome::Unauthorized => Err(AcceptRideError::SessionExpired),
+        }
+    }
+
+    async fn post_accept_with_token(
+        &self,
+        ride_id: u64,
+        access_token: &str,
+    ) -> Result<AcceptRideOutcome, AcceptRideError> {
+        let url = format!("{}/api/v1/rides/{}/accept", self.base_url, ride_id);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|err| AcceptRideError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<Ride> = response
+                .json()
+                .await
+                .map_err(|err| AcceptRideError::Network(err.to_string()))?;
+            return Ok(AcceptRideOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(AcceptRideOutcome::Unauthorized),
+            403 => Ok(AcceptRideOutcome::Forbidden),
+            404 => Ok(AcceptRideOutcome::NotFound),
+            409 => Ok(AcceptRideOutcome::Conflict),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| AcceptRideError::Network(err.to_string()))?;
+                Ok(AcceptRideOutcome::Validation(body))
+            }
+            other => Err(AcceptRideError::Unexpected(other)),
         }
     }
 
@@ -4118,6 +4269,218 @@ mod tests {
         let error = client.cancel_ride(&sample_token(), 1).await.unwrap_err();
 
         assert!(matches!(error, CancelRideError::Network(_)));
+    }
+
+    fn sample_accepted_ride_json() -> serde_json::Value {
+        let mut ride = sample_ride_json();
+        ride["status"] = serde_json::json!("accepted");
+        ride["driver"] = serde_json::json!({"id": 42, "name": "Carlos Perez"});
+        ride
+    }
+
+    #[tokio::test]
+    async fn accept_ride_returns_the_accepted_ride_with_the_assigned_driver() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/accept"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_accepted_ride_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.accept_ride(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.data.status, crate::models::RideStatus::Accepted);
+        assert_eq!(
+            fetch.data.driver,
+            Some(crate::models::RideDriver {
+                id: 42,
+                name: "Carlos Perez".to_string(),
+            })
+        );
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn accept_ride_returns_forbidden_on_403_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/accept"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.accept_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, AcceptRideError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn accept_ride_returns_not_found_on_404_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/999/accept"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No query results for model [App\\Models\\Ride] 999.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.accept_ride(&sample_token(), 999).await.unwrap_err();
+
+        assert_eq!(error, AcceptRideError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn accept_ride_returns_conflict_on_409_when_another_driver_accepted_first() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/accept"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "message": "Este viaje ya no está disponible.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.accept_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, AcceptRideError::Conflict);
+    }
+
+    #[tokio::test]
+    async fn accept_ride_returns_validation_error_on_422_when_the_driver_has_an_active_ride() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/accept"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "Ya tienes un viaje activo; terminalo o cancelalo antes de aceptar otro.",
+                "errors": {
+                    "ride": ["Ya tienes un viaje activo; terminalo o cancelalo antes de aceptar otro."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.accept_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(
+            error,
+            AcceptRideError::Validation(ApiErrorBody {
+                message: "Ya tienes un viaje activo; terminalo o cancelalo antes de aceptar otro."
+                    .to_string(),
+                errors: Some(HashMap::from([(
+                    "ride".to_string(),
+                    vec![
+                        "Ya tienes un viaje activo; terminalo o cancelalo antes de aceptar otro."
+                            .to_string()
+                    ]
+                )])),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_ride_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/accept"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/accept"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_accepted_ride_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.accept_ride(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn accept_ride_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/accept"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.accept_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, AcceptRideError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn accept_ride_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client.accept_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert!(matches!(error, AcceptRideError::Network(_)));
     }
 
     #[tokio::test]

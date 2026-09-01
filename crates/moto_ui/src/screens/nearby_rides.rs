@@ -1,4 +1,4 @@
-//! Pantalla de solicitudes de viaje cercanas (conductor) — issue #16.
+//! Pantalla de solicitudes de viaje cercanas (conductor) — issues #16 y #17.
 //!
 //! Al entrar, primero valida que el conductor ya tenga un vehiculo
 //! registrado con `GET /api/v1/me/vehicle` — mismo criterio y mismo 404
@@ -18,14 +18,25 @@
 //! `moto_core::realtime` (`decide_poll_action`, `decide_subscribe_failure`)
 //! y `moto_core::models` (`apply_nearby_ride_event`): logica pura y
 //! testeada ahi, no en este componente Dioxus.
+//!
+//! Cada solicitud de la lista ofrece un boton "Aceptar" que llama a
+//! `POST /api/v1/rides/{ride}/accept` (`ApiClient::accept_ride`, issue #17).
+//! Al aceptar con exito, la pantalla deja de mostrar la lista y muestra el
+//! viaje aceptado (con conductor asignado) — aceptar un segundo viaje no es
+//! posible mientras el conductor tenga uno activo (`AcceptRideError::Validation`
+//! del backend), asi que no tiene sentido seguir ofreciendo la lista despues.
+//! Si el backend responde 409 (`AcceptRideError::Conflict`, otro conductor lo
+//! acepto primero — carrera documentada en `openapi.yaml`), la solicitud se
+//! saca de la lista con un mensaje explicito en vez de un error generico, tal
+//! como pide el criterio de aceptacion del issue.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
 use futures_timer::Delay;
-use moto_core::api::{ApiClient, AuthenticatedRequestError, GetVehicleError};
-use moto_core::models::{NearbyRideRequest, apply_nearby_ride_event};
+use moto_core::api::{AcceptRideError, ApiClient, AuthenticatedRequestError, GetVehicleError};
+use moto_core::models::{NearbyRideRequest, Ride, apply_nearby_ride_event};
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
     decide_poll_action, decide_subscribe_failure,
@@ -164,6 +175,11 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
 
     let mut status = use_signal(|| RealtimeStatus::Connecting);
     let mut requests = use_signal(Vec::<NearbyRideRequest>::new);
+    // Viaje que este conductor acabo de aceptar (issue #17). Una vez
+    // presente, la pantalla deja de mostrar la lista: el backend no deja
+    // aceptar un segundo viaje mientras el conductor tenga uno activo, asi
+    // que seguir ofreciendo la lista no serviria de nada.
+    let mut accepted_ride = use_signal(|| None::<Ride>);
     // El loop de sondeo corre para siempre mientras la pantalla este
     // montada (Dioxus cancela la tarea al desmontar el componente, ver
     // `Home` en `moto_ui/src/lib.rs`) — esta bandera solo evita levantar un
@@ -275,35 +291,127 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
     rsx! {
         div { class: "nearby-rides-screen",
             h2 { "Solicitudes cercanas" }
-            match status() {
-                RealtimeStatus::Connecting => rsx! {
-                    p { "Conectando..." }
-                },
-                RealtimeStatus::Reconnecting => rsx! {
-                    p { "Reconectando..." }
-                },
-                RealtimeStatus::Unavailable(message) => rsx! {
-                    p { class: "nearby-rides-error", role: "alert", "{message}" }
-                },
-                RealtimeStatus::Connected => rsx! {
-                    if requests().is_empty() {
-                        p { class: "nearby-rides-empty", "No hay solicitudes disponibles por el momento." }
-                    } else {
-                        ul { class: "nearby-rides-list",
-                            for request in requests() {
-                                li { key: "{request.ride_id}", class: "nearby-ride-request",
-                                    p {
-                                        "Origen: {request.origin.latitude}, {request.origin.longitude}"
+            if let Some(ride) = accepted_ride() {
+                div { class: "nearby-ride-accepted",
+                    p { "Aceptaste el viaje." }
+                    p { "Tarifa estimada: {ride.currency} {ride.estimated_fare}" }
+                }
+            } else {
+                match status() {
+                    RealtimeStatus::Connecting => rsx! {
+                        p { "Conectando..." }
+                    },
+                    RealtimeStatus::Reconnecting => rsx! {
+                        p { "Reconectando..." }
+                    },
+                    RealtimeStatus::Unavailable(message) => rsx! {
+                        p { class: "nearby-rides-error", role: "alert", "{message}" }
+                    },
+                    RealtimeStatus::Connected => rsx! {
+                        if requests().is_empty() {
+                            p { class: "nearby-rides-empty", "No hay solicitudes disponibles por el momento." }
+                        } else {
+                            ul { class: "nearby-rides-list",
+                                for request in requests() {
+                                    NearbyRideRow {
+                                        key: "{request.ride_id}",
+                                        request: request.clone(),
+                                        on_accepted: move |ride: Ride| {
+                                            let ride_id = ride.id;
+                                            requests.with_mut(|list| list.retain(|r| r.ride_id != ride_id));
+                                            accepted_ride.set(Some(ride));
+                                        },
+                                        on_unavailable: move |ride_id: u64| {
+                                            requests.with_mut(|list| list.retain(|r| r.ride_id != ride_id));
+                                        },
                                     }
-                                    p {
-                                        "Destino: {request.destination.latitude}, {request.destination.longitude}"
-                                    }
-                                    p { "Tarifa estimada: {request.currency} {request.estimated_fare}" }
                                 }
                             }
                         }
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct NearbyRideRowProps {
+    request: NearbyRideRequest,
+    on_accepted: EventHandler<Ride>,
+    on_unavailable: EventHandler<u64>,
+}
+
+/// Una solicitud de la lista con su boton "Aceptar" (issue #17). Componente
+/// aparte (en vez de logica inline en el `for` de `NearbyRidesList`) para que
+/// cada fila tenga su propio estado de carga/error sin afectar a las demas —
+/// dos solicitudes pueden estar aceptandose (o fallando) al mismo tiempo.
+#[component]
+fn NearbyRideRow(props: NearbyRideRowProps) -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+
+    let mut is_accepting = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let ride_id = props.request.ride_id;
+    let on_accepted = props.on_accepted;
+    let on_unavailable = props.on_unavailable;
+
+    let on_accept_click = move |_| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+
+        spawn(async move {
+            is_accepting.set(true);
+            error.set(None);
+
+            match api_client.accept_ride(&token, ride_id).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
                     }
-                },
+                    on_accepted.call(fetch.data);
+                }
+                Err(AcceptRideError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                Err(AcceptRideError::Conflict) => {
+                    on_unavailable.call(ride_id);
+                }
+                Err(err) => {
+                    error.set(Some(err.to_string()));
+                }
+            }
+
+            is_accepting.set(false);
+        });
+    };
+
+    rsx! {
+        li { class: "nearby-ride-request",
+            p { "Origen: {props.request.origin.latitude}, {props.request.origin.longitude}" }
+            p {
+                "Destino: {props.request.destination.latitude}, {props.request.destination.longitude}"
+            }
+            p { "Tarifa estimada: {props.request.currency} {props.request.estimated_fare}" }
+            button {
+                r#type: "button",
+                class: "nearby-ride-accept-button",
+                disabled: is_accepting(),
+                onclick: on_accept_click,
+                if is_accepting() {
+                    "Aceptando..."
+                } else {
+                    "Aceptar"
+                }
+            }
+            if let Some(message) = error() {
+                p { class: "nearby-ride-accept-error", role: "alert", "{message}" }
             }
         }
     }
