@@ -762,6 +762,49 @@ impl std::fmt::Display for StartRideError {
 
 impl std::error::Error for StartRideError {}
 
+/// Fallos posibles de `POST /api/v1/rides/{ride}/complete` (issue #23).
+///
+/// Mismo reparto que `StartRideError`: `Forbidden` cubre tanto a un
+/// conductor distinto del asignado como al pasajero del viaje. `Validation`
+/// cubre que el viaje ya no este `in_progress` (todavia no arranco, ya se
+/// completo o se cancelo).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompleteRideError {
+    Forbidden,
+    /// No existe ningun viaje con ese id.
+    NotFound,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for CompleteRideError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompleteRideError::Forbidden => {
+                write!(f, "Este viaje no te pertenece.")
+            }
+            CompleteRideError::NotFound => write!(f, "El viaje ya no existe."),
+            CompleteRideError::Validation(body) => write!(f, "{}", body.message),
+            CompleteRideError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            CompleteRideError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            CompleteRideError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CompleteRideError {}
+
 /// Fallos posibles de `POST /api/v1/rides/{ride}/location` (issue #19).
 ///
 /// Mismo reparto que `StartRideError`: `Forbidden` cubre tanto a un
@@ -948,6 +991,14 @@ enum AcceptRideOutcome {
 }
 
 enum StartRideOutcome {
+    Success(Ride),
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Validation(ApiErrorBody),
+}
+
+enum CompleteRideOutcome {
     Success(Ride),
     Unauthorized,
     Forbidden,
@@ -2166,6 +2217,96 @@ impl ApiClient {
                 Ok(StartRideOutcome::Validation(body))
             }
             other => Err(StartRideError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/rides/{ride}/complete` — issue #23. No manda body: como
+    /// `start_ride`, todo lo que decide esta operacion es el id del viaje y
+    /// quien la pide. Reintenta una vez con refresh de token ante un 401,
+    /// igual que `start_ride`; un 403 (viaje ajeno), 404 (no existe) o 422
+    /// (el viaje ya no esta `in_progress`) nunca se reintentan. La respuesta
+    /// exitosa trae el viaje con `completed_at`, `final_fare` y `payment` ya
+    /// resueltos por el backend (el cobro se dispara en la misma operacion).
+    pub async fn complete_ride(
+        &self,
+        token: &AuthToken,
+        ride_id: u64,
+    ) -> Result<AuthenticatedFetch<Ride>, CompleteRideError> {
+        match self
+            .post_complete_with_token(ride_id, &token.access_token)
+            .await?
+        {
+            CompleteRideOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            CompleteRideOutcome::Forbidden => return Err(CompleteRideError::Forbidden),
+            CompleteRideOutcome::NotFound => return Err(CompleteRideError::NotFound),
+            CompleteRideOutcome::Validation(body) => {
+                return Err(CompleteRideError::Validation(body));
+            }
+            CompleteRideOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| CompleteRideError::SessionExpired)?;
+
+        match self
+            .post_complete_with_token(ride_id, &renewed.access_token)
+            .await?
+        {
+            CompleteRideOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            CompleteRideOutcome::Forbidden => Err(CompleteRideError::Forbidden),
+            CompleteRideOutcome::NotFound => Err(CompleteRideError::NotFound),
+            CompleteRideOutcome::Validation(body) => Err(CompleteRideError::Validation(body)),
+            CompleteRideOutcome::Unauthorized => Err(CompleteRideError::SessionExpired),
+        }
+    }
+
+    async fn post_complete_with_token(
+        &self,
+        ride_id: u64,
+        access_token: &str,
+    ) -> Result<CompleteRideOutcome, CompleteRideError> {
+        let url = format!("{}/api/v1/rides/{}/complete", self.base_url, ride_id);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|err| CompleteRideError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<Ride> = response
+                .json()
+                .await
+                .map_err(|err| CompleteRideError::Network(err.to_string()))?;
+            return Ok(CompleteRideOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(CompleteRideOutcome::Unauthorized),
+            403 => Ok(CompleteRideOutcome::Forbidden),
+            404 => Ok(CompleteRideOutcome::NotFound),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| CompleteRideError::Network(err.to_string()))?;
+                Ok(CompleteRideOutcome::Validation(body))
+            }
+            other => Err(CompleteRideError::Unexpected(other)),
         }
     }
 
@@ -5076,6 +5217,203 @@ mod tests {
         let error = client.start_ride(&sample_token(), 1).await.unwrap_err();
 
         assert!(matches!(error, StartRideError::Network(_)));
+    }
+
+    fn sample_completed_ride_json() -> serde_json::Value {
+        let mut ride = sample_started_ride_json();
+        ride["status"] = serde_json::json!("completed");
+        ride["completed_at"] = serde_json::json!("2026-07-31T14:19:05+00:00");
+        ride["final_fare"] = serde_json::json!(9100);
+        ride["payment"] = serde_json::json!({ "status": "paid" });
+        ride
+    }
+
+    #[tokio::test]
+    async fn complete_ride_returns_the_completed_ride_with_final_fare_and_payment() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/complete"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_completed_ride_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.complete_ride(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.data.status, crate::models::RideStatus::Completed);
+        assert_eq!(
+            fetch.data.completed_at,
+            Some("2026-07-31T14:19:05+00:00".to_string())
+        );
+        assert_eq!(fetch.data.final_fare, Some(9100));
+        assert_eq!(
+            fetch.data.payment.map(|payment| payment.status),
+            Some(crate::models::PaymentStatus::Paid)
+        );
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn complete_ride_returns_forbidden_on_403_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/complete"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.complete_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, CompleteRideError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn complete_ride_returns_not_found_on_404_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/999/complete"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No query results for model [App\\Models\\Ride] 999.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .complete_ride(&sample_token(), 999)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, CompleteRideError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn complete_ride_returns_validation_error_on_422_when_the_ride_is_not_in_progress() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/complete"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "Solo se puede completar un viaje que este en curso.",
+                "errors": {
+                    "ride": ["Solo se puede completar un viaje que este en curso."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.complete_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(
+            error,
+            CompleteRideError::Validation(ApiErrorBody {
+                message: "Solo se puede completar un viaje que este en curso.".to_string(),
+                errors: Some(HashMap::from([(
+                    "ride".to_string(),
+                    vec!["Solo se puede completar un viaje que este en curso.".to_string()]
+                )])),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_ride_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/complete"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/complete"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_completed_ride_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.complete_ride(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn complete_ride_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/complete"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.complete_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, CompleteRideError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn complete_ride_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client.complete_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert!(matches!(error, CompleteRideError::Network(_)));
     }
 
     fn sample_location() -> Coordinates {

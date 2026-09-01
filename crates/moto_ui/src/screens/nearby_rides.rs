@@ -62,6 +62,18 @@
 //! (de red, del backend, o del propio proveedor) se trata como transitorio y
 //! se reintenta en el siguiente ciclo, sin dejar el panel en un estado de
 //! error permanente.
+//!
+//! Tambien mientras el viaje esta `in_progress`, se ofrece "Completar
+//! viaje", que llama a `POST /api/v1/rides/{ride}/complete`
+//! (`ApiClient::complete_ride`, issue #23) — la condicion de estado hace
+//! que el boton no este disponible si el viaje no esta en curso (criterio
+//! de aceptacion del issue). El backend dispara el cobro (historia #25 del
+//! backend) en la misma operacion, asi que la respuesta ya trae
+//! `completed_at`, `final_fare` y `payment` resueltos; la pantalla
+//! reemplaza el viaje en pantalla por esa version y muestra un resumen
+//! (tarifa final y estado del pago) en vez de navegar a una pantalla de
+//! pago propia — la historia "Pagar el viaje al finalizar" (#24) sigue
+//! bloqueada del lado del backend, no hay adonde navegar todavia.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,8 +81,8 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use futures_timer::Delay;
 use moto_core::api::{
-    AcceptRideError, ApiClient, AuthenticatedRequestError, CancelRideError, GetVehicleError,
-    ShareRideLocationError, StartRideError,
+    AcceptRideError, ApiClient, AuthenticatedRequestError, CancelRideError, CompleteRideError,
+    GetVehicleError, ShareRideLocationError, StartRideError,
 };
 use moto_core::location::{LocationError, LocationProvider};
 use moto_core::models::{NearbyRideRequest, Ride, RideStatus, apply_nearby_ride_event};
@@ -355,6 +367,31 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                         }
                     } else if ride.status == RideStatus::InProgress {
                         ShareLocationPanel { ride_id: ride.id }
+                        CompleteRideButton {
+                            ride_id: ride.id,
+                            on_completed: move |completed: Ride| {
+                                accepted_ride.set(Some(completed));
+                            },
+                        }
+                    } else if ride.status == RideStatus::Completed {
+                        div { class: "nearby-ride-completed",
+                            p { "Viaje completado." }
+                            if let Some(final_fare) = ride.final_fare {
+                                p { "Tarifa final: {ride.currency} {final_fare}" }
+                            }
+                            if let Some(payment) = &ride.payment {
+                                p {
+                                    "Pago: "
+                                    {
+                                        match payment.status {
+                                            moto_core::models::PaymentStatus::Paid => "pagado",
+                                            moto_core::models::PaymentStatus::Pending => "pendiente",
+                                            moto_core::models::PaymentStatus::Failed => "fallido",
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             } else {
@@ -544,6 +581,80 @@ fn StartRideButton(props: StartRideButtonProps) -> Element {
             }
             if let Some(message) = error() {
                 p { class: "nearby-ride-start-error", role: "alert", "{message}" }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct CompleteRideButtonProps {
+    ride_id: u64,
+    on_completed: EventHandler<Ride>,
+}
+
+/// Boton "Completar viaje" del viaje en curso (issue #23). Componente
+/// aparte, igual que `StartRideButton`, para que su estado de carga/error no
+/// dependa del resto de la pantalla. Al tener exito, la pantalla reemplaza
+/// el viaje en pantalla por la version devuelta por el backend (ahora
+/// `completed`, con `completed_at`, `final_fare` y `payment` ya resueltos —
+/// el cobro se dispara en la misma operacion, ver comentario de modulo).
+#[component]
+fn CompleteRideButton(props: CompleteRideButtonProps) -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+
+    let mut is_completing = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let ride_id = props.ride_id;
+    let on_completed = props.on_completed;
+
+    let on_complete_click = move |_| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+
+        spawn(async move {
+            is_completing.set(true);
+            error.set(None);
+
+            match api_client.complete_ride(&token, ride_id).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    on_completed.call(fetch.data);
+                }
+                Err(CompleteRideError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                Err(err) => {
+                    error.set(Some(err.to_string()));
+                }
+            }
+
+            is_completing.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "nearby-ride-complete",
+            button {
+                r#type: "button",
+                class: "nearby-ride-complete-button",
+                disabled: is_completing(),
+                onclick: on_complete_click,
+                if is_completing() {
+                    "Completando..."
+                } else {
+                    "Completar viaje"
+                }
+            }
+            if let Some(message) = error() {
+                p { class: "nearby-ride-complete-error", role: "alert", "{message}" }
             }
         }
     }
