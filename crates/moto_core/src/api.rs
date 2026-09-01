@@ -6,9 +6,10 @@
 
 use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload, BroadcastAuthResponse,
-    Coordinates, DataEnvelope, LoginPayload, RegisterDriverPayload, RegisterPassengerPayload,
-    RegisterVehiclePayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
-    RideRequestPayload, UpdateProfilePayload, UpdateVehiclePayload, User, Vehicle,
+    Coordinates, DataEnvelope, LoginPayload, RateDriverPayload, RegisterDriverPayload,
+    RegisterPassengerPayload, RegisterVehiclePayload, Ride, RideCancellation, RideEstimate,
+    RideEstimateRequestPayload, RideRating, RideRequestPayload, UpdateProfilePayload,
+    UpdateVehiclePayload, User, Vehicle,
 };
 
 #[cfg(test)]
@@ -805,6 +806,55 @@ impl std::fmt::Display for CompleteRideError {
 
 impl std::error::Error for CompleteRideError {}
 
+/// Fallos posibles de `POST /api/v1/rides/{ride}/rate-driver` (historia #26).
+///
+/// Mismo reparto que `CompleteRideError`: `Forbidden` cubre tanto al
+/// conductor asignado como a otro pasajero — solo el pasajero dueno del
+/// viaje puede calificar (`RidePolicy::rateDriver` en el backend).
+/// `Validation` cubre tanto que el viaje todavia no este `completed` como
+/// que el pasajero ya lo haya calificado antes: el backend responde el mismo
+/// 422 para ambos casos a proposito (ver `openapi.yaml`), asi que el cliente
+/// no los distingue — el mensaje que trae el body ya es explicito sobre cual
+/// de los dos paso. `InvalidScore` se detecta en el cliente antes de mandar
+/// la request (el backend tambien lo valida, pero no tiene sentido viajar
+/// hasta el para un chequeo tan basico).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RateDriverError {
+    InvalidScore,
+    Forbidden,
+    /// No existe ningun viaje con ese id.
+    NotFound,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for RateDriverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RateDriverError::InvalidScore => write!(f, "La puntuacion debe estar entre 1 y 5."),
+            RateDriverError::Forbidden => write!(f, "Este viaje no te pertenece."),
+            RateDriverError::NotFound => write!(f, "El viaje ya no existe."),
+            RateDriverError::Validation(body) => write!(f, "{}", body.message),
+            RateDriverError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            RateDriverError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            RateDriverError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RateDriverError {}
+
 /// Fallos posibles de `POST /api/v1/rides/{ride}/location` (issue #19).
 ///
 /// Mismo reparto que `StartRideError`: `Forbidden` cubre tanto a un
@@ -1000,6 +1050,14 @@ enum StartRideOutcome {
 
 enum CompleteRideOutcome {
     Success(Ride),
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Validation(ApiErrorBody),
+}
+
+enum RateDriverOutcome {
+    Success(RideRating),
     Unauthorized,
     Forbidden,
     NotFound,
@@ -2307,6 +2365,111 @@ impl ApiClient {
                 Ok(CompleteRideOutcome::Validation(body))
             }
             other => Err(CompleteRideError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/rides/{ride}/rate-driver` — historia #26. Solo el
+    /// pasajero dueno del viaje puede calificar (ver comentario de
+    /// `RateDriverError`). `comment` se manda ausente cuando esta vacio tras
+    /// recortar espacios, igual que `RegisterVehiclePayload` normaliza sus
+    /// campos antes de armar el body. Reintenta una vez con refresh de token
+    /// ante un 401, igual que `complete_ride`; un 403 (viaje ajeno), 404 (no
+    /// existe) o 422 (viaje no completado, o ya calificado) nunca se
+    /// reintentan.
+    pub async fn rate_driver(
+        &self,
+        token: &AuthToken,
+        ride_id: u64,
+        score: u8,
+        comment: Option<&str>,
+    ) -> Result<AuthenticatedFetch<RideRating>, RateDriverError> {
+        if !(1..=5).contains(&score) {
+            return Err(RateDriverError::InvalidScore);
+        }
+
+        let payload = RateDriverPayload {
+            score,
+            comment: comment
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        };
+
+        match self
+            .post_rate_driver_with_token(ride_id, &token.access_token, &payload)
+            .await?
+        {
+            RateDriverOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            RateDriverOutcome::Forbidden => return Err(RateDriverError::Forbidden),
+            RateDriverOutcome::NotFound => return Err(RateDriverError::NotFound),
+            RateDriverOutcome::Validation(body) => return Err(RateDriverError::Validation(body)),
+            RateDriverOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| RateDriverError::SessionExpired)?;
+
+        match self
+            .post_rate_driver_with_token(ride_id, &renewed.access_token, &payload)
+            .await?
+        {
+            RateDriverOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            RateDriverOutcome::Forbidden => Err(RateDriverError::Forbidden),
+            RateDriverOutcome::NotFound => Err(RateDriverError::NotFound),
+            RateDriverOutcome::Validation(body) => Err(RateDriverError::Validation(body)),
+            RateDriverOutcome::Unauthorized => Err(RateDriverError::SessionExpired),
+        }
+    }
+
+    async fn post_rate_driver_with_token(
+        &self,
+        ride_id: u64,
+        access_token: &str,
+        body: &RateDriverPayload,
+    ) -> Result<RateDriverOutcome, RateDriverError> {
+        let url = format!("{}/api/v1/rides/{}/rate-driver", self.base_url, ride_id);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| RateDriverError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<RideRating> = response
+                .json()
+                .await
+                .map_err(|err| RateDriverError::Network(err.to_string()))?;
+            return Ok(RateDriverOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(RateDriverOutcome::Unauthorized),
+            403 => Ok(RateDriverOutcome::Forbidden),
+            404 => Ok(RateDriverOutcome::NotFound),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| RateDriverError::Network(err.to_string()))?;
+                Ok(RateDriverOutcome::Validation(body))
+            }
+            other => Err(RateDriverError::Unexpected(other)),
         }
     }
 
@@ -5414,6 +5577,268 @@ mod tests {
         let error = client.complete_ride(&sample_token(), 1).await.unwrap_err();
 
         assert!(matches!(error, CompleteRideError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn rate_driver_rejects_a_score_outside_1_to_5_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .rate_driver(&sample_token(), 1, 0, None)
+                .await
+                .unwrap_err(),
+            RateDriverError::InvalidScore
+        );
+        assert_eq!(
+            client
+                .rate_driver(&sample_token(), 1, 6, None)
+                .await
+                .unwrap_err(),
+            RateDriverError::InvalidScore
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_driver_sends_the_score_and_trimmed_comment_and_returns_the_rating() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/rate-driver"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .and(body_json(serde_json::json!({
+                "score": 5,
+                "comment": "Muy puntual y buen trato.",
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "ride_id": 1,
+                    "score": 5,
+                    "comment": "Muy puntual y buen trato.",
+                    "rated_at": "2026-07-31T14:20:05+00:00",
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .rate_driver(&sample_token(), 1, 5, Some("  Muy puntual y buen trato.  "))
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.ride_id, 1);
+        assert_eq!(fetch.data.score, 5);
+        assert_eq!(
+            fetch.data.comment,
+            Some("Muy puntual y buen trato.".to_string())
+        );
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn rate_driver_omits_the_comment_when_blank() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/rate-driver"))
+            .and(body_json(serde_json::json!({ "score": 4 })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "ride_id": 1,
+                    "score": 4,
+                    "comment": null,
+                    "rated_at": "2026-07-31T14:20:05+00:00",
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .rate_driver(&sample_token(), 1, 4, Some("   "))
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.comment, None);
+    }
+
+    #[tokio::test]
+    async fn rate_driver_returns_forbidden_on_403_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/rate-driver"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .rate_driver(&sample_token(), 1, 5, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, RateDriverError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn rate_driver_returns_not_found_on_404_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/999/rate-driver"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No query results for model [App\\Models\\Ride] 999.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .rate_driver(&sample_token(), 999, 5, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, RateDriverError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn rate_driver_returns_validation_error_on_422_when_already_rated() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/rate-driver"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "Ya existe una calificacion del conductor para este viaje.",
+                "errors": {
+                    "ride": ["Ya existe una calificacion del conductor para este viaje."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .rate_driver(&sample_token(), 1, 5, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            RateDriverError::Validation(ApiErrorBody {
+                message: "Ya existe una calificacion del conductor para este viaje.".to_string(),
+                errors: Some(HashMap::from([(
+                    "ride".to_string(),
+                    vec!["Ya existe una calificacion del conductor para este viaje.".to_string()]
+                )])),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_driver_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/rate-driver"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/rate-driver"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "ride_id": 1,
+                    "score": 5,
+                    "comment": null,
+                    "rated_at": "2026-07-31T14:20:05+00:00",
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .rate_driver(&sample_token(), 1, 5, None)
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.ride_id, 1);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn rate_driver_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/rate-driver"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .rate_driver(&sample_token(), 1, 5, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, RateDriverError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn rate_driver_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .rate_driver(&sample_token(), 1, 5, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RateDriverError::Network(_)));
     }
 
     fn sample_location() -> Coordinates {

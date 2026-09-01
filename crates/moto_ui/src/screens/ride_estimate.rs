@@ -46,10 +46,10 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use futures_timer::Delay;
 use moto_core::api::{
-    ApiClient, CancelRideError, EstimateRideError, GetRideError, RequestRideError,
+    ApiClient, CancelRideError, EstimateRideError, GetRideError, RateDriverError, RequestRideError,
 };
 use moto_core::models::{
-    Coordinates, Ride, RideCancellation, RideEstimate, RideStatus, RideTracking,
+    Coordinates, Ride, RideCancellation, RideEstimate, RideRating, RideStatus, RideTracking,
     apply_ride_tracking_event,
 };
 use moto_core::realtime::{
@@ -362,6 +362,8 @@ pub fn RideEstimateScreen() -> Element {
                             requested_ride.set(Some(updated));
                         },
                     }
+                } else if ride.status == RideStatus::Completed {
+                    RateDriverPanel { ride_id: ride.id }
                 }
             }
         };
@@ -657,6 +659,144 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
             }
             div { class: "ride-tracking-map", style: "height: 320px;",
                 MapView { center_lat, center_lng, markers }
+            }
+        }
+    }
+}
+
+/// Estado visible de `RateDriverPanel` (historia #26).
+#[derive(Debug, Clone, PartialEq)]
+enum RatingState {
+    /// Todavia no califico, o el ultimo intento fallo por algo recuperable
+    /// (red, sesion vencida): el formulario sigue disponible.
+    Pending,
+    Rated(RideRating),
+    /// El backend respondio 422. Como este panel solo se muestra con el
+    /// viaje ya `completed`, la unica causa posible es que el pasajero ya lo
+    /// habia calificado antes (criterio de aceptacion #2 de la historia
+    /// #26) — el backend no devuelve la calificacion existente en este
+    /// error, asi que no hay nada mas que mostrar que el hecho de que ya
+    /// existe.
+    AlreadyRated,
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct RateDriverPanelProps {
+    ride_id: u64,
+}
+
+/// Formulario para calificar al conductor de un viaje `completed` (historia
+/// #26). Componente aparte, igual que `CompleteRideButton` en
+/// `nearby_rides.rs`, para que su estado de carga/error no dependa del resto
+/// de la pantalla.
+#[component]
+fn RateDriverPanel(props: RateDriverPanelProps) -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+
+    let mut score = use_signal(|| 5u8);
+    let mut comment = use_signal(String::new);
+    let mut is_submitting = use_signal(|| false);
+    let mut error = use_signal(|| None::<RateDriverError>);
+    let mut state = use_signal(|| RatingState::Pending);
+
+    let ride_id = props.ride_id;
+
+    let on_submit = move |event: FormEvent| {
+        event.prevent_default();
+
+        let Some(token) = session.token() else {
+            return;
+        };
+        let score_value = score();
+        let comment_value = comment();
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+
+        spawn(async move {
+            is_submitting.set(true);
+            error.set(None);
+
+            let comment_arg = Some(comment_value.as_str()).filter(|value| !value.trim().is_empty());
+
+            match api_client
+                .rate_driver(&token, ride_id, score_value, comment_arg)
+                .await
+            {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    state.set(RatingState::Rated(fetch.data));
+                }
+                Err(RateDriverError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                Err(RateDriverError::Validation(_)) => {
+                    state.set(RatingState::AlreadyRated);
+                }
+                Err(err) => {
+                    error.set(Some(err));
+                }
+            }
+
+            is_submitting.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "rate-driver-panel",
+            match state() {
+                RatingState::Rated(rating) => rsx! {
+                    p { class: "rate-driver-success",
+                        "Calificaste a tu conductor con {rating.score} de 5."
+                    }
+                },
+                RatingState::AlreadyRated => rsx! {
+                    p { class: "rate-driver-already-rated",
+                        "Ya calificaste al conductor de este viaje."
+                    }
+                },
+                RatingState::Pending => rsx! {
+                    form { class: "rate-driver-form", onsubmit: on_submit,
+                        label { r#for: "rate-driver-score", "Puntuacion" }
+                        select {
+                            id: "rate-driver-score",
+                            disabled: is_submitting(),
+                            value: "{score()}",
+                            onchange: move |event| {
+                                if let Ok(value) = event.value().parse::<u8>() {
+                                    score.set(value);
+                                }
+                            },
+                            for value in 1..=5u8 {
+                                option { value: "{value}", "{value}" }
+                            }
+                        }
+                        label { r#for: "rate-driver-comment", "Comentario (opcional)" }
+                        textarea {
+                            id: "rate-driver-comment",
+                            maxlength: "1000",
+                            disabled: is_submitting(),
+                            value: "{comment()}",
+                            oninput: move |event| comment.set(event.value()),
+                        }
+                        button {
+                            r#type: "submit",
+                            class: "rate-driver-submit-button",
+                            disabled: is_submitting(),
+                            if is_submitting() {
+                                "Enviando..."
+                            } else {
+                                "Calificar conductor"
+                            }
+                        }
+                        if let Some(message) = error() {
+                            p { class: "rate-driver-error", role: "alert", "{message}" }
+                        }
+                    }
+                },
             }
         }
     }
