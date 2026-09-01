@@ -2,9 +2,14 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use moto_core::api::ApiClient;
+use moto_core::location::LocationProvider;
 use moto_core::realtime::RealtimeConfig;
 use moto_core::storage::{InMemoryTokenStorage, TokenStorage};
 use moto_ui::App;
+
+mod location;
+
+use location::NativeLocationProvider;
 
 /// Fallback de desarrollo local. La URL real del backend se inyecta en build
 /// time via la variable de entorno `MOTOYA_API_BASE_URL` (nunca hardcodeada
@@ -37,6 +42,12 @@ fn main() {
         // tampoco guarda el token en texto plano en disco.
         .with_context_provider(|| {
             Box::new(Arc::new(InMemoryTokenStorage::new()) as Arc<dyn TokenStorage>)
+        })
+        // TODO(issue de seguimiento): reemplazar por un `LocationProvider`
+        // que use la API de ubicacion nativa cuando exista el puente
+        // Xcode/Gradle — ver `crates/mobile/src/location.rs`.
+        .with_context_provider(|| {
+            Box::new(Arc::new(NativeLocationProvider::new()) as Arc<dyn LocationProvider>)
         })
         .launch(App);
 }

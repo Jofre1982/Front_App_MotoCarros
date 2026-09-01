@@ -762,6 +762,50 @@ impl std::fmt::Display for StartRideError {
 
 impl std::error::Error for StartRideError {}
 
+/// Fallos posibles de `POST /api/v1/rides/{ride}/location` (issue #19).
+///
+/// Mismo reparto que `StartRideError`: `Forbidden` cubre tanto a un
+/// conductor distinto del asignado como a un viaje sin conductor asignado
+/// todavia. `Validation` cubre en cambio que el viaje ya no este
+/// `in_progress`, o que las coordenadas esten fuera de rango (aunque esto
+/// ultimo no deberia pasar si `LocationProvider` devuelve datos validos).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShareRideLocationError {
+    Forbidden,
+    /// No existe ningun viaje con ese id.
+    NotFound,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for ShareRideLocationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShareRideLocationError::Forbidden => {
+                write!(f, "Este viaje no te pertenece.")
+            }
+            ShareRideLocationError::NotFound => write!(f, "El viaje ya no existe."),
+            ShareRideLocationError::Validation(body) => write!(f, "{}", body.message),
+            ShareRideLocationError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            ShareRideLocationError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            ShareRideLocationError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ShareRideLocationError {}
+
 /// Fallos posibles de `POST /api/v1/broadcasting/auth` (issue #5).
 ///
 /// A diferencia del resto de las requests autenticadas, esta nunca reintenta
@@ -867,6 +911,14 @@ enum AcceptRideOutcome {
 
 enum StartRideOutcome {
     Success(Ride),
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Validation(ApiErrorBody),
+}
+
+enum ShareRideLocationOutcome {
+    Success,
     Unauthorized,
     Forbidden,
     NotFound,
@@ -2069,6 +2121,98 @@ impl ApiClient {
                 Ok(StartRideOutcome::Validation(body))
             }
             other => Err(StartRideError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/rides/{ride}/location` — issue #19. No hay ningun
+    /// recurso que devolver (el backend responde 204: la ubicacion no se
+    /// persiste, solo se transmite por el canal `ride.{id}`, ver
+    /// `ShareRideLocationController` de `Back_App_MotoCarros`). Mismo
+    /// reparto que `start_ride`: reintenta una vez con refresh de token ante
+    /// un 401; un 403 (viaje ajeno o sin conductor asignado), 404 (no
+    /// existe) o 422 (el viaje ya no esta `in_progress`, o coordenadas fuera
+    /// de rango) nunca se reintentan.
+    pub async fn share_ride_location(
+        &self,
+        token: &AuthToken,
+        ride_id: u64,
+        location: Coordinates,
+    ) -> Result<AuthenticatedFetch<()>, ShareRideLocationError> {
+        match self
+            .post_location_with_token(ride_id, &token.access_token, &location)
+            .await?
+        {
+            ShareRideLocationOutcome::Success => {
+                return Ok(AuthenticatedFetch {
+                    data: (),
+                    refreshed_token: None,
+                });
+            }
+            ShareRideLocationOutcome::Forbidden => return Err(ShareRideLocationError::Forbidden),
+            ShareRideLocationOutcome::NotFound => return Err(ShareRideLocationError::NotFound),
+            ShareRideLocationOutcome::Validation(body) => {
+                return Err(ShareRideLocationError::Validation(body));
+            }
+            ShareRideLocationOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| ShareRideLocationError::SessionExpired)?;
+
+        match self
+            .post_location_with_token(ride_id, &renewed.access_token, &location)
+            .await?
+        {
+            ShareRideLocationOutcome::Success => Ok(AuthenticatedFetch {
+                data: (),
+                refreshed_token: Some(renewed),
+            }),
+            ShareRideLocationOutcome::Forbidden => Err(ShareRideLocationError::Forbidden),
+            ShareRideLocationOutcome::NotFound => Err(ShareRideLocationError::NotFound),
+            ShareRideLocationOutcome::Validation(body) => {
+                Err(ShareRideLocationError::Validation(body))
+            }
+            ShareRideLocationOutcome::Unauthorized => Err(ShareRideLocationError::SessionExpired),
+        }
+    }
+
+    async fn post_location_with_token(
+        &self,
+        ride_id: u64,
+        access_token: &str,
+        location: &Coordinates,
+    ) -> Result<ShareRideLocationOutcome, ShareRideLocationError> {
+        let url = format!("{}/api/v1/rides/{}/location", self.base_url, ride_id);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .json(location)
+            .send()
+            .await
+            .map_err(|err| ShareRideLocationError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            return Ok(ShareRideLocationOutcome::Success);
+        }
+
+        match status.as_u16() {
+            401 => Ok(ShareRideLocationOutcome::Unauthorized),
+            403 => Ok(ShareRideLocationOutcome::Forbidden),
+            404 => Ok(ShareRideLocationOutcome::NotFound),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| ShareRideLocationError::Network(err.to_string()))?;
+                Ok(ShareRideLocationOutcome::Validation(body))
+            }
+            other => Err(ShareRideLocationError::Unexpected(other)),
         }
     }
 
@@ -4808,6 +4952,209 @@ mod tests {
         let error = client.start_ride(&sample_token(), 1).await.unwrap_err();
 
         assert!(matches!(error, StartRideError::Network(_)));
+    }
+
+    fn sample_location() -> Coordinates {
+        Coordinates {
+            latitude: 4.710989,
+            longitude: -74.072092,
+        }
+    }
+
+    #[tokio::test]
+    async fn share_ride_location_succeeds_on_204() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/location"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .and(body_json(serde_json::json!({
+                "latitude": 4.710989,
+                "longitude": -74.072092,
+            })))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .share_ride_location(&sample_token(), 1, sample_location())
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data, ());
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn share_ride_location_returns_forbidden_on_403_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/location"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .share_ride_location(&sample_token(), 1, sample_location())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, ShareRideLocationError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn share_ride_location_returns_not_found_on_404_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/999/location"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No query results for model [App\\Models\\Ride] 999.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .share_ride_location(&sample_token(), 999, sample_location())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, ShareRideLocationError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn share_ride_location_returns_validation_error_on_422_when_the_ride_is_not_in_progress()
+    {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/location"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "Solo se puede compartir ubicacion en un viaje en curso.",
+                "errors": {
+                    "ride": ["Solo se puede compartir ubicacion en un viaje en curso."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .share_ride_location(&sample_token(), 1, sample_location())
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            ShareRideLocationError::Validation(ApiErrorBody {
+                message: "Solo se puede compartir ubicacion en un viaje en curso.".to_string(),
+                errors: Some(HashMap::from([(
+                    "ride".to_string(),
+                    vec!["Solo se puede compartir ubicacion en un viaje en curso.".to_string()]
+                )])),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn share_ride_location_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/location"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/location"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .share_ride_location(&sample_token(), 1, sample_location())
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn share_ride_location_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/location"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .share_ride_location(&sample_token(), 1, sample_location())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, ShareRideLocationError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn share_ride_location_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .share_ride_location(&sample_token(), 1, sample_location())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ShareRideLocationError::Network(_)));
     }
 
     #[tokio::test]
