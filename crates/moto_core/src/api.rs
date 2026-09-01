@@ -13,7 +13,7 @@ use crate::models::{
 };
 
 #[cfg(test)]
-use crate::models::Role;
+use crate::models::{RideStatus, Role};
 
 #[derive(Debug, Clone)]
 pub struct ApiClient {
@@ -1429,6 +1429,21 @@ impl ApiClient {
         token: &AuthToken,
     ) -> Result<AuthenticatedFetch<User>, AuthenticatedRequestError> {
         self.get_authenticated::<User>("/api/v1/me", token).await
+    }
+
+    /// `GET /api/v1/me/rides` — historia #28. El mismo endpoint devuelve los
+    /// viajes que el pasajero pidio, o los que le asignaron si la cuenta es
+    /// de conductor (historia #29, fuera de alcance aca) — lo decide
+    /// `ShowRideHistoryController` en el backend segun el rol de la cuenta.
+    /// No manda `page` ni `per_page`: esta historia solo pide la primera
+    /// pagina (ver `openapi.yaml`), paginar mas alla del default del backend
+    /// queda para una historia aparte.
+    pub async fn ride_history(
+        &self,
+        token: &AuthToken,
+    ) -> Result<AuthenticatedFetch<Vec<Ride>>, AuthenticatedRequestError> {
+        self.get_authenticated::<Vec<Ride>>("/api/v1/me/rides", token)
+            .await
     }
 
     /// `PATCH /api/v1/me` — issue #10. PATCH parcial: solo los campos
@@ -3509,6 +3524,112 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let error = client.me(&sample_token()).await.unwrap_err();
+
+        assert_eq!(error, AuthenticatedRequestError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn ride_history_returns_the_rides_ordered_by_the_backend() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/rides"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": 2,
+                        "status": "completed",
+                        "origin": { "latitude": 4.710989, "longitude": -74.072092 },
+                        "destination": { "latitude": 4.698, "longitude": -74.061 },
+                        "distance_meters": 7421,
+                        "duration_seconds": 842,
+                        "currency": "COP",
+                        "estimated_fare": 8850,
+                        "driver": { "id": 5, "name": "Carlos Perez" },
+                        "requested_at": "2026-07-31T14:03:21+00:00",
+                        "started_at": "2026-07-31T14:05:00+00:00",
+                        "completed_at": "2026-07-31T14:22:00+00:00",
+                        "final_fare": 9100,
+                        "payment": { "status": "paid" }
+                    },
+                    {
+                        "id": 1,
+                        "status": "cancelled",
+                        "origin": { "latitude": 4.71, "longitude": -74.07 },
+                        "destination": { "latitude": 4.69, "longitude": -74.06 },
+                        "distance_meters": 5000,
+                        "duration_seconds": 600,
+                        "currency": "COP",
+                        "estimated_fare": 6000,
+                        "driver": null,
+                        "requested_at": "2026-07-30T10:00:00+00:00",
+                        "started_at": null,
+                        "completed_at": null,
+                        "final_fare": null,
+                        "payment": null
+                    }
+                ],
+                "meta": { "current_page": 1, "per_page": 15, "total": 2, "last_page": 1 }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.ride_history(&sample_token()).await.unwrap();
+
+        assert_eq!(fetch.data.len(), 2);
+        assert_eq!(fetch.data[0].id, 2);
+        assert_eq!(fetch.data[0].status, RideStatus::Completed);
+        assert_eq!(fetch.data[1].id, 1);
+        assert_eq!(fetch.data[1].driver, None);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn ride_history_returns_an_empty_list_when_the_account_has_no_rides() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/rides"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [],
+                "meta": { "current_page": 1, "per_page": 15, "total": 0, "last_page": 1 }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.ride_history(&sample_token()).await.unwrap();
+
+        assert!(fetch.data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ride_history_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/rides"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.ride_history(&sample_token()).await.unwrap_err();
 
         assert_eq!(error, AuthenticatedRequestError::SessionExpired);
     }
