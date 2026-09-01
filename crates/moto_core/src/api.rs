@@ -717,6 +717,51 @@ impl std::fmt::Display for AcceptRideError {
 
 impl std::error::Error for AcceptRideError {}
 
+/// Fallos posibles de `POST /api/v1/rides/{ride}/start` (issue #18).
+///
+/// Mismo reparto que `CancelRideError`: `Forbidden` cubre tanto a un
+/// conductor distinto del asignado como al pasajero del viaje, y tambien el
+/// caso de un viaje `requested` sin conductor asignado todavia (la Policy
+/// corta antes que la validacion de estado, ver `StartRideTest` en el
+/// backend). `Validation` cubre que el viaje ya no este en `accepted`
+/// (ya iniciado, cancelado o completado).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StartRideError {
+    Forbidden,
+    /// No existe ningun viaje con ese id.
+    NotFound,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for StartRideError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StartRideError::Forbidden => {
+                write!(f, "Este viaje no te pertenece.")
+            }
+            StartRideError::NotFound => write!(f, "El viaje ya no existe."),
+            StartRideError::Validation(body) => write!(f, "{}", body.message),
+            StartRideError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            StartRideError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            StartRideError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for StartRideError {}
+
 /// Fallos posibles de `POST /api/v1/broadcasting/auth` (issue #5).
 ///
 /// A diferencia del resto de las requests autenticadas, esta nunca reintenta
@@ -817,6 +862,14 @@ enum AcceptRideOutcome {
     Forbidden,
     NotFound,
     Conflict,
+    Validation(ApiErrorBody),
+}
+
+enum StartRideOutcome {
+    Success(Ride),
+    Unauthorized,
+    Forbidden,
+    NotFound,
     Validation(ApiErrorBody),
 }
 
@@ -1929,6 +1982,93 @@ impl ApiClient {
                 Ok(AcceptRideOutcome::Validation(body))
             }
             other => Err(AcceptRideError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/rides/{ride}/start` — issue #18. No manda body: como
+    /// `accept_ride`, todo lo que decide esta operacion es el id del viaje y
+    /// quien la pide. Reintenta una vez con refresh de token ante un 401,
+    /// igual que `accept_ride`; un 403 (viaje ajeno o sin conductor
+    /// asignado), 404 (no existe) o 422 (el viaje ya no esta `accepted`)
+    /// nunca se reintentan.
+    pub async fn start_ride(
+        &self,
+        token: &AuthToken,
+        ride_id: u64,
+    ) -> Result<AuthenticatedFetch<Ride>, StartRideError> {
+        match self
+            .post_start_with_token(ride_id, &token.access_token)
+            .await?
+        {
+            StartRideOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            StartRideOutcome::Forbidden => return Err(StartRideError::Forbidden),
+            StartRideOutcome::NotFound => return Err(StartRideError::NotFound),
+            StartRideOutcome::Validation(body) => return Err(StartRideError::Validation(body)),
+            StartRideOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| StartRideError::SessionExpired)?;
+
+        match self
+            .post_start_with_token(ride_id, &renewed.access_token)
+            .await?
+        {
+            StartRideOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            StartRideOutcome::Forbidden => Err(StartRideError::Forbidden),
+            StartRideOutcome::NotFound => Err(StartRideError::NotFound),
+            StartRideOutcome::Validation(body) => Err(StartRideError::Validation(body)),
+            StartRideOutcome::Unauthorized => Err(StartRideError::SessionExpired),
+        }
+    }
+
+    async fn post_start_with_token(
+        &self,
+        ride_id: u64,
+        access_token: &str,
+    ) -> Result<StartRideOutcome, StartRideError> {
+        let url = format!("{}/api/v1/rides/{}/start", self.base_url, ride_id);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|err| StartRideError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<Ride> = response
+                .json()
+                .await
+                .map_err(|err| StartRideError::Network(err.to_string()))?;
+            return Ok(StartRideOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(StartRideOutcome::Unauthorized),
+            403 => Ok(StartRideOutcome::Forbidden),
+            404 => Ok(StartRideOutcome::NotFound),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| StartRideError::Network(err.to_string()))?;
+                Ok(StartRideOutcome::Validation(body))
+            }
+            other => Err(StartRideError::Unexpected(other)),
         }
     }
 
@@ -4481,6 +4621,193 @@ mod tests {
         let error = client.accept_ride(&sample_token(), 1).await.unwrap_err();
 
         assert!(matches!(error, AcceptRideError::Network(_)));
+    }
+
+    fn sample_started_ride_json() -> serde_json::Value {
+        let mut ride = sample_accepted_ride_json();
+        ride["status"] = serde_json::json!("in_progress");
+        ride["started_at"] = serde_json::json!("2026-07-31T14:05:00+00:00");
+        ride
+    }
+
+    #[tokio::test]
+    async fn start_ride_returns_the_started_ride_with_started_at() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/start"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_started_ride_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.start_ride(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.data.status, crate::models::RideStatus::InProgress);
+        assert_eq!(
+            fetch.data.started_at,
+            Some("2026-07-31T14:05:00+00:00".to_string())
+        );
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn start_ride_returns_forbidden_on_403_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/start"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.start_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, StartRideError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn start_ride_returns_not_found_on_404_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/999/start"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No query results for model [App\\Models\\Ride] 999.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.start_ride(&sample_token(), 999).await.unwrap_err();
+
+        assert_eq!(error, StartRideError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn start_ride_returns_validation_error_on_422_when_the_ride_is_not_accepted() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/start"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "Este viaje ya no se puede iniciar.",
+                "errors": {
+                    "ride": ["Este viaje ya no se puede iniciar."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.start_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(
+            error,
+            StartRideError::Validation(ApiErrorBody {
+                message: "Este viaje ya no se puede iniciar.".to_string(),
+                errors: Some(HashMap::from([(
+                    "ride".to_string(),
+                    vec!["Este viaje ya no se puede iniciar.".to_string()]
+                )])),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn start_ride_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/start"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/start"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_started_ride_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.start_ride(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn start_ride_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/1/start"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.start_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, StartRideError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn start_ride_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client.start_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert!(matches!(error, StartRideError::Network(_)));
     }
 
     #[tokio::test]

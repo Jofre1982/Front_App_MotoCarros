@@ -29,14 +29,24 @@
 //! acepto primero — carrera documentada en `openapi.yaml`), la solicitud se
 //! saca de la lista con un mensaje explicito en vez de un error generico, tal
 //! como pide el criterio de aceptacion del issue.
+//!
+//! Mientras el viaje aceptado siga en `accepted`, se ofrece un boton
+//! "Iniciar viaje" que llama a `POST /api/v1/rides/{ride}/start`
+//! (`ApiClient::start_ride`, issue #18) — la condicion de estado es lo que
+//! hace que el boton no este disponible si el viaje ya paso a otro estado
+//! (criterio de aceptacion del issue). Al iniciar con exito, la pantalla
+//! reemplaza el viaje en pantalla por la version devuelta por el backend
+//! (ahora `in_progress`, con `started_at`) en vez de solo esconder el boton.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
 use futures_timer::Delay;
-use moto_core::api::{AcceptRideError, ApiClient, AuthenticatedRequestError, GetVehicleError};
-use moto_core::models::{NearbyRideRequest, Ride, apply_nearby_ride_event};
+use moto_core::api::{
+    AcceptRideError, ApiClient, AuthenticatedRequestError, GetVehicleError, StartRideError,
+};
+use moto_core::models::{NearbyRideRequest, Ride, RideStatus, apply_nearby_ride_event};
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
     decide_poll_action, decide_subscribe_failure,
@@ -295,6 +305,16 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                 div { class: "nearby-ride-accepted",
                     p { "Aceptaste el viaje." }
                     p { "Tarifa estimada: {ride.currency} {ride.estimated_fare}" }
+                    if ride.status == RideStatus::Accepted {
+                        StartRideButton {
+                            ride_id: ride.id,
+                            on_started: move |started: Ride| {
+                                accepted_ride.set(Some(started));
+                            },
+                        }
+                    } else if ride.status == RideStatus::InProgress {
+                        p { "Viaje en curso." }
+                    }
                 }
             } else {
                 match status() {
@@ -412,6 +432,77 @@ fn NearbyRideRow(props: NearbyRideRowProps) -> Element {
             }
             if let Some(message) = error() {
                 p { class: "nearby-ride-accept-error", role: "alert", "{message}" }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct StartRideButtonProps {
+    ride_id: u64,
+    on_started: EventHandler<Ride>,
+}
+
+/// Boton "Iniciar viaje" del viaje aceptado (issue #18). Componente aparte,
+/// igual que `NearbyRideRow`, para que su estado de carga/error no dependa
+/// del resto de la pantalla.
+#[component]
+fn StartRideButton(props: StartRideButtonProps) -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+
+    let mut is_starting = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let ride_id = props.ride_id;
+    let on_started = props.on_started;
+
+    let on_start_click = move |_| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+
+        spawn(async move {
+            is_starting.set(true);
+            error.set(None);
+
+            match api_client.start_ride(&token, ride_id).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    on_started.call(fetch.data);
+                }
+                Err(StartRideError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                Err(err) => {
+                    error.set(Some(err.to_string()));
+                }
+            }
+
+            is_starting.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "nearby-ride-start",
+            button {
+                r#type: "button",
+                class: "nearby-ride-start-button",
+                disabled: is_starting(),
+                onclick: on_start_click,
+                if is_starting() {
+                    "Iniciando..."
+                } else {
+                    "Iniciar viaje"
+                }
+            }
+            if let Some(message) = error() {
+                p { class: "nearby-ride-start-error", role: "alert", "{message}" }
             }
         }
     }
