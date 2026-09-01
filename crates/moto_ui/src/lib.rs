@@ -17,6 +17,7 @@ pub use screens::register_driver::RegisterDriverScreen;
 pub use screens::register_passenger::RegisterPassengerScreen;
 pub use screens::register_vehicle::RegisterVehicleScreen;
 pub use screens::ride_estimate::RideEstimateScreen;
+pub use screens::ride_history::RideHistoryScreen;
 pub use screens::vehicle::VehicleScreen;
 
 /// Pantallas del flujo de autenticacion, previas a tener sesion iniciada.
@@ -84,6 +85,7 @@ enum HomeSection {
     RideEstimate,
     Vehicle,
     NearbyRides,
+    RideHistory,
 }
 
 /// Pantalla principal tras iniciar sesion: perfil (issue #9), tarifa
@@ -96,6 +98,9 @@ enum HomeSection {
 /// cuando `session.user()` ya cargo (`GET /api/v1/me`, issue #9) y es una
 /// cuenta de conductor: un pasajero nunca ve esos botones, y
 /// estructuralmente no puede llegar a esas pantallas desde esta navegacion.
+/// El historial de viajes (issue #28, `RideHistoryScreen`) es al reves:
+/// solo se ofrece a pasajero — el equivalente para conductor es la historia
+/// #29, todavia sin implementar.
 #[component]
 fn Home() -> Element {
     let api_client = use_context::<ApiClient>();
@@ -157,6 +162,13 @@ fn Home() -> Element {
                         onclick: move |_| section.set(HomeSection::NearbyRides),
                         "Solicitudes cercanas"
                     }
+                } else {
+                    button {
+                        r#type: "button",
+                        disabled: section() == HomeSection::RideHistory,
+                        onclick: move |_| section.set(HomeSection::RideHistory),
+                        "Historial de viajes"
+                    }
                 }
             }
             match section() {
@@ -171,6 +183,9 @@ fn Home() -> Element {
                 },
                 HomeSection::NearbyRides => rsx! {
                     NearbyRidesScreen {}
+                },
+                HomeSection::RideHistory => rsx! {
+                    RideHistoryScreen {}
                 },
             }
             button {
