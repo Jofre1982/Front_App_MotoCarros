@@ -268,6 +268,28 @@ pub struct RideCancellation {
     pub cancellation_fee_applies: Option<bool>,
 }
 
+/// Body de `POST /api/v1/rides/{ride}/rate-driver` (historia #26). `comment`
+/// se omite del JSON cuando es `None` en vez de mandarse como `null`: el
+/// backend lo declara `nullable` pero no `required`, y el resto de los
+/// payloads de esta app (p.ej. `UpdateVehiclePayload`) siguen el mismo
+/// criterio para campos opcionales.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RateDriverPayload {
+    pub score: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// `openapi.yaml#/components/schemas/RideRating` — respuesta de
+/// `POST /api/v1/rides/{ride}/rate-driver` (historia #26).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RideRating {
+    pub ride_id: u64,
+    pub score: u8,
+    pub comment: Option<String>,
+    pub rated_at: String,
+}
+
 /// Body de `POST /api/v1/broadcasting/auth`
 /// (`openapi.yaml#/components/schemas/BroadcastAuthRequest`).
 ///
