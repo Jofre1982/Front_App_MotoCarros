@@ -7,8 +7,9 @@
 //! ese caso se distingue con un estado vacio explicito en vez de mostrar la
 //! lista en blanco (criterio de aceptacion del issue).
 //!
-//! El equivalente para conductor (historial + resumen de ganancias) es la
-//! historia #29, fuera de alcance aca — `Home` (`moto_ui/src/lib.rs`) solo
+//! El equivalente para conductor (historial + resumen de ganancias) es
+//! `DriverEarningsScreen` (historia #29), que reutiliza `ride_status_label`
+//! de aca pero tiene su propio fetch — `Home` (`moto_ui/src/lib.rs`) solo
 //! ofrece esta pestana a cuentas de pasajero.
 
 use std::sync::Arc;
@@ -114,8 +115,10 @@ fn RideHistoryRow(props: RideHistoryRowProps) -> Element {
     }
 }
 
-/// Texto del estado de un viaje del historial, tal como lo ve el pasajero.
-fn ride_status_label(status: RideStatus) -> &'static str {
+/// Texto del estado de un viaje del historial. Compartido con
+/// `DriverEarningsScreen` (historia #29): el estado de un viaje se lee igual
+/// sin importar si lo ve el pasajero o el conductor asignado.
+pub(crate) fn ride_status_label(status: RideStatus) -> &'static str {
     match status {
         RideStatus::Requested => "Esperando conductor",
         RideStatus::Accepted => "Conductor asignado",
