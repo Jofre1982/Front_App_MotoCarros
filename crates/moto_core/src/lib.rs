@@ -1,4 +1,5 @@
 pub mod api;
+pub mod location;
 pub mod models;
 pub mod realtime;
 pub mod state;

@@ -2,12 +2,15 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use moto_core::api::ApiClient;
+use moto_core::location::LocationProvider;
 use moto_core::realtime::RealtimeConfig;
 use moto_core::storage::TokenStorage;
 use moto_ui::App;
 
+mod geolocation;
 mod storage;
 
+use geolocation::WebLocationProvider;
 use storage::WebTokenStorage;
 
 /// Fallback de desarrollo local. La URL real del backend se inyecta en build
@@ -34,6 +37,9 @@ fn main() {
         })
         .with_context_provider(|| {
             Box::new(Arc::new(WebTokenStorage::new()) as Arc<dyn TokenStorage>)
+        })
+        .with_context_provider(|| {
+            Box::new(Arc::new(WebLocationProvider::new()) as Arc<dyn LocationProvider>)
         })
         .launch(App);
 }

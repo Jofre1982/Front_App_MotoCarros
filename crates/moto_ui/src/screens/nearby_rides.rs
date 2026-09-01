@@ -37,6 +37,19 @@
 //! (criterio de aceptacion del issue). Al iniciar con exito, la pantalla
 //! reemplaza el viaje en pantalla por la version devuelta por el backend
 //! (ahora `in_progress`, con `started_at`) en vez de solo esconder el boton.
+//!
+//! Mientras el viaje siga en `in_progress`, `ShareLocationPanel` publica
+//! periodicamente la posicion del conductor con
+//! `POST /api/v1/rides/{ride}/location` (`ApiClient::share_ride_location`,
+//! issue #19). La posicion misma la consigue un `LocationProvider` inyectado
+//! por plataforma (web/movil, ver `moto_core::location`) — este componente
+//! solo decide cuando pedirla y que hacer con el resultado, sin saber como
+//! se obtiene. Si el proveedor devuelve `LocationError::PermissionDenied`,
+//! el panel lo muestra explicitamente y deja de intentar: no tiene sentido
+//! seguir pidiendo permiso sin que el usuario actue. Cualquier otro fallo
+//! (de red, del backend, o del propio proveedor) se trata como transitorio y
+//! se reintenta en el siguiente ciclo, sin dejar el panel en un estado de
+//! error permanente.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,8 +57,10 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use futures_timer::Delay;
 use moto_core::api::{
-    AcceptRideError, ApiClient, AuthenticatedRequestError, GetVehicleError, StartRideError,
+    AcceptRideError, ApiClient, AuthenticatedRequestError, GetVehicleError, ShareRideLocationError,
+    StartRideError,
 };
+use moto_core::location::{LocationError, LocationProvider};
 use moto_core::models::{NearbyRideRequest, Ride, RideStatus, apply_nearby_ride_event};
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
@@ -61,6 +76,14 @@ use super::register_vehicle::RegisterVehicleScreen;
 /// `.claude/STANDARDS.md`, el crate no tiene runtime propio), asi que la
 /// pantalla lo consulta activamente a este ritmo.
 const POLL_INTERVAL: Duration = Duration::from_millis(700);
+
+/// Intervalo entre publicaciones de ubicacion de `ShareLocationPanel` (issue
+/// #19). Mas espaciado que `POLL_INTERVAL`: a diferencia del sondeo de
+/// eventos, pedirle la posicion al dispositivo tiene un costo real
+/// (bateria, y en el navegador un posible reprompt de permiso), y el
+/// pasajero no necesita una actualizacion mas fina que esta para seguir el
+/// viaje en el mapa.
+const LOCATION_SHARE_INTERVAL: Duration = Duration::from_secs(10);
 
 #[component]
 pub fn NearbyRidesScreen() -> Element {
@@ -313,7 +336,7 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                             },
                         }
                     } else if ride.status == RideStatus::InProgress {
-                        p { "Viaje en curso." }
+                        ShareLocationPanel { ride_id: ride.id }
                     }
                 }
             } else {
@@ -503,6 +526,116 @@ fn StartRideButton(props: StartRideButtonProps) -> Element {
             }
             if let Some(message) = error() {
                 p { class: "nearby-ride-start-error", role: "alert", "{message}" }
+            }
+        }
+    }
+}
+
+/// Estado visible de `ShareLocationPanel` (issue #19).
+#[derive(Debug, Clone, PartialEq)]
+enum SharingStatus {
+    Sharing,
+    PermissionDenied,
+    Error(String),
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct ShareLocationPanelProps {
+    ride_id: u64,
+}
+
+/// Publica la posicion del conductor mientras el viaje siga `in_progress`
+/// (issue #19). Componente aparte, igual que `StartRideButton`, para que su
+/// ciclo de vida (arranca al montarse, Dioxus lo cancela al desmontarse)
+/// quede acotado a mientras el viaje este en curso: cuando el viaje pase a
+/// `completed`/`cancelled`, `NearbyRidesList` deja de renderizar este
+/// componente y el loop de mas abajo se corta solo.
+#[component]
+fn ShareLocationPanel(props: ShareLocationPanelProps) -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+    let location_provider = use_context::<Arc<dyn LocationProvider>>();
+
+    let mut status = use_signal(|| SharingStatus::Sharing);
+    // Mismo criterio que el resto de los loops de esta pantalla: evita
+    // levantar un segundo loop si el efecto se vuelve a disparar.
+    let mut started = use_signal(|| false);
+
+    let ride_id = props.ride_id;
+
+    use_effect(move || {
+        if started() {
+            return;
+        }
+        started.set(true);
+
+        let Some(token) = session.token() else {
+            status.set(SharingStatus::Error(
+                "La sesion expiro. Inicia sesion de nuevo.".to_string(),
+            ));
+            return;
+        };
+
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+        let location_provider = location_provider.clone();
+
+        spawn(async move {
+            let mut current_token = token;
+
+            loop {
+                match location_provider.current_position().await {
+                    Ok(coordinates) => {
+                        match api_client
+                            .share_ride_location(&current_token, ride_id, coordinates)
+                            .await
+                        {
+                            Ok(fetch) => {
+                                if let Some(refreshed) = fetch.refreshed_token {
+                                    session.update_token(refreshed.clone(), storage.as_ref());
+                                    current_token = refreshed;
+                                }
+                                status.set(SharingStatus::Sharing);
+                            }
+                            Err(ShareRideLocationError::SessionExpired) => {
+                                session.logout(storage.as_ref());
+                                break;
+                            }
+                            Err(err) => {
+                                status.set(SharingStatus::Error(err.to_string()));
+                            }
+                        }
+                    }
+                    Err(LocationError::PermissionDenied) => {
+                        status.set(SharingStatus::PermissionDenied);
+                        break;
+                    }
+                    Err(LocationError::Unavailable(message)) => {
+                        status.set(SharingStatus::Error(message));
+                    }
+                }
+
+                Delay::new(LOCATION_SHARE_INTERVAL).await;
+            }
+        });
+    });
+
+    rsx! {
+        div { class: "share-location-panel",
+            p { "Viaje en curso." }
+            match status() {
+                SharingStatus::Sharing => rsx! {
+                    p { class: "share-location-status", "Compartiendo tu ubicacion..." }
+                },
+                SharingStatus::PermissionDenied => rsx! {
+                    p { class: "share-location-error", role: "alert",
+                        "Habilita el permiso de ubicacion para compartirla durante el viaje."
+                    }
+                },
+                SharingStatus::Error(message) => rsx! {
+                    p { class: "share-location-error", role: "alert", "{message}" }
+                },
             }
         }
     }

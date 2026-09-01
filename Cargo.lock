@@ -5965,6 +5965,7 @@ dependencies = [
  "dioxus",
  "moto_core",
  "moto_ui",
+ "serde",
  "serde_json",
  "web-sys",
 ]
