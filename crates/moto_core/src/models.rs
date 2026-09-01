@@ -347,6 +347,103 @@ pub fn apply_nearby_ride_event(
     }
 }
 
+/// Estado que arma la pantalla de seguimiento en tiempo real de un viaje
+/// activo (issue #20): el viaje tal como lo devolvio el ultimo fetch a
+/// `GET /api/v1/rides/{ride}` (`ApiClient::get_ride`), mas la ultima
+/// posicion del conductor que llego por el canal `ride.{id}`. El fetch
+/// nunca trae la ubicacion — solo viaja por el evento `location.updated`,
+/// ver `RideResource` de `Back_App_MotoCarros` — asi que vive aparte del
+/// resto de los campos del viaje en vez de ser un campo mas de `Ride`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RideTracking {
+    pub ride: Ride,
+    pub driver_location: Option<Coordinates>,
+}
+
+impl RideTracking {
+    pub fn new(ride: Ride) -> Self {
+        Self {
+            ride,
+            driver_location: None,
+        }
+    }
+}
+
+/// Payload del evento `status.changed` sobre el canal privado `ride.{id}`
+/// (issue #20): trae el estado **nuevo** y el conductor asignado por id
+/// (`app/Events/Realtime/RideStatusChanged.php` de `Back_App_MotoCarros`).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct RideStatusChangedEvent {
+    status: RideStatus,
+    driver_id: Option<u64>,
+}
+
+/// Payload del evento `location.updated` sobre el mismo canal: la posicion
+/// actual del conductor asignado, publicada por `ShareLocationPanel` (issue
+/// #19) del lado del conductor
+/// (`app/Events/Realtime/DriverLocationUpdated.php` de
+/// `Back_App_MotoCarros`).
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+struct DriverLocationUpdatedEvent {
+    driver_id: u64,
+    latitude: f64,
+    longitude: f64,
+}
+
+/// Aplica un evento del canal `ride.{id}` (issue #20) al estado de
+/// seguimiento que consume la pantalla de tracking (`moto_ui`). Logica
+/// pura y sincronica, mismo criterio que `apply_nearby_ride_event`:
+/// extraida del componente para poder testearla sin Dioxus ni un socket
+/// real. `event_name`/`data` ya vienen filtrados por `channel` en el
+/// caller; un `event_name` desconocido o un `data` que no deserializa al
+/// tipo esperado se ignora sin error (frame corrupto, o version del
+/// protocolo que este cliente no entiende todavia), igual que
+/// `RealtimeClient::handle_frame`.
+///
+/// `location.updated` se ignora si el `driver_id` del evento no coincide
+/// con el conductor asignado al viaje: no deberia pasar
+/// (`RidePolicy::shareLocation` en el backend exige ser el conductor
+/// asignado), pero la pantalla no confia ciegamente en lo que llega por el
+/// canal.
+///
+/// `status.changed` solo trae el id del conductor, no su nombre. Mientras
+/// coincida con el que ya tenia el viaje (o siga sin haber ninguno) no
+/// cambia nada; si aparece un conductor nuevo se guarda con el nombre
+/// vacio en vez de inventarlo — la proxima vez que la pantalla vuelva a
+/// pedir el viaje por HTTP (`GET /api/v1/rides/{ride}`, tras reconectar)
+/// lo completa.
+pub fn apply_ride_tracking_event(tracking: &mut RideTracking, event_name: &str, data: &str) {
+    match event_name {
+        "status.changed" => {
+            if let Ok(event) = serde_json::from_str::<RideStatusChangedEvent>(data) {
+                tracking.ride.status = event.status;
+                match event.driver_id {
+                    None => tracking.ride.driver = None,
+                    Some(id) => {
+                        if tracking.ride.driver.as_ref().map(|d| d.id) != Some(id) {
+                            tracking.ride.driver = Some(RideDriver {
+                                id,
+                                name: String::new(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        "location.updated" => {
+            if let Ok(event) = serde_json::from_str::<DriverLocationUpdatedEvent>(data)
+                && tracking.ride.driver.as_ref().map(|d| d.id) == Some(event.driver_id)
+            {
+                tracking.driver_location = Some(Coordinates {
+                    latitude: event.latitude,
+                    longitude: event.longitude,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -770,5 +867,166 @@ mod tests {
         apply_nearby_ride_event(&mut requests, "ride.unavailable", "not json at all");
 
         assert!(requests.is_empty());
+    }
+
+    fn sample_tracked_ride() -> Ride {
+        Ride {
+            id: 1,
+            status: RideStatus::Requested,
+            origin: Coordinates {
+                latitude: 4.710989,
+                longitude: -74.072092,
+            },
+            destination: Coordinates {
+                latitude: 4.698,
+                longitude: -74.061,
+            },
+            distance_meters: 7421,
+            duration_seconds: 842,
+            currency: "COP".to_string(),
+            estimated_fare: 8850,
+            driver: None,
+            requested_at: "2026-07-31T14:03:21+00:00".to_string(),
+            started_at: None,
+            completed_at: None,
+            final_fare: None,
+            payment: None,
+        }
+    }
+
+    #[test]
+    fn apply_ride_tracking_event_updates_the_status_on_status_changed() {
+        let mut tracking = RideTracking::new(sample_tracked_ride());
+
+        apply_ride_tracking_event(
+            &mut tracking,
+            "status.changed",
+            r#"{"status": "accepted", "driver_id": 42}"#,
+        );
+
+        assert_eq!(tracking.ride.status, RideStatus::Accepted);
+    }
+
+    #[test]
+    fn apply_ride_tracking_event_assigns_a_new_driver_by_id_without_a_name() {
+        let mut tracking = RideTracking::new(sample_tracked_ride());
+
+        apply_ride_tracking_event(
+            &mut tracking,
+            "status.changed",
+            r#"{"status": "accepted", "driver_id": 42}"#,
+        );
+
+        assert_eq!(
+            tracking.ride.driver,
+            Some(RideDriver {
+                id: 42,
+                name: String::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn apply_ride_tracking_event_keeps_the_known_driver_name_when_the_id_matches() {
+        let mut ride = sample_tracked_ride();
+        ride.status = RideStatus::Accepted;
+        ride.driver = Some(RideDriver {
+            id: 42,
+            name: "Carlos Perez".to_string(),
+        });
+        let mut tracking = RideTracking::new(ride);
+
+        apply_ride_tracking_event(
+            &mut tracking,
+            "status.changed",
+            r#"{"status": "in_progress", "driver_id": 42}"#,
+        );
+
+        assert_eq!(
+            tracking.ride.driver,
+            Some(RideDriver {
+                id: 42,
+                name: "Carlos Perez".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn apply_ride_tracking_event_clears_the_driver_when_the_event_carries_none() {
+        let mut ride = sample_tracked_ride();
+        ride.driver = Some(RideDriver {
+            id: 42,
+            name: "Carlos Perez".to_string(),
+        });
+        let mut tracking = RideTracking::new(ride);
+
+        apply_ride_tracking_event(
+            &mut tracking,
+            "status.changed",
+            r#"{"status": "requested", "driver_id": null}"#,
+        );
+
+        assert_eq!(tracking.ride.driver, None);
+    }
+
+    #[test]
+    fn apply_ride_tracking_event_updates_the_driver_location_on_location_updated() {
+        let mut ride = sample_tracked_ride();
+        ride.driver = Some(RideDriver {
+            id: 42,
+            name: "Carlos Perez".to_string(),
+        });
+        let mut tracking = RideTracking::new(ride);
+
+        apply_ride_tracking_event(
+            &mut tracking,
+            "location.updated",
+            r#"{"driver_id": 42, "latitude": 4.71, "longitude": -74.07}"#,
+        );
+
+        assert_eq!(
+            tracking.driver_location,
+            Some(Coordinates {
+                latitude: 4.71,
+                longitude: -74.07,
+            })
+        );
+    }
+
+    #[test]
+    fn apply_ride_tracking_event_ignores_location_from_an_unassigned_driver() {
+        let mut ride = sample_tracked_ride();
+        ride.driver = Some(RideDriver {
+            id: 42,
+            name: "Carlos Perez".to_string(),
+        });
+        let mut tracking = RideTracking::new(ride);
+
+        apply_ride_tracking_event(
+            &mut tracking,
+            "location.updated",
+            r#"{"driver_id": 99, "latitude": 4.71, "longitude": -74.07}"#,
+        );
+
+        assert_eq!(tracking.driver_location, None);
+    }
+
+    #[test]
+    fn apply_ride_tracking_event_ignores_an_unknown_event_name() {
+        let mut tracking = RideTracking::new(sample_tracked_ride());
+
+        apply_ride_tracking_event(&mut tracking, "pusher_internal:subscription_succeeded", "");
+
+        assert_eq!(tracking, RideTracking::new(sample_tracked_ride()));
+    }
+
+    #[test]
+    fn apply_ride_tracking_event_ignores_malformed_data_without_panicking() {
+        let mut tracking = RideTracking::new(sample_tracked_ride());
+
+        apply_ride_tracking_event(&mut tracking, "status.changed", "not json at all");
+        apply_ride_tracking_event(&mut tracking, "location.updated", "not json at all");
+
+        assert_eq!(tracking, RideTracking::new(sample_tracked_ride()));
     }
 }

@@ -806,6 +806,44 @@ impl std::fmt::Display for ShareRideLocationError {
 
 impl std::error::Error for ShareRideLocationError {}
 
+/// Fallos posibles de `GET /api/v1/rides/{ride}` (issue #20).
+///
+/// `Forbidden` cubre una cuenta que ni pidio el viaje ni es el conductor
+/// asignado (`RidePolicy::view` en el backend responde 403 y no 404 a
+/// proposito, para no filtrar si el id existe). `NotFound` es que no existe
+/// ningun viaje con ese id.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GetRideError {
+    Forbidden,
+    NotFound,
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for GetRideError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GetRideError::Forbidden => write!(f, "Este viaje no te pertenece."),
+            GetRideError::NotFound => write!(f, "El viaje ya no existe."),
+            GetRideError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            GetRideError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            GetRideError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GetRideError {}
+
 /// Fallos posibles de `POST /api/v1/broadcasting/auth` (issue #5).
 ///
 /// A diferencia del resto de las requests autenticadas, esta nunca reintenta
@@ -923,6 +961,13 @@ enum ShareRideLocationOutcome {
     Forbidden,
     NotFound,
     Validation(ApiErrorBody),
+}
+
+enum GetRideOutcome<T> {
+    Success(T),
+    Unauthorized,
+    Forbidden,
+    NotFound,
 }
 
 impl ApiClient {
@@ -2213,6 +2258,85 @@ impl ApiClient {
                 Ok(ShareRideLocationOutcome::Validation(body))
             }
             other => Err(ShareRideLocationError::Unexpected(other)),
+        }
+    }
+
+    /// `GET /api/v1/rides/{ride}` — issue #20. Consulta puntual que acompana
+    /// al canal privado `ride.{id}`: la pantalla de seguimiento la usa al
+    /// abrirse (y tras reconectar) para no depender solo de eventos en vivo,
+    /// que puede haber perdido mientras el socket estaba caido (ver
+    /// `ShowRideController` de `Back_App_MotoCarros`). Mismo reparto que
+    /// `get_vehicle`: reintenta una vez con refresh de token ante un 401; un
+    /// 403 (viaje ajeno) o 404 (no existe) nunca se reintentan.
+    pub async fn get_ride(
+        &self,
+        token: &AuthToken,
+        ride_id: u64,
+    ) -> Result<AuthenticatedFetch<Ride>, GetRideError> {
+        match self
+            .get_ride_with_token(ride_id, &token.access_token)
+            .await?
+        {
+            GetRideOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            GetRideOutcome::Forbidden => return Err(GetRideError::Forbidden),
+            GetRideOutcome::NotFound => return Err(GetRideError::NotFound),
+            GetRideOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| GetRideError::SessionExpired)?;
+
+        match self
+            .get_ride_with_token(ride_id, &renewed.access_token)
+            .await?
+        {
+            GetRideOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            GetRideOutcome::Forbidden => Err(GetRideError::Forbidden),
+            GetRideOutcome::NotFound => Err(GetRideError::NotFound),
+            GetRideOutcome::Unauthorized => Err(GetRideError::SessionExpired),
+        }
+    }
+
+    async fn get_ride_with_token(
+        &self,
+        ride_id: u64,
+        access_token: &str,
+    ) -> Result<GetRideOutcome<Ride>, GetRideError> {
+        let url = format!("{}/api/v1/rides/{}", self.base_url, ride_id);
+
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|err| GetRideError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<Ride> = response
+                .json()
+                .await
+                .map_err(|err| GetRideError::Network(err.to_string()))?;
+            return Ok(GetRideOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(GetRideOutcome::Unauthorized),
+            403 => Ok(GetRideOutcome::Forbidden),
+            404 => Ok(GetRideOutcome::NotFound),
+            other => Err(GetRideError::Unexpected(other)),
         }
     }
 
@@ -5155,6 +5279,152 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, ShareRideLocationError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn get_ride_returns_the_current_state_of_the_ride() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/1"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_started_ride_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.get_ride(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.data.status, crate::models::RideStatus::InProgress);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn get_ride_returns_forbidden_on_403_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/1"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.get_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, GetRideError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn get_ride_returns_not_found_on_404_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/999"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No query results for model [App\\Models\\Ride] 999.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.get_ride(&sample_token(), 999).await.unwrap_err();
+
+        assert_eq!(error, GetRideError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn get_ride_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/1"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/1"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_started_ride_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.get_ride(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn get_ride_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/1"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.get_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, GetRideError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn get_ride_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client.get_ride(&sample_token(), 1).await.unwrap_err();
+
+        assert!(matches!(error, GetRideError::Network(_)));
     }
 
     #[tokio::test]

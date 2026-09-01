@@ -58,7 +58,10 @@ const MAP_INIT_TEMPLATE: &str = r#"
         if (!el) {
             return;
         }
+        window.__motoyaMaps = window.__motoyaMaps || {};
         var map = L.map(el).setView([__MOTOYA_LAT__, __MOTOYA_LNG__], __MOTOYA_ZOOM__);
+        window.__motoyaMaps["__MOTOYA_MAP_ID__"] = map;
+        map.__motoyaMarkers = [];
         L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
             maxZoom: 19,
             attribution: "&copy; OpenStreetMap contributors",
@@ -66,6 +69,31 @@ const MAP_INIT_TEMPLATE: &str = r#"
         __MOTOYA_MARKERS__
         __MOTOYA_CLICK_HANDLER__
     });
+})();
+"#;
+
+/// Actualiza un mapa ya inicializado (centro/zoom y marcadores) sin volver a
+/// llamar `L.map(el)` — Leaflet no permite reinicializar el mismo elemento
+/// del DOM dos veces ("Map container is already initialized"). Se usa
+/// cuando `MapView` vuelve a renderizar con props distintas despues del
+/// primer montaje (issue #20: tracking en tiempo real de la ubicacion del
+/// conductor), la reactividad que `.claude/STANDARDS.md` deja pendiente
+/// desde el issue #4. Busca la instancia guardada en
+/// `window.__motoyaMaps` por `MAP_INIT_TEMPLATE`; si todavia no existe
+/// (efecto de actualizacion disparado antes de que termine el `ready()`
+/// inicial) no hace nada, sin lanzar un error.
+const MAP_UPDATE_TEMPLATE: &str = r#"
+(function () {
+    var map = window.__motoyaMaps && window.__motoyaMaps["__MOTOYA_MAP_ID__"];
+    if (!map) {
+        return;
+    }
+    map.setView([__MOTOYA_LAT__, __MOTOYA_LNG__], __MOTOYA_ZOOM__);
+    (map.__motoyaMarkers || []).forEach(function (marker) {
+        map.removeLayer(marker);
+    });
+    map.__motoyaMarkers = [];
+    __MOTOYA_MARKERS__
 })();
 "#;
 
@@ -99,8 +127,11 @@ impl MapMarker {
             None => String::new(),
         };
 
+        // Se registra en `map.__motoyaMarkers` (no solo `.addTo(map)`) para
+        // que `MAP_UPDATE_TEMPLATE` pueda encontrar y quitar los marcadores
+        // de la vuelta anterior antes de agregar los nuevos.
         format!(
-            "L.marker([{lat}, {lng}]){popup}.addTo(map);",
+            "map.__motoyaMarkers.push(L.marker([{lat}, {lng}]){popup}.addTo(map));",
             lat = self.lat,
             lng = self.lng,
         )
@@ -139,6 +170,31 @@ fn build_init_script(
         .replace("__MOTOYA_CLICK_HANDLER__", click_handler_js)
 }
 
+/// Contraparte de `build_init_script` para una vuelta de renderizado
+/// posterior al montaje (ver `MAP_UPDATE_TEMPLATE`): recalcula centro,
+/// zoom y marcadores sobre la instancia de Leaflet ya creada, sin tocar el
+/// tile layer ni el listener de click, que no cambian entre renders.
+fn build_update_script(
+    id: &str,
+    center_lat: f64,
+    center_lng: f64,
+    zoom: u8,
+    markers: &[MapMarker],
+) -> String {
+    let markers_js: String = markers
+        .iter()
+        .map(MapMarker::to_js_statement)
+        .collect::<Vec<_>>()
+        .join("\n    ");
+
+    MAP_UPDATE_TEMPLATE
+        .replace("__MOTOYA_MAP_ID__", id)
+        .replace("__MOTOYA_LAT__", &center_lat.to_string())
+        .replace("__MOTOYA_LNG__", &center_lng.to_string())
+        .replace("__MOTOYA_ZOOM__", &zoom.to_string())
+        .replace("__MOTOYA_MARKERS__", &markers_js)
+}
+
 /// Payload que manda `dioxus.send` desde `CLICK_HANDLER_TEMPLATE`.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
 struct MapClickPayload {
@@ -163,12 +219,15 @@ fn next_map_id() -> String {
 /// Sigue siendo agnostico de dominio — no sabe que representa el punto
 /// elegido, eso lo decide quien use `MapView`.
 ///
-/// Limitacion conocida (documentada, no un descuido): la inicializacion
-/// corre una sola vez al montar el componente, igual que el patron ya usado
-/// en `App::hydrate` (ver `moto_ui/src/lib.rs`). Si `center`/`zoom`/
-/// `markers` cambian en un remount posterior, el mapa no se actualiza
-/// reactivamente todavia — eso queda para la historia que consuma esto con
-/// tracking en tiempo real (fuera de alcance de este issue).
+/// La primera vez que se monta, `L.map(el)` crea la instancia de Leaflet
+/// (ver `MAP_INIT_TEMPLATE`) y la guarda en `window.__motoyaMaps`. Cada vez
+/// que el componente vuelve a renderizar con `center`/`zoom`/`markers`
+/// distintos, en cambio, se reusa esa misma instancia y solo se actualiza
+/// la vista y los marcadores (`MAP_UPDATE_TEMPLATE`, via
+/// `build_update_script`) — Leaflet no permite un segundo `L.map(el)`
+/// sobre el mismo elemento. Esto es lo que dejaba pendiente
+/// `.claude/STANDARDS.md` desde el issue #4, resuelto en el #20 para poder
+/// mover el marcador del conductor en el mapa sin recargar la pantalla.
 #[component]
 pub fn MapView(
     center_lat: f64,
@@ -178,28 +237,48 @@ pub fn MapView(
     #[props(default)] on_click: Option<EventHandler<(f64, f64)>>,
 ) -> Element {
     let map_id = use_hook(next_map_id);
+    // Distingue el primer render (crea el mapa) de los siguientes (lo
+    // actualiza). `peek()` a proposito, no una lectura reactiva: leerlo
+    // "de verdad" suscribiria este mismo efecto a sus propios cambios y lo
+    // haria correr una segunda vez de inmediato tras `initialized.set(true)`.
+    let mut initialized = use_signal(|| false);
 
     {
         let map_id = map_id.clone();
-        use_effect(move || {
-            let script = build_init_script(
-                &map_id,
-                center_lat,
-                center_lng,
-                zoom,
-                &markers,
-                on_click.is_some(),
-            );
-            let mut eval = document::eval(&script);
+        use_effect(use_reactive(
+            (&center_lat, &center_lng, &zoom, &markers),
+            move |(center_lat, center_lng, zoom, markers)| {
+                let is_first_run = !*initialized.peek();
 
-            if let Some(on_click) = on_click {
-                spawn(async move {
-                    while let Ok(payload) = eval.recv::<MapClickPayload>().await {
-                        on_click.call((payload.lat, payload.lng));
-                    }
-                });
-            }
-        });
+                let script = if is_first_run {
+                    initialized.set(true);
+                    build_init_script(
+                        &map_id,
+                        center_lat,
+                        center_lng,
+                        zoom,
+                        &markers,
+                        on_click.is_some(),
+                    )
+                } else {
+                    build_update_script(&map_id, center_lat, center_lng, zoom, &markers)
+                };
+                let mut eval = document::eval(&script);
+
+                // El listener de click solo tiene sentido atado al `eval`
+                // que corrio `CLICK_HANDLER_TEMPLATE` (el de la
+                // inicializacion): las vueltas de actualizacion no vuelven
+                // a registrar el handler, asi que su `eval` nunca recibe
+                // nada por `dioxus.send`.
+                if is_first_run && let Some(on_click) = on_click {
+                    spawn(async move {
+                        while let Ok(payload) = eval.recv::<MapClickPayload>().await {
+                            on_click.call((payload.lat, payload.lng));
+                        }
+                    });
+                }
+            },
+        ));
     }
 
     rsx! {
@@ -260,8 +339,10 @@ mod tests {
         let script = build_init_script("motoya-map-1", 4.71, -74.07, 13, &markers, false);
 
         assert_eq!(script.matches("L.marker(").count(), 2);
-        assert!(script.contains("L.marker([4.71, -74.07]).bindPopup(\"Origen\").addTo(map);"));
-        assert!(script.contains("L.marker([4.72, -74.08]).addTo(map);"));
+        assert!(script.contains(
+            "map.__motoyaMarkers.push(L.marker([4.71, -74.07]).bindPopup(\"Origen\").addTo(map));"
+        ));
+        assert!(script.contains("map.__motoyaMarkers.push(L.marker([4.72, -74.08]).addTo(map));"));
     }
 
     #[test]
@@ -302,5 +383,37 @@ mod tests {
 
         assert_ne!(first, second);
         assert!(first.starts_with("motoya-map-"));
+    }
+
+    #[test]
+    fn build_update_script_looks_up_the_existing_map_instance_by_id() {
+        let script = build_update_script("motoya-map-0", 4.71, -74.07, 15, &[]);
+
+        assert!(script.contains(r#"window.__motoyaMaps && window.__motoyaMaps["motoya-map-0"]"#));
+        assert!(script.contains("setView([4.71, -74.07], 15)"));
+    }
+
+    #[test]
+    fn build_update_script_does_not_recreate_the_map_or_the_tile_layer() {
+        let script = build_update_script("motoya-map-0", 0.0, 0.0, 13, &[]);
+
+        assert!(!script.contains("L.map("));
+        assert!(!script.contains("L.tileLayer("));
+        assert!(!script.contains("map.on(\"click\""));
+    }
+
+    #[test]
+    fn build_update_script_removes_the_previous_markers_before_adding_new_ones() {
+        let markers = vec![MapMarker {
+            lat: 4.72,
+            lng: -74.08,
+            label: None,
+        }];
+
+        let script = build_update_script("motoya-map-0", 4.71, -74.07, 13, &markers);
+
+        assert!(script.contains("map.__motoyaMarkers || []).forEach"));
+        assert!(script.contains("map.removeLayer(marker);"));
+        assert!(script.contains("map.__motoyaMarkers.push(L.marker([4.72, -74.08]).addTo(map));"));
     }
 }
