@@ -30,13 +30,25 @@
 //! saca de la lista con un mensaje explicito en vez de un error generico, tal
 //! como pide el criterio de aceptacion del issue.
 //!
-//! Mientras el viaje aceptado siga en `accepted`, se ofrece un boton
-//! "Iniciar viaje" que llama a `POST /api/v1/rides/{ride}/start`
+//! Mientras el viaje aceptado siga en `accepted`, se ofrecen dos botones:
+//! "Iniciar viaje", que llama a `POST /api/v1/rides/{ride}/start`
 //! (`ApiClient::start_ride`, issue #18) — la condicion de estado es lo que
 //! hace que el boton no este disponible si el viaje ya paso a otro estado
 //! (criterio de aceptacion del issue). Al iniciar con exito, la pantalla
 //! reemplaza el viaje en pantalla por la version devuelta por el backend
 //! (ahora `in_progress`, con `started_at`) en vez de solo esconder el boton.
+//! Y "Cancelar viaje", que llama a `POST /api/v1/rides/{ride}/cancel`
+//! (`ApiClient::cancel_ride`, issue #22) para que el conductor libere un
+//! viaje que acepto pero todavia no inicio. A diferencia de cuando cancela
+//! el pasajero (issues #15/#21), aqui el viaje no queda `cancelled`: vuelve a
+//! `requested` sin conductor asignado, para que otro conductor pueda
+//! tomarlo (`RideCancellation::cancellation_fee_applies` llega `None` en
+//! este caso, ver `moto_core::models`), asi que esta pantalla simplemente
+//! deja de mostrarlo como "su" viaje aceptado y vuelve a la lista de
+//! solicitudes cercanas, sin un panel de resultado como el de
+//! `RideEstimateScreen`. Un viaje `in_progress` ya no se puede cancelar por
+//! este endpoint segun `openapi.yaml` (solo completarse, historia #23), asi
+//! que el boton no se ofrece en ese estado.
 //!
 //! Mientras el viaje siga en `in_progress`, `ShareLocationPanel` publica
 //! periodicamente la posicion del conductor con
@@ -57,8 +69,8 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use futures_timer::Delay;
 use moto_core::api::{
-    AcceptRideError, ApiClient, AuthenticatedRequestError, GetVehicleError, ShareRideLocationError,
-    StartRideError,
+    AcceptRideError, ApiClient, AuthenticatedRequestError, CancelRideError, GetVehicleError,
+    ShareRideLocationError, StartRideError,
 };
 use moto_core::location::{LocationError, LocationProvider};
 use moto_core::models::{NearbyRideRequest, Ride, RideStatus, apply_nearby_ride_event};
@@ -335,6 +347,12 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                                 accepted_ride.set(Some(started));
                             },
                         }
+                        CancelAcceptedRideButton {
+                            ride_id: ride.id,
+                            on_cancelled: move |_| {
+                                accepted_ride.set(None);
+                            },
+                        }
                     } else if ride.status == RideStatus::InProgress {
                         ShareLocationPanel { ride_id: ride.id }
                     }
@@ -526,6 +544,82 @@ fn StartRideButton(props: StartRideButtonProps) -> Element {
             }
             if let Some(message) = error() {
                 p { class: "nearby-ride-start-error", role: "alert", "{message}" }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct CancelAcceptedRideButtonProps {
+    ride_id: u64,
+    on_cancelled: EventHandler<()>,
+}
+
+/// Boton "Cancelar viaje" del viaje aceptado, antes de iniciarlo (issue
+/// #22). Llama a `ApiClient::cancel_ride`, el mismo endpoint que usa el
+/// pasajero (issues #15/#21) — el backend decide segun quien llama, ver el
+/// comentario de modulo mas arriba. Al tener exito no hay nada que mostrar
+/// (el viaje ya no es "suyo"), asi que solo avisa al padre para que vuelva a
+/// la lista; el estado de carga/error queda aparte, igual que
+/// `StartRideButton`, para no afectar al resto de la pantalla mientras la
+/// llamada esta en curso.
+#[component]
+fn CancelAcceptedRideButton(props: CancelAcceptedRideButtonProps) -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+
+    let mut is_cancelling = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let ride_id = props.ride_id;
+    let on_cancelled = props.on_cancelled;
+
+    let on_cancel_click = move |_| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+
+        spawn(async move {
+            is_cancelling.set(true);
+            error.set(None);
+
+            match api_client.cancel_ride(&token, ride_id).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    on_cancelled.call(());
+                }
+                Err(CancelRideError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                Err(err) => {
+                    error.set(Some(err.to_string()));
+                }
+            }
+
+            is_cancelling.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "nearby-ride-cancel",
+            button {
+                r#type: "button",
+                class: "nearby-ride-cancel-button",
+                disabled: is_cancelling(),
+                onclick: on_cancel_click,
+                if is_cancelling() {
+                    "Cancelando..."
+                } else {
+                    "Cancelar viaje"
+                }
+            }
+            if let Some(message) = error() {
+                p { class: "nearby-ride-cancel-error", role: "alert", "{message}" }
             }
         }
     }

@@ -258,7 +258,7 @@ pub struct Ride {
 /// respuesta de `POST /api/v1/rides/{ride}/cancel` (issue #15).
 ///
 /// `cancellation_fee_applies` esta ausente cuando quien cancela es el
-/// conductor asignado (historia #23, fuera de alcance de #15): ese caso no
+/// conductor asignado (historia #22, fuera de alcance de #15): ese caso no
 /// cancela el viaje, solo lo devuelve al pool sin conductor. `#[serde(flatten)]`
 /// reutiliza `Ride` en vez de repetir sus campos.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
