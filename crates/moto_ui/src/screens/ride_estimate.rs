@@ -14,13 +14,19 @@
 //! `moto_ui/src/map.rs`), no con campos de texto: la historia depende
 //! explicitamente del componente de mapa (issue #4).
 //!
-//! Mientras el viaje solicitado sigue en `requested` (nadie lo acepto
-//! todavia), el pasajero puede desistir con `POST /api/v1/rides/{ride}/cancel`
-//! (`ApiClient::cancel_ride`, issue #15), lo que devuelve la pantalla al
-//! estado inicial para poder solicitar otro viaje. Una vez que el viaje pasa
-//! a `accepted` este boton deja de ofrecerse — cancelar un viaje ya aceptado
-//! es la historia "Cancelar un viaje aceptado (pasajero)" (#21), fuera de
-//! alcance aca.
+//! Mientras el viaje solicitado sigue en `requested` o `accepted`, el
+//! pasajero puede desistir con `POST /api/v1/rides/{ride}/cancel`
+//! (`ApiClient::cancel_ride`). En `requested` es la historia #15 ("nadie lo
+//! acepto todavia"); en `accepted` es la historia "Cancelar un viaje
+//! aceptado (pasajero)" (#21) — mismo endpoint, el backend decide si aplica
+//! una penalizacion segun `openapi.yaml` (`cancellation_fee_applies`: `false`
+//! sin conductor asignado todavia, `true` si ya lo habia). Un viaje
+//! `in_progress` no es cancelable por este endpoint segun ese mismo contrato
+//! (solo se puede completar, historia #23), asi que el boton no se ofrece en
+//! ese estado pese a que el criterio de aceptacion original de #21 lo
+//! mencionaba — ver la justificacion en la descripcion del PR. Tras un
+//! cancelacion exitosa se muestra explicitamente si hubo penalizacion antes
+//! de volver la pantalla al estado inicial para poder solicitar otro viaje.
 //!
 //! Mientras el viaje siga activo (`requested`, `accepted` o `in_progress`),
 //! `RideTrackingPanel` (issue #20) pide el estado actual por
@@ -43,7 +49,8 @@ use moto_core::api::{
     ApiClient, CancelRideError, EstimateRideError, GetRideError, RequestRideError,
 };
 use moto_core::models::{
-    Coordinates, Ride, RideEstimate, RideStatus, RideTracking, apply_ride_tracking_event,
+    Coordinates, Ride, RideCancellation, RideEstimate, RideStatus, RideTracking,
+    apply_ride_tracking_event,
 };
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
@@ -89,6 +96,7 @@ pub fn RideEstimateScreen() -> Element {
     let mut is_requesting = use_signal(|| false);
     let mut cancel_error = use_signal(|| None::<CancelRideError>);
     let mut is_cancelling = use_signal(|| false);
+    let mut cancellation_result = use_signal(|| None::<RideCancellation>);
 
     let on_map_click = move |(lat, lng): (f64, f64)| {
         estimate.set(None);
@@ -228,13 +236,7 @@ pub fn RideEstimateScreen() -> Element {
                     if let Some(refreshed) = fetch.refreshed_token {
                         session.update_token(refreshed, storage.as_ref());
                     }
-                    requested_ride.set(None);
-                    estimate.set(None);
-                    estimate_error.set(None);
-                    ride_error.set(None);
-                    origin.set(None);
-                    destination.set(None);
-                    pick_target.set(PickTarget::Origin);
+                    cancellation_result.set(Some(fetch.data));
                 }
                 Err(CancelRideError::SessionExpired) => {
                     session.logout(storage.as_ref());
@@ -246,6 +248,21 @@ pub fn RideEstimateScreen() -> Element {
 
             is_cancelling.set(false);
         });
+    };
+
+    // Vuelve la pantalla al estado inicial una vez que el pasajero ya vio si
+    // se le aplico una penalizacion (issue #21) — mismo reseteo que antes
+    // hacia `on_cancel_click` directamente al confirmar la cancelacion.
+    let on_cancellation_dismiss = move |_| {
+        cancellation_result.set(None);
+        requested_ride.set(None);
+        estimate.set(None);
+        estimate_error.set(None);
+        ride_error.set(None);
+        cancel_error.set(None);
+        origin.set(None);
+        destination.set(None);
+        pick_target.set(PickTarget::Origin);
     };
 
     let markers: Vec<MapMarker> = [
@@ -271,6 +288,25 @@ pub fn RideEstimateScreen() -> Element {
         PickTarget::Destination => "Toca el mapa para elegir el destino.",
     };
 
+    if let Some(cancellation) = cancellation_result() {
+        // Confirmacion explicita de la penalizacion (issue #21) antes de
+        // volver al estado inicial — el pasajero decide cuando descartarla.
+        return rsx! {
+            div { class: "ride-estimate-screen",
+                h2 { "Viaje cancelado" }
+                p { class: "ride-cancellation-status",
+                    "{cancellation_fee_message(cancellation.cancellation_fee_applies)}"
+                }
+                button {
+                    r#type: "button",
+                    class: "ride-cancellation-dismiss-button",
+                    onclick: on_cancellation_dismiss,
+                    "Solicitar otro viaje"
+                }
+            }
+        };
+    }
+
     if let Some(ride) = requested_ride() {
         // Mientras el viaje sigue activo hay algo que seguir en tiempo real
         // (issue #20): una vez `completed`/`cancelled` no queda nada mas que
@@ -281,6 +317,15 @@ pub fn RideEstimateScreen() -> Element {
             ride.status,
             RideStatus::Requested | RideStatus::Accepted | RideStatus::InProgress
         );
+        // El pasajero puede desistir mientras el viaje sigue `requested`
+        // (issue #15) o ya `accepted` (issue #21) — en `in_progress` el
+        // endpoint ya no lo permite segun `openapi.yaml`, ver el comentario
+        // de modulo mas arriba.
+        let is_cancellable = matches!(ride.status, RideStatus::Requested | RideStatus::Accepted);
+        let cancel_button_label = match ride.status {
+            RideStatus::Requested => "Cancelar solicitud",
+            _ => "Cancelar viaje",
+        };
 
         return rsx! {
             div { class: "ride-estimate-screen",
@@ -294,7 +339,7 @@ pub fn RideEstimateScreen() -> Element {
                     dt { "Tarifa estimada" }
                     dd { "{ride.currency} {ride.estimated_fare}" }
                 }
-                if ride.status == RideStatus::Requested {
+                if is_cancellable {
                     button {
                         r#type: "button",
                         class: "ride-cancel-button",
@@ -303,7 +348,7 @@ pub fn RideEstimateScreen() -> Element {
                         if is_cancelling() {
                             "Cancelando..."
                         } else {
-                            "Cancelar solicitud"
+                            "{cancel_button_label}"
                         }
                     }
                     if let Some(err) = cancel_error() {
@@ -617,6 +662,20 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
     }
 }
 
+/// Mensaje explicito de penalizacion tras cancelar (issue #21).
+/// `cancellation_fee_applies` solo falta cuando quien cancela es el
+/// conductor asignado (ver `RideCancellation` en `moto_core::models`), caso
+/// que no ocurre en este flujo de pasajero — se trata igual que `Some(false)`
+/// por si acaso.
+fn cancellation_fee_message(fee_applies: Option<bool>) -> &'static str {
+    match fee_applies {
+        Some(true) => {
+            "Se aplicara una penalizacion porque el conductor ya se habia desplazado hacia el punto de recogida."
+        }
+        Some(false) | None => "No se aplico ninguna penalizacion.",
+    }
+}
+
 /// Texto para el pasajero segun el estado del viaje recien solicitado
 /// (`Ride::status`). Justo despues de `POST /api/v1/rides` el viaje siempre
 /// nace `requested`; los demas casos son los que reporta `RideTrackingPanel`
@@ -628,5 +687,34 @@ fn ride_status_label(status: RideStatus) -> &'static str {
         RideStatus::InProgress => "Tu viaje esta en curso.",
         RideStatus::Completed => "Tu viaje ya se completo.",
         RideStatus::Cancelled => "Este viaje fue cancelado.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_fee_message_warns_about_the_penalty_when_it_applies() {
+        assert_eq!(
+            cancellation_fee_message(Some(true)),
+            "Se aplicara una penalizacion porque el conductor ya se habia desplazado hacia el punto de recogida."
+        );
+    }
+
+    #[test]
+    fn cancellation_fee_message_reassures_when_no_penalty_applies() {
+        assert_eq!(
+            cancellation_fee_message(Some(false)),
+            "No se aplico ninguna penalizacion."
+        );
+    }
+
+    #[test]
+    fn cancellation_fee_message_treats_a_missing_flag_as_no_penalty() {
+        assert_eq!(
+            cancellation_fee_message(None),
+            "No se aplico ninguna penalizacion."
+        );
     }
 }
