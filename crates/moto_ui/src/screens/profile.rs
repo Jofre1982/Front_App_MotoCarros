@@ -81,7 +81,10 @@ pub fn ProfileScreen() -> Element {
 
     rsx! {
         div { class: "profile-screen",
-            h2 { "Mi perfil" }
+            div { class: "motoya-brand",
+                crate::icons::IniridaFlowerIcon {}
+                h2 { "Mi perfil" }
+            }
             if is_loading() {
                 p { "Cargando perfil..." }
             } else if let Some(message) = error_message() {

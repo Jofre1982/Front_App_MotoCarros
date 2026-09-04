@@ -6,9 +6,12 @@ use moto_core::models::Role;
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+pub mod icons;
 pub mod map;
 pub mod screens;
+pub mod theme;
 
+pub use icons::{IniridaFlowerIcon, MavicureHillsIcon, MotocarroIcon};
 pub use map::{MapMarker, MapView};
 pub use screens::driver_earnings::DriverEarningsScreen;
 pub use screens::login::LoginScreen;
@@ -20,6 +23,7 @@ pub use screens::register_vehicle::RegisterVehicleScreen;
 pub use screens::ride_estimate::RideEstimateScreen;
 pub use screens::ride_history::RideHistoryScreen;
 pub use screens::vehicle::VehicleScreen;
+pub use theme::GlobalStyles;
 
 /// Pantallas del flujo de autenticacion, previas a tener sesion iniciada.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -51,6 +55,7 @@ pub fn App() -> Element {
     });
 
     rsx! {
+        GlobalStyles {}
         if session.is_authenticated() {
             Home {}
         } else {
@@ -139,7 +144,10 @@ fn Home() -> Element {
 
     rsx! {
         div {
-            h1 { "MotoYa" }
+            div { class: "motoya-brand",
+                MotocarroIcon {}
+                h1 { "MotoYa" }
+            }
             nav { class: "home-nav",
                 button {
                     r#type: "button",
