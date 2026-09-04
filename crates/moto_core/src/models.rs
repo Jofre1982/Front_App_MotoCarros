@@ -268,6 +268,27 @@ pub struct RideCancellation {
     pub cancellation_fee_applies: Option<bool>,
 }
 
+/// `openapi.yaml#/components/schemas/RideReceipt` — respuesta de
+/// `GET /api/v1/rides/{ride}/receipt` (historia #25): el desglose que
+/// produjo el cobro publicado en `Ride.payment`/`Ride.final_fare`. A
+/// diferencia de `Payment` embebido en `Ride`, repite `currency` y `total`:
+/// este es el recurso principal de la respuesta y tiene que bastarse solo,
+/// sin depender de que el cliente ya tenga el viaje cargado.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RideReceipt {
+    pub ride_id: u64,
+    pub currency: String,
+    pub base_fare: i64,
+    pub distance_fare: i64,
+    pub time_fare: i64,
+    pub waiting_fee: i64,
+    pub subtotal: i64,
+    pub minimum_applied: bool,
+    pub total: i64,
+    pub payment_status: PaymentStatus,
+    pub completed_at: String,
+}
+
 /// Body de `POST /api/v1/rides/{ride}/rate-driver` (historia #26). `comment`
 /// se omite del JSON cuando es `None` en vez de mandarse como `null`: el
 /// backend lo declara `nullable` pero no `required`, y el resto de los
@@ -736,6 +757,33 @@ mod tests {
         assert_eq!(envelope.data.currency, "COP");
         assert_eq!(envelope.data.total_earned, 17500);
         assert_eq!(envelope.data.completed_rides, 2);
+    }
+
+    #[test]
+    fn deserializes_ride_receipt_envelope() {
+        let json = r#"{
+            "data": {
+                "ride_id": 1,
+                "currency": "COP",
+                "base_fare": 1500,
+                "distance_fare": 5937,
+                "time_fare": 1000,
+                "waiting_fee": 0,
+                "subtotal": 8437,
+                "minimum_applied": false,
+                "total": 8450,
+                "payment_status": "paid",
+                "completed_at": "2026-07-31T14:19:05+00:00"
+            }
+        }"#;
+
+        let envelope: DataEnvelope<RideReceipt> = serde_json::from_str(json).unwrap();
+
+        assert_eq!(envelope.data.ride_id, 1);
+        assert_eq!(envelope.data.currency, "COP");
+        assert_eq!(envelope.data.total, 8450);
+        assert!(!envelope.data.minimum_applied);
+        assert_eq!(envelope.data.payment_status, PaymentStatus::Paid);
     }
 
     #[test]
