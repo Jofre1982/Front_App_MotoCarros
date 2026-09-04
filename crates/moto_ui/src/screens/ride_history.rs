@@ -11,6 +11,11 @@
 //! `DriverEarningsScreen` (historia #29), que reutiliza `ride_status_label`
 //! de aca pero tiene su propio fetch — `Home` (`moto_ui/src/lib.rs`) solo
 //! ofrece esta pestana a cuentas de pasajero.
+//!
+//! Cada viaje `completed` ofrece un "Ver recibo" que abre `RideReceiptScreen`
+//! (historia #25) para ese `ride_id`, en vez de una pantalla aparte
+//! registrada en `Home`: el recibo solo tiene sentido en el contexto de un
+//! viaje de este historial, nunca como seccion propia de la navegacion.
 
 use std::sync::Arc;
 
@@ -19,6 +24,8 @@ use moto_core::api::{ApiClient, AuthenticatedRequestError};
 use moto_core::models::{Ride, RideStatus};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
+
+use super::ride_receipt::RideReceiptScreen;
 
 #[component]
 pub fn RideHistoryScreen() -> Element {
@@ -34,6 +41,10 @@ pub fn RideHistoryScreen() -> Element {
     // signal, y el fetch puede terminar escribiendo en `session` (refresh de
     // token, logout) — sin esta bandera reprogramaria el efecto en un loop.
     let mut has_fetched = use_signal(|| false);
+    // `Some(ride_id)` mientras se ve el recibo de ese viaje (historia #25):
+    // reemplaza la lista en vez de superponerse, mismo patron de navegacion
+    // manual por signal que `HomeSection` en `moto_ui/src/lib.rs`.
+    let mut viewing_receipt = use_signal(|| None::<u64>);
 
     use_effect(move || {
         if has_fetched() {
@@ -74,7 +85,12 @@ pub fn RideHistoryScreen() -> Element {
     rsx! {
         div { class: "ride-history-screen",
             h2 { "Historial de viajes" }
-            if is_loading() {
+            if let Some(ride_id) = viewing_receipt() {
+                RideReceiptScreen {
+                    ride_id,
+                    on_close: move |_| viewing_receipt.set(None),
+                }
+            } else if is_loading() {
                 p { "Cargando..." }
             } else if let Some(message) = load_error() {
                 p { class: "ride-history-error", role: "alert", "{message}" }
@@ -83,7 +99,11 @@ pub fn RideHistoryScreen() -> Element {
             } else {
                 ul { class: "ride-history-list",
                     for ride in rides() {
-                        RideHistoryRow { key: "{ride.id}", ride }
+                        RideHistoryRow {
+                            key: "{ride.id}",
+                            ride,
+                            on_view_receipt: move |ride_id| viewing_receipt.set(Some(ride_id)),
+                        }
                     }
                 }
             }
@@ -94,12 +114,14 @@ pub fn RideHistoryScreen() -> Element {
 #[derive(Props, Clone, PartialEq)]
 struct RideHistoryRowProps {
     ride: Ride,
+    on_view_receipt: EventHandler<u64>,
 }
 
 #[component]
 fn RideHistoryRow(props: RideHistoryRowProps) -> Element {
     let ride = &props.ride;
     let fare = ride.final_fare.unwrap_or(ride.estimated_fare);
+    let ride_id = ride.id;
 
     rsx! {
         li { class: "ride-history-row",
@@ -110,6 +132,13 @@ fn RideHistoryRow(props: RideHistoryRowProps) -> Element {
             p { "Tarifa: {ride.currency} {fare}" }
             if let Some(driver) = &ride.driver {
                 p { "Conductor: {driver.name}" }
+            }
+            if ride.status == RideStatus::Completed {
+                button {
+                    r#type: "button",
+                    onclick: move |_| props.on_view_receipt.call(ride_id),
+                    "Ver recibo"
+                }
             }
         }
     }

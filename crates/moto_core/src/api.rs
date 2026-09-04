@@ -8,8 +8,8 @@ use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload, BroadcastAuthResponse,
     Coordinates, DataEnvelope, DriverEarningsSummary, LoginPayload, RateDriverPayload,
     RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload, Ride,
-    RideCancellation, RideEstimate, RideEstimateRequestPayload, RideRating, RideRequestPayload,
-    UpdateProfilePayload, UpdateVehiclePayload, User, Vehicle,
+    RideCancellation, RideEstimate, RideEstimateRequestPayload, RideRating, RideReceipt,
+    RideRequestPayload, UpdateProfilePayload, UpdateVehiclePayload, User, Vehicle,
 };
 
 #[cfg(test)]
@@ -937,6 +937,50 @@ impl std::fmt::Display for GetRideError {
 
 impl std::error::Error for GetRideError {}
 
+/// Fallos posibles de `GET /api/v1/rides/{ride}/receipt` (historia #25).
+///
+/// `Forbidden` cubre tanto a otro pasajero como al conductor asignado: el
+/// recibo es lo que se le cobro al pasajero, no un dato del viaje en si, asi
+/// que a diferencia de `GetRideError` el conductor tambien recibe 403
+/// (`RidePolicy::viewReceipt` en el backend). `Validation` cubre que el
+/// viaje todavia no este `completed`, o que no tenga un pago procesado
+/// todavia: el backend responde el mismo 422 para ambos casos a proposito
+/// (ver `openapi.yaml`), asi que el cliente no los distingue.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GetReceiptError {
+    Forbidden,
+    /// No existe ningun viaje con ese id.
+    NotFound,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for GetReceiptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GetReceiptError::Forbidden => write!(f, "Este recibo no te pertenece."),
+            GetReceiptError::NotFound => write!(f, "El viaje ya no existe."),
+            GetReceiptError::Validation(body) => write!(f, "{}", body.message),
+            GetReceiptError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            GetReceiptError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            GetReceiptError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GetReceiptError {}
+
 /// Fallos posibles de `POST /api/v1/broadcasting/auth` (issue #5).
 ///
 /// A diferencia del resto de las requests autenticadas, esta nunca reintenta
@@ -1119,6 +1163,14 @@ enum GetRideOutcome<T> {
     Unauthorized,
     Forbidden,
     NotFound,
+}
+
+enum GetReceiptOutcome<T> {
+    Success(T),
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Validation(ApiErrorBody),
 }
 
 enum GetEarningsOutcome<T> {
@@ -2795,6 +2847,93 @@ impl ApiClient {
             403 => Ok(GetRideOutcome::Forbidden),
             404 => Ok(GetRideOutcome::NotFound),
             other => Err(GetRideError::Unexpected(other)),
+        }
+    }
+
+    /// `GET /api/v1/rides/{ride}/receipt` — historia #25. Se pide bajo
+    /// demanda cuando el pasajero abre el recibo de un viaje completado
+    /// desde `RideHistoryScreen` (`moto_ui`), sin fetch automatico. Mismo
+    /// reparto que `get_ride`: reintenta una vez con refresh de token ante
+    /// un 401; un 403 (recibo ajeno), 404 (no existe) o 422 (todavia no
+    /// disponible) nunca se reintentan.
+    pub async fn ride_receipt(
+        &self,
+        token: &AuthToken,
+        ride_id: u64,
+    ) -> Result<AuthenticatedFetch<RideReceipt>, GetReceiptError> {
+        match self
+            .get_receipt_with_token(ride_id, &token.access_token)
+            .await?
+        {
+            GetReceiptOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            GetReceiptOutcome::Forbidden => return Err(GetReceiptError::Forbidden),
+            GetReceiptOutcome::NotFound => return Err(GetReceiptError::NotFound),
+            GetReceiptOutcome::Validation(body) => return Err(GetReceiptError::Validation(body)),
+            GetReceiptOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| GetReceiptError::SessionExpired)?;
+
+        match self
+            .get_receipt_with_token(ride_id, &renewed.access_token)
+            .await?
+        {
+            GetReceiptOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            GetReceiptOutcome::Forbidden => Err(GetReceiptError::Forbidden),
+            GetReceiptOutcome::NotFound => Err(GetReceiptError::NotFound),
+            GetReceiptOutcome::Validation(body) => Err(GetReceiptError::Validation(body)),
+            GetReceiptOutcome::Unauthorized => Err(GetReceiptError::SessionExpired),
+        }
+    }
+
+    async fn get_receipt_with_token(
+        &self,
+        ride_id: u64,
+        access_token: &str,
+    ) -> Result<GetReceiptOutcome<RideReceipt>, GetReceiptError> {
+        let url = format!("{}/api/v1/rides/{}/receipt", self.base_url, ride_id);
+
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|err| GetReceiptError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<RideReceipt> = response
+                .json()
+                .await
+                .map_err(|err| GetReceiptError::Network(err.to_string()))?;
+            return Ok(GetReceiptOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(GetReceiptOutcome::Unauthorized),
+            403 => Ok(GetReceiptOutcome::Forbidden),
+            404 => Ok(GetReceiptOutcome::NotFound),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| GetReceiptError::Network(err.to_string()))?;
+                Ok(GetReceiptOutcome::Validation(body))
+            }
+            other => Err(GetReceiptError::Unexpected(other)),
         }
     }
 
@@ -6655,6 +6794,187 @@ mod tests {
         let error = client.get_ride(&sample_token(), 1).await.unwrap_err();
 
         assert!(matches!(error, GetRideError::Network(_)));
+    }
+
+    fn sample_receipt_json() -> serde_json::Value {
+        serde_json::json!({
+            "ride_id": 1,
+            "currency": "COP",
+            "base_fare": 1500,
+            "distance_fare": 5937,
+            "time_fare": 1000,
+            "waiting_fee": 0,
+            "subtotal": 8437,
+            "minimum_applied": false,
+            "total": 8450,
+            "payment_status": "paid",
+            "completed_at": "2026-07-31T14:19:05+00:00",
+        })
+    }
+
+    #[tokio::test]
+    async fn ride_receipt_returns_the_charge_breakdown() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/1/receipt"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_receipt_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.ride_receipt(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.ride_id, 1);
+        assert_eq!(fetch.data.total, 8450);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn ride_receipt_returns_forbidden_on_403_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/1/receipt"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.ride_receipt(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, GetReceiptError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn ride_receipt_returns_not_found_on_404_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/999/receipt"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No query results for model [App\\Models\\Ride] 999.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.ride_receipt(&sample_token(), 999).await.unwrap_err();
+
+        assert_eq!(error, GetReceiptError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn ride_receipt_returns_validation_when_the_ride_has_no_processed_payment_yet() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/1/receipt"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "El recibo todavia no esta disponible para este viaje.",
+                "errors": { "ride": ["El recibo todavia no esta disponible para este viaje."] },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.ride_receipt(&sample_token(), 1).await.unwrap_err();
+
+        assert!(matches!(error, GetReceiptError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn ride_receipt_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/1/receipt"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/1/receipt"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_receipt_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.ride_receipt(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.ride_id, 1);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn ride_receipt_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/1/receipt"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.ride_receipt(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, GetReceiptError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn ride_receipt_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client.ride_receipt(&sample_token(), 1).await.unwrap_err();
+
+        assert!(matches!(error, GetReceiptError::Network(_)));
     }
 
     #[tokio::test]
