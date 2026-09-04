@@ -39,6 +39,13 @@
 //! pura testeada aparte de Dioxus. El mapa reusa `MapView` (issue #4), que
 //! desde esta historia actualiza sus marcadores reactivamente en vez de solo
 //! al montarse (ver `moto_ui/src/map.rs`).
+//!
+//! Una vez `completed`, el pasajero ve el resultado del cobro leyendo
+//! `Ride::payment` (historia #24) -- el cobro mismo ya ocurrio de forma
+//! sincronica dentro de `POST /api/v1/rides/{ride}/complete` (issue #23), asi
+//! que esta pantalla nunca llama a ningun endpoint de "pagar" (no existe uno
+//! en el backend). Un cobro `failed` no ofrece boton de reintentar porque el
+//! backend tampoco expone esa accion.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,8 +56,8 @@ use moto_core::api::{
     ApiClient, CancelRideError, EstimateRideError, GetRideError, RateDriverError, RequestRideError,
 };
 use moto_core::models::{
-    Coordinates, Ride, RideCancellation, RideEstimate, RideRating, RideStatus, RideTracking,
-    apply_ride_tracking_event,
+    Coordinates, PaymentStatus, Ride, RideCancellation, RideEstimate, RideRating, RideStatus,
+    RideTracking, apply_ride_tracking_event,
 };
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
@@ -363,6 +370,23 @@ pub fn RideEstimateScreen() -> Element {
                         },
                     }
                 } else if ride.status == RideStatus::Completed {
+                    // El cobro ya ocurrio de forma sincronica dentro de
+                    // `POST /api/v1/rides/{ride}/complete` (issue #23, lo
+                    // dispara el conductor) -- esta pantalla no ejecuta
+                    // ningun pago, solo lee el resultado que ya viene en el
+                    // `Ride` (historia #24).
+                    if let Some(payment) = ride.payment {
+                        let payment_class = match payment.status {
+                            PaymentStatus::Paid => "payment-result-panel payment-result-paid",
+                            PaymentStatus::Failed => "payment-result-panel payment-result-failed",
+                            PaymentStatus::Pending => "payment-result-panel payment-result-pending",
+                        };
+                        p {
+                            class: payment_class,
+                            role: if payment.status == PaymentStatus::Failed { "alert" } else { "status" },
+                            "{payment_result_message(payment.status)}"
+                        }
+                    }
                     RateDriverPanel { ride_id: ride.id }
                 }
             }
@@ -830,6 +854,27 @@ fn ride_status_label(status: RideStatus) -> &'static str {
     }
 }
 
+/// Texto para el pasajero segun el resultado del cobro de un viaje recien
+/// completado (`Ride::payment`, historia #24). El backend no expone ningun
+/// endpoint para reintentar un cobro fallido (`ChargeRideAction` es
+/// idempotente puertas adentro, pero no hay ninguna ruta que la vuelva a
+/// disparar -- ver la discusion en el issue), asi que un pago `failed` nunca
+/// sugiere reintentar, solo contactar soporte. La historia "Ver recibo"
+/// (#25) todavia no existe como pantalla propia, asi que un pago `paid`
+/// remite al historial de viajes (issue #28, ya disponible) en vez de
+/// ofrecer una navegacion que hoy no tiene destino.
+fn payment_result_message(status: PaymentStatus) -> &'static str {
+    match status {
+        PaymentStatus::Paid => {
+            "El cobro de tu viaje se proceso correctamente. Podras ver el detalle en la seccion \"Historial de viajes\"."
+        }
+        PaymentStatus::Failed => {
+            "No pudimos procesar el cobro de tu viaje. Si el problema persiste, contacta a soporte."
+        }
+        PaymentStatus::Pending => "Estamos procesando el cobro de tu viaje.",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -856,5 +901,25 @@ mod tests {
             cancellation_fee_message(None),
             "No se aplico ninguna penalizacion."
         );
+    }
+
+    #[test]
+    fn payment_result_message_confirms_a_successful_charge() {
+        let message = payment_result_message(PaymentStatus::Paid);
+        assert!(message.contains("proceso correctamente"));
+        assert!(message.contains("Historial de viajes"));
+    }
+
+    #[test]
+    fn payment_result_message_does_not_suggest_retrying_a_failed_charge() {
+        let message = payment_result_message(PaymentStatus::Failed);
+        assert!(message.to_lowercase().contains("soporte"));
+        assert!(!message.to_lowercase().contains("reintent"));
+        assert!(!message.to_lowercase().contains("pagar"));
+    }
+
+    #[test]
+    fn payment_result_message_reports_a_pending_charge_as_in_progress() {
+        assert!(payment_result_message(PaymentStatus::Pending).contains("procesando"));
     }
 }
