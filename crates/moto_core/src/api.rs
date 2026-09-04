@@ -2530,6 +2530,11 @@ impl ApiClient {
     /// ante un 401, igual que `complete_ride`; un 403 (viaje ajeno), 404 (no
     /// existe) o 422 (viaje no completado, o ya calificado) nunca se
     /// reintentan.
+    ///
+    /// No usado actualmente por ninguna pantalla: la historia #26 se retiro
+    /// del alcance (issue #55, decision de producto documentada en #27) antes
+    /// de salir a produccion. Se conserva el cliente por si se reintroduce la
+    /// funcionalidad mas adelante.
     pub async fn rate_driver(
         &self,
         token: &AuthToken,
