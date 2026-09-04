@@ -376,13 +376,12 @@ pub fn RideEstimateScreen() -> Element {
                     // ningun pago, solo lee el resultado que ya viene en el
                     // `Ride` (historia #24).
                     if let Some(payment) = ride.payment {
-                        let payment_class = match payment.status {
-                            PaymentStatus::Paid => "payment-result-panel payment-result-paid",
-                            PaymentStatus::Failed => "payment-result-panel payment-result-failed",
-                            PaymentStatus::Pending => "payment-result-panel payment-result-pending",
-                        };
                         p {
-                            class: payment_class,
+                            class: match payment.status {
+                                PaymentStatus::Paid => "payment-result-panel payment-result-paid",
+                                PaymentStatus::Failed => "payment-result-panel payment-result-failed",
+                                PaymentStatus::Pending => "payment-result-panel payment-result-pending",
+                            },
                             role: if payment.status == PaymentStatus::Failed { "alert" } else { "status" },
                             "{payment_result_message(payment.status)}"
                         }
