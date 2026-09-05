@@ -2169,6 +2169,7 @@ impl ApiClient {
         let type_value = match document_type {
             DocumentType::Identidad => "identidad",
             DocumentType::TarjetaPropiedad => "tarjeta_propiedad",
+            DocumentType::FotoVehiculo => "foto_vehiculo",
         };
 
         let mut file_part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_string());

@@ -121,6 +121,10 @@ pub struct ConfirmPhoneVerificationPayload {
 /// Tipo de documento de verificacion del conductor
 /// (`openapi.yaml#/components/schemas/DriverDocument` de `Back_App_MotoCarros`).
 ///
+/// `FotoVehiculo` es antifraude (historia tecnica #75 del backend), no de
+/// identidad: la tarjeta de propiedad por si sola no prueba que corresponda
+/// al vehiculo fisico que el conductor realmente opera.
+///
 /// Licencia de conduccion y SOAT no son obligatorios todavia (decision de
 /// negocio explicita del backend) y por eso no tienen variante aca: agregar
 /// una sin que el backend la exija se romperia contra la lista real de
@@ -130,6 +134,7 @@ pub struct ConfirmPhoneVerificationPayload {
 pub enum DocumentType {
     Identidad,
     TarjetaPropiedad,
+    FotoVehiculo,
 }
 
 /// Estado de revision de un documento de verificacion.
