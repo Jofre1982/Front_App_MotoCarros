@@ -118,6 +118,70 @@ pub struct ConfirmPhoneVerificationPayload {
     pub code: String,
 }
 
+/// Tipo de documento de verificacion del conductor
+/// (`openapi.yaml#/components/schemas/DriverDocument` de `Back_App_MotoCarros`).
+///
+/// Licencia de conduccion y SOAT no son obligatorios todavia (decision de
+/// negocio explicita del backend) y por eso no tienen variante aca: agregar
+/// una sin que el backend la exija se romperia contra la lista real de
+/// documentos que expone `GET /me/documents`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentType {
+    Identidad,
+    TarjetaPropiedad,
+}
+
+/// Estado de revision de un documento de verificacion.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+/// Estado de un documento tal como lo devuelve `GET /me/documents`: `status`
+/// es `None` cuando el conductor todavia no lo subio (el backend lo publica
+/// igual, con el valor en `null`, para que la UI conozca los tipos exigidos
+/// sin adivinarlos).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DriverDocumentStatus {
+    #[serde(rename = "type")]
+    pub document_type: DocumentType,
+    pub status: Option<DocumentStatus>,
+    pub rejection_reason: Option<String>,
+    pub uploaded_at: Option<String>,
+}
+
+/// Estado de verificacion general del conductor
+/// (`openapi.yaml#/components/schemas/DriverVerification`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationStatus {
+    Pending,
+    Verified,
+    Rejected,
+}
+
+/// `GET /api/v1/me/documents` — estado de verificacion del conductor
+/// autenticado.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DriverVerification {
+    pub verification_status: VerificationStatus,
+    pub documents: Vec<DriverDocumentStatus>,
+}
+
+/// Respuesta de `POST /api/v1/me/documents`: el documento recien subido
+/// (`openapi.yaml#/components/schemas/DriverDocument`).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UploadedDriverDocument {
+    #[serde(rename = "type")]
+    pub document_type: DocumentType,
+    pub status: DocumentStatus,
+    pub uploaded_at: String,
+}
+
 /// Body de `POST /api/v1/me/vehicle`
 /// (`openapi.yaml#/components/schemas/VehicleRegistrationRequest`).
 ///
@@ -610,6 +674,66 @@ mod tests {
         assert_eq!(envelope.data.plate, "ABC12D");
         assert_eq!(envelope.data.model, "Bajaj Boxer CT 100");
         assert_eq!(envelope.data.year, 2022);
+    }
+
+    #[test]
+    fn deserializes_driver_verification_envelope_with_a_document_not_uploaded_yet() {
+        let json = r#"{
+            "data": {
+                "verification_status": "pending",
+                "documents": [
+                    {
+                        "type": "identidad",
+                        "status": "approved",
+                        "rejection_reason": null,
+                        "uploaded_at": "2026-09-04T15:00:00.000000Z"
+                    },
+                    {
+                        "type": "tarjeta_propiedad",
+                        "status": null,
+                        "rejection_reason": null,
+                        "uploaded_at": null
+                    }
+                ]
+            }
+        }"#;
+
+        let envelope: DataEnvelope<DriverVerification> = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            envelope.data.verification_status,
+            VerificationStatus::Pending
+        );
+        assert_eq!(envelope.data.documents.len(), 2);
+        assert_eq!(
+            envelope.data.documents[0].document_type,
+            DocumentType::Identidad
+        );
+        assert_eq!(
+            envelope.data.documents[0].status,
+            Some(DocumentStatus::Approved)
+        );
+        assert_eq!(
+            envelope.data.documents[1].document_type,
+            DocumentType::TarjetaPropiedad
+        );
+        assert_eq!(envelope.data.documents[1].status, None);
+    }
+
+    #[test]
+    fn deserializes_uploaded_driver_document_envelope() {
+        let json = r#"{
+            "data": {
+                "type": "identidad",
+                "status": "pending",
+                "uploaded_at": "2026-09-04T15:00:00.000000Z"
+            }
+        }"#;
+
+        let envelope: DataEnvelope<UploadedDriverDocument> = serde_json::from_str(json).unwrap();
+
+        assert_eq!(envelope.data.document_type, DocumentType::Identidad);
+        assert_eq!(envelope.data.status, DocumentStatus::Pending);
     }
 
     #[test]

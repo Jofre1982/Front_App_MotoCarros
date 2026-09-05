@@ -10,6 +10,7 @@ pub mod map;
 pub mod screens;
 
 pub use map::{MapMarker, MapView};
+pub use screens::documents::DocumentsScreen;
 pub use screens::driver_earnings::DriverEarningsScreen;
 pub use screens::login::LoginScreen;
 pub use screens::nearby_rides::NearbyRidesScreen;
@@ -85,6 +86,7 @@ enum HomeSection {
     Profile,
     RideEstimate,
     Vehicle,
+    Documents,
     NearbyRides,
     RideHistory,
     DriverEarnings,
@@ -96,6 +98,7 @@ enum HomeSection {
 /// una sesion iniciada.
 ///
 /// Las secciones de vehiculo (issues #11 y #12, `VehicleScreen`), de
+/// documentos de verificacion (issue #60, `DocumentsScreen`), de
 /// solicitudes cercanas (issue #16, `NearbyRidesScreen`) y de historial y
 /// ganancias (historia #29, `DriverEarningsScreen`) solo se ofrecen cuando
 /// `session.user()` ya cargo (`GET /api/v1/me`, issue #9) y es una cuenta de
@@ -162,6 +165,12 @@ fn Home() -> Element {
                     }
                     button {
                         r#type: "button",
+                        disabled: section() == HomeSection::Documents,
+                        onclick: move |_| section.set(HomeSection::Documents),
+                        "Mis documentos"
+                    }
+                    button {
+                        r#type: "button",
                         disabled: section() == HomeSection::NearbyRides,
                         onclick: move |_| section.set(HomeSection::NearbyRides),
                         "Solicitudes cercanas"
@@ -190,6 +199,9 @@ fn Home() -> Element {
                 },
                 HomeSection::Vehicle => rsx! {
                     VehicleScreen {}
+                },
+                HomeSection::Documents => rsx! {
+                    DocumentsScreen {}
                 },
                 HomeSection::NearbyRides => rsx! {
                     NearbyRidesScreen {}

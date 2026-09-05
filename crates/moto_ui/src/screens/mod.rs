@@ -1,3 +1,4 @@
+pub mod documents;
 pub mod driver_earnings;
 pub mod login;
 pub mod nearby_rides;

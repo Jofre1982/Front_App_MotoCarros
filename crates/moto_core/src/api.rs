@@ -6,15 +6,16 @@
 
 use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload, BroadcastAuthResponse,
-    ConfirmPhoneVerificationPayload, Coordinates, DataEnvelope, DriverEarningsSummary,
-    LoginPayload, RateDriverPayload, RegisterDriverPayload, RegisterPassengerPayload,
-    RegisterVehiclePayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
-    RideRating, RideReceipt, RideRequestPayload, UpdateProfilePayload, UpdateVehiclePayload, User,
+    ConfirmPhoneVerificationPayload, Coordinates, DataEnvelope, DocumentType,
+    DriverEarningsSummary, DriverVerification, LoginPayload, RateDriverPayload,
+    RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload, Ride,
+    RideCancellation, RideEstimate, RideEstimateRequestPayload, RideRating, RideReceipt,
+    RideRequestPayload, UpdateProfilePayload, UpdateVehiclePayload, UploadedDriverDocument, User,
     Vehicle,
 };
 
 #[cfg(test)]
-use crate::models::{RideStatus, Role};
+use crate::models::{DocumentStatus, RideStatus, Role, VerificationStatus};
 
 #[derive(Debug, Clone)]
 pub struct ApiClient {
@@ -424,6 +425,62 @@ impl ConfirmPhoneVerificationError {
     pub fn field_message(&self, field: &str) -> Option<String> {
         match self {
             ConfirmPhoneVerificationError::Validation(body) => body
+                .errors
+                .as_ref()
+                .and_then(|errors| errors.get(field))
+                .and_then(|messages| messages.first())
+                .cloned(),
+            _ => None,
+        }
+    }
+}
+
+/// Fallos posibles de `POST /api/v1/me/documents`.
+///
+/// El backend responde 422 bajo `type` (tipo invalido) o `file` (formato o
+/// tamano invalido); ninguna de las dos se valida en el cliente de entrada
+/// porque el `<input type="file">` del que sale `type`/`file` ya restringe la
+/// eleccion (ver `DocumentsScreen`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum UploadDriverDocumentError {
+    Forbidden,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for UploadDriverDocumentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UploadDriverDocumentError::Forbidden => {
+                write!(f, "Esta cuenta no puede subir documentos de conductor.")
+            }
+            UploadDriverDocumentError::Validation(body) => write!(f, "{}", body.message),
+            UploadDriverDocumentError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            UploadDriverDocumentError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            UploadDriverDocumentError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for UploadDriverDocumentError {}
+
+impl UploadDriverDocumentError {
+    /// Mensaje de validacion especifico para `field`, igual que
+    /// `ConfirmPhoneVerificationError::field_message`.
+    pub fn field_message(&self, field: &str) -> Option<String> {
+        match self {
+            UploadDriverDocumentError::Validation(body) => body
                 .errors
                 .as_ref()
                 .and_then(|errors| errors.get(field))
@@ -1635,6 +1692,21 @@ impl ApiClient {
         self.get_authenticated::<User>("/api/v1/me", token).await
     }
 
+    /// `GET /api/v1/me/documents` — historia #62 del backend. Reintenta una
+    /// vez con refresh de token (ver `get_authenticated`), igual que `me`.
+    /// Un 403 (cuenta no conductora) llega como
+    /// `AuthenticatedRequestError::Unexpected(403)`: el catalogo de errores
+    /// de `get_authenticated` no distingue ese caso porque hoy ningun otro
+    /// endpoint `GET` lo necesitaba (ver `get_vehicle`, que si lo distingue,
+    /// para el criterio inverso).
+    pub async fn get_driver_documents(
+        &self,
+        token: &AuthToken,
+    ) -> Result<AuthenticatedFetch<DriverVerification>, AuthenticatedRequestError> {
+        self.get_authenticated::<DriverVerification>("/api/v1/me/documents", token)
+            .await
+    }
+
     /// `GET /api/v1/me/rides` — historia #28. El mismo endpoint devuelve los
     /// viajes que el pasajero pidio, o los que le asignaron si la cuenta es
     /// de conductor (historia #29, fuera de alcance aca) — lo decide
@@ -2008,6 +2080,138 @@ impl ApiClient {
                 Ok(PostOutcome::Validation(body))
             }
             other => Err(ConfirmPhoneVerificationError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/me/documents` — historia #62 del backend. Sube (o
+    /// reemplaza) uno de los dos documentos exigidos hoy: `identidad` o
+    /// `tarjeta_propiedad`. Volver a subir el mismo `document_type` reemplaza
+    /// el documento anterior en el backend, no lo duplica — el cliente no
+    /// necesita saber si ya existia uno.
+    ///
+    /// Los bytes salen de `moto_core::models::DocumentType` mas el
+    /// `FileData` que entrega el input de archivo (`DocumentsScreen`, en
+    /// `moto_ui`): leerlos ahi y no aca es lo que mantiene este cliente HTTP
+    /// libre de la API de archivos de cada plataforma (web vs. movil nativo),
+    /// mismo criterio de separacion que `.claude/STANDARDS.md`.
+    ///
+    /// Reintenta una vez con refresh de token ante un 401, igual que
+    /// `register_vehicle`; un 403 (cuenta no conductora) o un 422
+    /// (validacion) nunca se reintentan.
+    pub async fn upload_driver_document(
+        &self,
+        token: &AuthToken,
+        document_type: DocumentType,
+        file_name: &str,
+        mime_type: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> Result<AuthenticatedFetch<UploadedDriverDocument>, UploadDriverDocumentError> {
+        match self
+            .post_driver_document_with_token(
+                &token.access_token,
+                document_type,
+                file_name,
+                mime_type,
+                bytes.clone(),
+            )
+            .await?
+        {
+            PostVehicleOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            PostVehicleOutcome::Forbidden => return Err(UploadDriverDocumentError::Forbidden),
+            PostVehicleOutcome::Validation(body) => {
+                return Err(UploadDriverDocumentError::Validation(body));
+            }
+            PostVehicleOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| UploadDriverDocumentError::SessionExpired)?;
+
+        match self
+            .post_driver_document_with_token(
+                &renewed.access_token,
+                document_type,
+                file_name,
+                mime_type,
+                bytes,
+            )
+            .await?
+        {
+            PostVehicleOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            PostVehicleOutcome::Forbidden => Err(UploadDriverDocumentError::Forbidden),
+            PostVehicleOutcome::Validation(body) => {
+                Err(UploadDriverDocumentError::Validation(body))
+            }
+            PostVehicleOutcome::Unauthorized => Err(UploadDriverDocumentError::SessionExpired),
+        }
+    }
+
+    async fn post_driver_document_with_token(
+        &self,
+        access_token: &str,
+        document_type: DocumentType,
+        file_name: &str,
+        mime_type: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> Result<PostVehicleOutcome<UploadedDriverDocument>, UploadDriverDocumentError> {
+        let url = format!("{}/api/v1/me/documents", self.base_url);
+
+        let type_value = match document_type {
+            DocumentType::Identidad => "identidad",
+            DocumentType::TarjetaPropiedad => "tarjeta_propiedad",
+        };
+
+        let mut file_part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_string());
+        if let Some(mime) = mime_type {
+            file_part = file_part
+                .mime_str(mime)
+                .map_err(|err| UploadDriverDocumentError::Network(err.to_string()))?;
+        }
+
+        let form = reqwest::multipart::Form::new()
+            .text("type", type_value)
+            .part("file", file_part);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|err| UploadDriverDocumentError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<UploadedDriverDocument> = response
+                .json()
+                .await
+                .map_err(|err| UploadDriverDocumentError::Network(err.to_string()))?;
+            return Ok(PostVehicleOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(PostVehicleOutcome::Unauthorized),
+            403 => Ok(PostVehicleOutcome::Forbidden),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| UploadDriverDocumentError::Network(err.to_string()))?;
+                Ok(PostVehicleOutcome::Validation(body))
+            }
+            other => Err(UploadDriverDocumentError::Unexpected(other)),
         }
     }
 
@@ -4971,6 +5175,288 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, ConfirmPhoneVerificationError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn get_driver_documents_returns_the_verification_status_and_documents() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/documents"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "verification_status": "pending",
+                    "documents": [
+                        {
+                            "type": "identidad",
+                            "status": "approved",
+                            "rejection_reason": null,
+                            "uploaded_at": "2026-09-04T15:00:00.000000Z"
+                        },
+                        {
+                            "type": "tarjeta_propiedad",
+                            "status": null,
+                            "rejection_reason": null,
+                            "uploaded_at": null
+                        }
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.get_driver_documents(&sample_token()).await.unwrap();
+
+        assert_eq!(fetch.data.verification_status, VerificationStatus::Pending);
+        assert_eq!(
+            fetch.data.documents[0].status,
+            Some(DocumentStatus::Approved)
+        );
+        assert_eq!(fetch.data.documents[1].status, None);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn get_driver_documents_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/documents"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .get_driver_documents(&sample_token())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, AuthenticatedRequestError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn upload_driver_document_sends_the_bearer_token_and_returns_the_uploaded_document() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/documents"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "identidad",
+                    "status": "pending",
+                    "uploaded_at": "2026-09-04T15:00:00.000000Z"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .upload_driver_document(
+                &sample_token(),
+                DocumentType::Identidad,
+                "cedula.jpg",
+                Some("image/jpeg"),
+                vec![1, 2, 3],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.document_type, DocumentType::Identidad);
+        assert_eq!(fetch.data.status, DocumentStatus::Pending);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn upload_driver_document_returns_forbidden_for_a_passenger_account() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/documents"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .upload_driver_document(
+                &sample_token(),
+                DocumentType::Identidad,
+                "cedula.jpg",
+                Some("image/jpeg"),
+                vec![1, 2, 3],
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, UploadDriverDocumentError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn upload_driver_document_returns_validation_error_on_422_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/documents"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "The file must be a file of type: jpg, jpeg, png, pdf.",
+                "errors": {
+                    "file": ["The file must be a file of type: jpg, jpeg, png, pdf."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .upload_driver_document(
+                &sample_token(),
+                DocumentType::Identidad,
+                "cedula.exe",
+                Some("application/octet-stream"),
+                vec![1, 2, 3],
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.field_message("file"),
+            Some("The file must be a file of type: jpg, jpeg, png, pdf.".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_driver_document_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/documents"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/documents"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "type": "identidad",
+                    "status": "pending",
+                    "uploaded_at": "2026-09-04T15:00:00.000000Z"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .upload_driver_document(
+                &sample_token(),
+                DocumentType::Identidad,
+                "cedula.jpg",
+                Some("image/jpeg"),
+                vec![1, 2, 3],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn upload_driver_document_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/documents"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .upload_driver_document(
+                &sample_token(),
+                DocumentType::Identidad,
+                "cedula.jpg",
+                Some("image/jpeg"),
+                vec![1, 2, 3],
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, UploadDriverDocumentError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn upload_driver_document_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .upload_driver_document(
+                &sample_token(),
+                DocumentType::Identidad,
+                "cedula.jpg",
+                Some("image/jpeg"),
+                vec![1, 2, 3],
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, UploadDriverDocumentError::Network(_)));
     }
 
     #[tokio::test]
