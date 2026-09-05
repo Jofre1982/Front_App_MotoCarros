@@ -22,6 +22,10 @@ pub struct User {
     pub name: String,
     pub email: String,
     pub phone: String,
+    /// Si el celular ya se confirmo con un codigo por SMS (issue #69 del
+    /// backend). Ver `ApiClient::request_phone_verification` y
+    /// `ApiClient::confirm_phone_verification`.
+    pub phone_verified: bool,
     pub role: Role,
 }
 
@@ -106,6 +110,12 @@ pub struct UpdateProfilePayload {
     pub email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phone: Option<String>,
+}
+
+/// Body de `POST /api/v1/me/phone/verification/confirm`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ConfirmPhoneVerificationPayload {
+    pub code: String,
 }
 
 /// Body de `POST /api/v1/me/vehicle`
@@ -515,6 +525,7 @@ mod tests {
                     "name": "Ana Garcia",
                     "email": "ana@example.com",
                     "phone": "+573001234567",
+                    "phone_verified": false,
                     "role": "passenger"
                 },
                 "token": {
