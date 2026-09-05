@@ -15,11 +15,25 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use moto_core::api::{ApiClient, GetVehicleError, UpdateVehicleError};
-use moto_core::models::Vehicle;
+use moto_core::models::{Vehicle, VehicleType};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
 use super::register_vehicle::RegisterVehicleScreen;
+
+fn vehicle_type_label(vehicle_type: VehicleType) -> &'static str {
+    match vehicle_type {
+        VehicleType::Motocarro => "Motocarro",
+        VehicleType::Motocarga => "Motocarga",
+    }
+}
+
+fn vehicle_type_slug(vehicle_type: VehicleType) -> &'static str {
+    match vehicle_type {
+        VehicleType::Motocarro => "motocarro",
+        VehicleType::Motocarga => "motocarga",
+    }
+}
 
 #[component]
 pub fn VehicleScreen() -> Element {
@@ -96,7 +110,7 @@ struct EditVehicleFormProps {
     vehicle: Vehicle,
 }
 
-/// Formulario de edicion de placa/modelo/anio — issue #12. Precargado con
+/// Formulario de edicion de placa/tipo/anio — issue #12. Precargado con
 /// `props.vehicle`; al guardar manda los tres campos a
 /// `ApiClient::update_vehicle` (PATCH parcial, mismo criterio que
 /// `EditProfileForm` en `profile.rs`: el formulario siempre esta
@@ -108,7 +122,7 @@ fn EditVehicleForm(props: EditVehicleFormProps) -> Element {
     let mut session = use_context::<SessionState>();
 
     let mut plate = use_signal(|| props.vehicle.plate.clone());
-    let mut model = use_signal(|| props.vehicle.model.clone());
+    let mut vehicle_type = use_signal(|| props.vehicle.vehicle_type);
     let mut year = use_signal(|| props.vehicle.year.to_string());
     let mut update_error = use_signal(|| None::<UpdateVehicleError>);
     let mut is_saving = use_signal(|| false);
@@ -121,7 +135,7 @@ fn EditVehicleForm(props: EditVehicleFormProps) -> Element {
             return;
         };
         let plate_value = plate();
-        let model_value = model();
+        let vehicle_type_value = vehicle_type();
         let year_value = year();
         let api_client = api_client.clone();
         let storage = storage.clone();
@@ -134,7 +148,7 @@ fn EditVehicleForm(props: EditVehicleFormProps) -> Element {
                 .update_vehicle(
                     &token,
                     Some(&plate_value),
-                    Some(&model_value),
+                    Some(vehicle_type_value),
                     Some(&year_value),
                 )
                 .await
@@ -161,15 +175,15 @@ fn EditVehicleForm(props: EditVehicleFormProps) -> Element {
     let plate_error = current_error
         .as_ref()
         .and_then(|err| err.field_message("plate"));
-    let model_error = current_error
+    let type_error = current_error
         .as_ref()
-        .and_then(|err| err.field_message("model"));
+        .and_then(|err| err.field_message("type"));
     let year_error = current_error
         .as_ref()
         .and_then(|err| err.field_message("year"));
     // Igual que en `EditProfileForm` (issue #10): el mensaje generico solo
     // se muestra cuando el error no trae desglose campo por campo.
-    let has_field_errors = plate_error.is_some() || model_error.is_some() || year_error.is_some();
+    let has_field_errors = plate_error.is_some() || type_error.is_some() || year_error.is_some();
     let general_message = if has_field_errors {
         None
     } else {
@@ -183,8 +197,8 @@ fn EditVehicleForm(props: EditVehicleFormProps) -> Element {
                 dl { class: "update-vehicle-result",
                     dt { "Placa" }
                     dd { "{vehicle.plate}" }
-                    dt { "Modelo" }
-                    dd { "{vehicle.model}" }
+                    dt { "Tipo" }
+                    dd { "{vehicle_type_label(vehicle.vehicle_type)}" }
                     dt { "Anio" }
                     dd { "{vehicle.year}" }
                 }
@@ -202,16 +216,24 @@ fn EditVehicleForm(props: EditVehicleFormProps) -> Element {
                     if let Some(message) = &plate_error {
                         p { class: "update-vehicle-field-error", role: "alert", "{message}" }
                     }
-                    label { r#for: "update-vehicle-model", "Modelo" }
-                    input {
-                        id: "update-vehicle-model",
-                        r#type: "text",
-                        autocomplete: "off",
+                    label { r#for: "update-vehicle-type", "Tipo" }
+                    select {
+                        id: "update-vehicle-type",
                         disabled: is_saving(),
-                        value: "{model}",
-                        oninput: move |event| model.set(event.value()),
+                        value: "{vehicle_type_slug(vehicle_type())}",
+                        onchange: move |event| {
+                            vehicle_type
+                                .set(
+                                    match event.value().as_str() {
+                                        "motocarga" => VehicleType::Motocarga,
+                                        _ => VehicleType::Motocarro,
+                                    },
+                                )
+                        },
+                        option { value: "motocarro", "Motocarro" }
+                        option { value: "motocarga", "Motocarga" }
                     }
-                    if let Some(message) = &model_error {
+                    if let Some(message) = &type_error {
                         p { class: "update-vehicle-field-error", role: "alert", "{message}" }
                     }
                     label { r#for: "update-vehicle-year", "Anio" }

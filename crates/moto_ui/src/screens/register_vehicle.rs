@@ -17,9 +17,23 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use moto_core::api::{ApiClient, RegisterVehicleError};
-use moto_core::models::Vehicle;
+use moto_core::models::{Vehicle, VehicleType};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
+
+fn vehicle_type_label(vehicle_type: VehicleType) -> &'static str {
+    match vehicle_type {
+        VehicleType::Motocarro => "Motocarro",
+        VehicleType::Motocarga => "Motocarga",
+    }
+}
+
+fn vehicle_type_slug(vehicle_type: VehicleType) -> &'static str {
+    match vehicle_type {
+        VehicleType::Motocarro => "motocarro",
+        VehicleType::Motocarga => "motocarga",
+    }
+}
 
 #[component]
 pub fn RegisterVehicleScreen() -> Element {
@@ -28,7 +42,7 @@ pub fn RegisterVehicleScreen() -> Element {
     let mut session = use_context::<SessionState>();
 
     let mut plate = use_signal(String::new);
-    let mut model = use_signal(String::new);
+    let mut vehicle_type = use_signal(|| VehicleType::Motocarro);
     let mut year = use_signal(String::new);
     let mut register_error = use_signal(|| None::<RegisterVehicleError>);
     let mut is_loading = use_signal(|| false);
@@ -41,7 +55,7 @@ pub fn RegisterVehicleScreen() -> Element {
             return;
         };
         let plate_value = plate();
-        let model_value = model();
+        let vehicle_type_value = vehicle_type();
         let year_value = year();
         let api_client = api_client.clone();
         let storage = storage.clone();
@@ -51,7 +65,7 @@ pub fn RegisterVehicleScreen() -> Element {
             register_error.set(None);
 
             match api_client
-                .register_vehicle(&token, &plate_value, &model_value, &year_value)
+                .register_vehicle(&token, &plate_value, vehicle_type_value, &year_value)
                 .await
             {
                 Ok(fetch) => {
@@ -79,8 +93,8 @@ pub fn RegisterVehicleScreen() -> Element {
                 dl { class: "register-vehicle-result",
                     dt { "Placa" }
                     dd { "{vehicle.plate}" }
-                    dt { "Modelo" }
-                    dd { "{vehicle.model}" }
+                    dt { "Tipo" }
+                    dd { "{vehicle_type_label(vehicle.vehicle_type)}" }
                     dt { "Anio" }
                     dd { "{vehicle.year}" }
                 }
@@ -92,9 +106,9 @@ pub fn RegisterVehicleScreen() -> Element {
     let plate_error = current_error
         .as_ref()
         .and_then(|err| err.field_message("plate"));
-    let model_error = current_error
+    let type_error = current_error
         .as_ref()
-        .and_then(|err| err.field_message("model"));
+        .and_then(|err| err.field_message("type"));
     let year_error = current_error
         .as_ref()
         .and_then(|err| err.field_message("year"));
@@ -102,7 +116,7 @@ pub fn RegisterVehicleScreen() -> Element {
     // solo se muestra cuando el error no trae desglose campo por campo. Esto
     // tambien cubre el caso de vehiculo duplicado (422 bajo la clave
     // sintetica `vehicle`, que no coincide con ningun campo del formulario).
-    let has_field_errors = plate_error.is_some() || model_error.is_some() || year_error.is_some();
+    let has_field_errors = plate_error.is_some() || type_error.is_some() || year_error.is_some();
     let general_message = if has_field_errors {
         None
     } else {
@@ -125,16 +139,24 @@ pub fn RegisterVehicleScreen() -> Element {
                 if let Some(message) = &plate_error {
                     p { class: "register-vehicle-field-error", role: "alert", "{message}" }
                 }
-                label { r#for: "register-vehicle-model", "Modelo" }
-                input {
-                    id: "register-vehicle-model",
-                    r#type: "text",
-                    autocomplete: "off",
+                label { r#for: "register-vehicle-type", "Tipo" }
+                select {
+                    id: "register-vehicle-type",
                     disabled: is_loading(),
-                    value: "{model}",
-                    oninput: move |event| model.set(event.value()),
+                    value: "{vehicle_type_slug(vehicle_type())}",
+                    onchange: move |event| {
+                        vehicle_type
+                            .set(
+                                match event.value().as_str() {
+                                    "motocarga" => VehicleType::Motocarga,
+                                    _ => VehicleType::Motocarro,
+                                },
+                            )
+                    },
+                    option { value: "motocarro", "Motocarro" }
+                    option { value: "motocarga", "Motocarga" }
                 }
-                if let Some(message) = &model_error {
+                if let Some(message) = &type_error {
                     p { class: "register-vehicle-field-error", role: "alert", "{message}" }
                 }
                 label { r#for: "register-vehicle-year", "Anio" }

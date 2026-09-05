@@ -182,6 +182,17 @@ pub struct UploadedDriverDocument {
     pub uploaded_at: String,
 }
 
+/// Categoria del vehiculo (`openapi.yaml#/components/schemas/Vehicle`,
+/// historia tecnica #75 del backend). Reemplaza el antiguo campo `model`
+/// (texto libre): el anio ya identifica el modelo puntual, y lo que importa
+/// operativamente es si el vehiculo es un motocarro o una motocarga.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VehicleType {
+    Motocarro,
+    Motocarga,
+}
+
 /// Body de `POST /api/v1/me/vehicle`
 /// (`openapi.yaml#/components/schemas/VehicleRegistrationRequest`).
 ///
@@ -192,7 +203,8 @@ pub struct UploadedDriverDocument {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RegisterVehiclePayload {
     pub plate: String,
-    pub model: String,
+    #[serde(rename = "type")]
+    pub vehicle_type: VehicleType,
     pub year: u16,
 }
 
@@ -204,7 +216,8 @@ pub struct RegisterVehiclePayload {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Vehicle {
     pub plate: String,
-    pub model: String,
+    #[serde(rename = "type")]
+    pub vehicle_type: VehicleType,
     pub year: u16,
 }
 
@@ -218,8 +231,8 @@ pub struct Vehicle {
 pub struct UpdateVehiclePayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plate: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub vehicle_type: Option<VehicleType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub year: Option<u16>,
 }
@@ -640,10 +653,10 @@ mod tests {
     }
 
     #[test]
-    fn register_vehicle_payload_serializes_plate_model_and_year() {
+    fn register_vehicle_payload_serializes_plate_type_and_year() {
         let payload = RegisterVehiclePayload {
             plate: "ABC12D".to_string(),
-            model: "Bajaj Boxer CT 100".to_string(),
+            vehicle_type: VehicleType::Motocarro,
             year: 2022,
         };
 
@@ -653,7 +666,7 @@ mod tests {
             json,
             serde_json::json!({
                 "plate": "ABC12D",
-                "model": "Bajaj Boxer CT 100",
+                "type": "motocarro",
                 "year": 2022,
             })
         );
@@ -664,7 +677,7 @@ mod tests {
         let json = r#"{
             "data": {
                 "plate": "ABC12D",
-                "model": "Bajaj Boxer CT 100",
+                "type": "motocarro",
                 "year": 2022
             }
         }"#;
@@ -672,7 +685,7 @@ mod tests {
         let envelope: DataEnvelope<Vehicle> = serde_json::from_str(json).unwrap();
 
         assert_eq!(envelope.data.plate, "ABC12D");
-        assert_eq!(envelope.data.model, "Bajaj Boxer CT 100");
+        assert_eq!(envelope.data.vehicle_type, VehicleType::Motocarro);
         assert_eq!(envelope.data.year, 2022);
     }
 
