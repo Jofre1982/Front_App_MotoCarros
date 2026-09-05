@@ -11,7 +11,7 @@ use crate::models::{
     RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload, Ride,
     RideCancellation, RideEstimate, RideEstimateRequestPayload, RideRating, RideReceipt,
     RideRequestPayload, UpdateProfilePayload, UpdateVehiclePayload, UploadedDriverDocument, User,
-    Vehicle,
+    Vehicle, VehicleType,
 };
 
 #[cfg(test)]
@@ -2226,14 +2226,13 @@ impl ApiClient {
         &self,
         token: &AuthToken,
         plate: &str,
-        model: &str,
+        vehicle_type: VehicleType,
         year: &str,
     ) -> Result<AuthenticatedFetch<Vehicle>, RegisterVehicleError> {
         let plate = plate.trim().to_uppercase();
-        let model = model.trim();
         let year = year.trim();
 
-        if plate.is_empty() || model.is_empty() || year.is_empty() {
+        if plate.is_empty() || year.is_empty() {
             return Err(RegisterVehicleError::EmptyFields);
         }
         if !is_valid_plate(&plate) {
@@ -2248,7 +2247,7 @@ impl ApiClient {
 
         let payload = RegisterVehiclePayload {
             plate,
-            model: model.to_string(),
+            vehicle_type,
             year: year_number,
         };
 
@@ -2410,10 +2409,10 @@ impl ApiClient {
         &self,
         token: &AuthToken,
         plate: Option<&str>,
-        model: Option<&str>,
+        vehicle_type: Option<VehicleType>,
         year: Option<&str>,
     ) -> Result<AuthenticatedFetch<Vehicle>, UpdateVehicleError> {
-        if plate.is_none() && model.is_none() && year.is_none() {
+        if plate.is_none() && vehicle_type.is_none() && year.is_none() {
             return Err(UpdateVehicleError::NoFields);
         }
 
@@ -2427,7 +2426,6 @@ impl ApiClient {
             }
             None => None,
         };
-        let model = model.map(|value| value.trim().to_string());
         let year = match year {
             Some(value) => {
                 let Ok(year_number) = value.trim().parse::<u16>() else {
@@ -2441,7 +2439,11 @@ impl ApiClient {
             None => None,
         };
 
-        let payload = UpdateVehiclePayload { plate, model, year };
+        let payload = UpdateVehiclePayload {
+            plate,
+            vehicle_type,
+            year,
+        };
 
         match self
             .patch_vehicle_with_token(&token.access_token, &payload)
@@ -5465,19 +5467,13 @@ mod tests {
 
         assert_eq!(
             client
-                .register_vehicle(&sample_token(), "", "Bajaj Boxer CT 100", "2022")
+                .register_vehicle(&sample_token(), "", VehicleType::Motocarro, "2022")
                 .await,
             Err(RegisterVehicleError::EmptyFields)
         );
         assert_eq!(
             client
-                .register_vehicle(&sample_token(), "ABC12D", "", "2022")
-                .await,
-            Err(RegisterVehicleError::EmptyFields)
-        );
-        assert_eq!(
-            client
-                .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "")
+                .register_vehicle(&sample_token(), "ABC12D", VehicleType::Motocarro, "")
                 .await,
             Err(RegisterVehicleError::EmptyFields)
         );
@@ -5489,13 +5485,13 @@ mod tests {
 
         assert_eq!(
             client
-                .register_vehicle(&sample_token(), "AB", "Bajaj Boxer CT 100", "2022")
+                .register_vehicle(&sample_token(), "AB", VehicleType::Motocarro, "2022")
                 .await,
             Err(RegisterVehicleError::InvalidPlate)
         );
         assert_eq!(
             client
-                .register_vehicle(&sample_token(), "ABC 12D!", "Bajaj Boxer CT 100", "2022")
+                .register_vehicle(&sample_token(), "ABC 12D!", VehicleType::Motocarro, "2022")
                 .await,
             Err(RegisterVehicleError::InvalidPlate)
         );
@@ -5510,7 +5506,7 @@ mod tests {
                 .register_vehicle(
                     &sample_token(),
                     "ABC12D",
-                    "Bajaj Boxer CT 100",
+                    VehicleType::Motocarro,
                     "not-a-year"
                 )
                 .await,
@@ -5518,7 +5514,7 @@ mod tests {
         );
         assert_eq!(
             client
-                .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "1969")
+                .register_vehicle(&sample_token(), "ABC12D", VehicleType::Motocarro, "1969")
                 .await,
             Err(RegisterVehicleError::InvalidYear)
         );
@@ -5536,13 +5532,13 @@ mod tests {
             ))
             .and(body_json(serde_json::json!({
                 "plate": "ABC12D",
-                "model": "Bajaj Boxer CT 100",
+                "type": "motocarro",
                 "year": 2022,
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "data": {
                     "plate": "ABC12D",
-                    "model": "Bajaj Boxer CT 100",
+                    "type": "motocarro",
                     "year": 2022,
                 }
             })))
@@ -5551,7 +5547,7 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let fetch = client
-            .register_vehicle(&sample_token(), " abc12d ", "Bajaj Boxer CT 100", "2022")
+            .register_vehicle(&sample_token(), " abc12d ", VehicleType::Motocarro, "2022")
             .await
             .unwrap();
 
@@ -5574,7 +5570,7 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let error = client
-            .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "2022")
+            .register_vehicle(&sample_token(), "ABC12D", VehicleType::Motocarro, "2022")
             .await
             .unwrap_err();
 
@@ -5599,7 +5595,7 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let error = client
-            .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "2022")
+            .register_vehicle(&sample_token(), "ABC12D", VehicleType::Motocarro, "2022")
             .await
             .unwrap_err();
 
@@ -5661,7 +5657,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "data": {
                     "plate": "ABC12D",
-                    "model": "Bajaj Boxer CT 100",
+                    "type": "motocarro",
                     "year": 2022,
                 }
             })))
@@ -5670,7 +5666,7 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let fetch = client
-            .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "2022")
+            .register_vehicle(&sample_token(), "ABC12D", VehicleType::Motocarro, "2022")
             .await
             .unwrap();
 
@@ -5700,7 +5696,7 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let error = client
-            .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "2022")
+            .register_vehicle(&sample_token(), "ABC12D", VehicleType::Motocarro, "2022")
             .await
             .unwrap_err();
 
@@ -5712,7 +5708,7 @@ mod tests {
         let client = ApiClient::new("http://127.0.0.1:1");
 
         let error = client
-            .register_vehicle(&sample_token(), "ABC12D", "Bajaj Boxer CT 100", "2022")
+            .register_vehicle(&sample_token(), "ABC12D", VehicleType::Motocarro, "2022")
             .await
             .unwrap_err();
 
@@ -5732,7 +5728,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": {
                     "plate": "ABC12D",
-                    "model": "Bajaj Boxer CT 100",
+                    "type": "motocarro",
                     "year": 2022,
                 }
             })))
@@ -5824,7 +5820,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": {
                     "plate": "ABC12D",
-                    "model": "Bajaj Boxer CT 100",
+                    "type": "motocarro",
                     "year": 2022,
                 }
             })))
@@ -5931,7 +5927,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": {
                     "plate": "ABC12D",
-                    "model": "Bajaj Boxer CT 100",
+                    "type": "motocarro",
                     "year": 2022,
                 }
             })))
@@ -6047,7 +6043,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": {
                     "plate": "ABC12D",
-                    "model": "Bajaj Boxer CT 100",
+                    "type": "motocarro",
                     "year": 2022,
                 }
             })))
