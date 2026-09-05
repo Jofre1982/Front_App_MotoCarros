@@ -27,6 +27,7 @@ fn document_type_label(document_type: DocumentType) -> &'static str {
     match document_type {
         DocumentType::Identidad => "Documento de identidad (cedula, cedula de extranjeria o PTP)",
         DocumentType::TarjetaPropiedad => "Tarjeta de propiedad del motocarro",
+        DocumentType::FotoVehiculo => "Foto del vehiculo",
     }
 }
 
@@ -34,6 +35,7 @@ fn document_type_slug(document_type: DocumentType) -> &'static str {
     match document_type {
         DocumentType::Identidad => "identidad",
         DocumentType::TarjetaPropiedad => "tarjeta-propiedad",
+        DocumentType::FotoVehiculo => "foto-vehiculo",
     }
 }
 
