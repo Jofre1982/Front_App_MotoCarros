@@ -146,6 +146,7 @@ mod tests {
                 name: "Ana Garcia".to_string(),
                 email: "ana@example.com".to_string(),
                 phone: "+573001234567".to_string(),
+                phone_verified: false,
                 role: Role::Passenger,
             },
             token: AuthToken {

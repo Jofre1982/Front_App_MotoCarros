@@ -9,11 +9,22 @@
 //! La edicion (issue #10) reusa esta misma pantalla en vez de ser una
 //! pantalla aparte: el formulario se precarga con `session.user()` y, al
 //! guardar, llama a `ApiClient::update_profile` (`PATCH /api/v1/me`).
+//!
+//! La verificacion del celular (issue #69 del backend) tambien vive aca y no
+//! en una pantalla propia, mismo criterio que la edicion: es un dato mas de
+//! la cuenta, no una seccion de navegacion aparte. `PhoneVerificationSection`
+//! solo se muestra cuando `user.phone_verified` es `false`; al confirmar el
+//! codigo, `session.set_user()` deja `phone_verified` en `true` y la propia
+//! reactividad de Dioxus hace que la seccion desaparezca sin ningun callback
+//! explicito.
 
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use moto_core::api::{ApiClient, AuthenticatedRequestError, UpdateProfileError};
+use moto_core::api::{
+    ApiClient, AuthenticatedRequestError, ConfirmPhoneVerificationError,
+    RequestPhoneVerificationError, UpdateProfileError,
+};
 use moto_core::models::{Role, UpdateProfilePayload, User};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
@@ -100,9 +111,20 @@ pub fn ProfileScreen() -> Element {
                         dt { "Email" }
                         dd { "{user.email}" }
                         dt { "Telefono" }
-                        dd { "{user.phone}" }
+                        dd {
+                            "{user.phone}"
+                            " "
+                            if user.phone_verified {
+                                span { class: "profile-phone-verified", "(verificado)" }
+                            } else {
+                                span { class: "profile-phone-unverified", "(sin verificar)" }
+                            }
+                        }
                         dt { "Rol" }
                         dd { "{role_label(user.role)}" }
+                    }
+                    if !user.phone_verified {
+                        PhoneVerificationSection {}
                     }
                     button {
                         r#type: "button",
@@ -253,6 +275,176 @@ fn EditProfileForm(props: EditProfileFormProps) -> Element {
         }
         if let Some(message) = general_message {
             p { class: "profile-edit-error", role: "alert", "{message}" }
+        }
+    }
+}
+
+/// Flujo de verificacion de celular por SMS (issue #69 del backend). Sin
+/// props: lee la cuenta y el token del mismo `SessionState` del contexto, y
+/// al confirmar deja el `User` actualizado ahi mismo, mismo criterio que
+/// `EditProfileForm`.
+///
+/// Dos pasos con el mismo signal `code_requested` como bandera: mientras es
+/// `false` solo hay un boton para pedir el codigo; una vez pedido, aparece el
+/// formulario para confirmarlo. "Reenviar codigo" reutiliza el mismo pedido
+/// que el boton inicial — el backend reemplaza cualquier codigo vigente en
+/// vez de acumularlo (ver `Back_App_MotoCarros`), asi que no hace falta
+/// distinguir un primer pedido de un reenvio.
+#[component]
+fn PhoneVerificationSection() -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+
+    let mut code_requested = use_signal(|| false);
+    let mut code = use_signal(String::new);
+    let mut is_requesting = use_signal(|| false);
+    let mut is_confirming = use_signal(|| false);
+    let mut request_error = use_signal(|| None::<RequestPhoneVerificationError>);
+    let mut confirm_error = use_signal(|| None::<ConfirmPhoneVerificationError>);
+
+    let api_client_for_request = api_client.clone();
+    let storage_for_request = storage.clone();
+
+    let on_request = move |_| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let api_client = api_client_for_request.clone();
+        let storage = storage_for_request.clone();
+
+        spawn(async move {
+            is_requesting.set(true);
+            request_error.set(None);
+
+            match api_client.request_phone_verification(&token).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    code_requested.set(true);
+                }
+                Err(RequestPhoneVerificationError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                Err(err) => {
+                    request_error.set(Some(err));
+                }
+            }
+
+            is_requesting.set(false);
+        });
+    };
+
+    let on_confirm = move |event: FormEvent| {
+        event.prevent_default();
+
+        let Some(token) = session.token() else {
+            return;
+        };
+        let code_value = code();
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+
+        spawn(async move {
+            is_confirming.set(true);
+            confirm_error.set(None);
+
+            match api_client
+                .confirm_phone_verification(&token, &code_value)
+                .await
+            {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    session.set_user(fetch.data);
+                }
+                Err(ConfirmPhoneVerificationError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                Err(err) => {
+                    confirm_error.set(Some(err));
+                }
+            }
+
+            is_confirming.set(false);
+        });
+    };
+
+    if !code_requested() {
+        let request_message = request_error().as_ref().map(|err| err.to_string());
+
+        return rsx! {
+            div { class: "phone-verification-section",
+                p { "Tu celular todavia no esta verificado." }
+                button {
+                    r#type: "button",
+                    disabled: is_requesting(),
+                    onclick: on_request,
+                    if is_requesting() {
+                        "Enviando codigo..."
+                    } else {
+                        "Verificar mi celular"
+                    }
+                }
+                if let Some(message) = request_message {
+                    p { class: "phone-verification-error", role: "alert", "{message}" }
+                }
+            }
+        };
+    }
+
+    let current_error = confirm_error();
+    let code_error = current_error
+        .as_ref()
+        .and_then(|err| err.field_message("code"));
+    // Igual que en el registro (issue #6): el mensaje generico solo se
+    // muestra cuando el error no trae desglose campo por campo.
+    let general_message = if code_error.is_some() {
+        None
+    } else {
+        current_error.as_ref().map(|err| err.to_string())
+    };
+
+    rsx! {
+        div { class: "phone-verification-section",
+            p { "Te enviamos un codigo por SMS. Ingresalo para confirmar tu celular." }
+            form { onsubmit: on_confirm,
+                label { r#for: "phone-verification-code", "Codigo" }
+                input {
+                    id: "phone-verification-code",
+                    r#type: "text",
+                    inputmode: "numeric",
+                    autocomplete: "one-time-code",
+                    disabled: is_confirming(),
+                    value: "{code}",
+                    oninput: move |event| code.set(event.value()),
+                }
+                if let Some(message) = &code_error {
+                    p { class: "phone-verification-field-error", role: "alert", "{message}" }
+                }
+                button { r#type: "submit", disabled: is_confirming(),
+                    if is_confirming() {
+                        "Confirmando..."
+                    } else {
+                        "Confirmar codigo"
+                    }
+                }
+            }
+            button {
+                r#type: "button",
+                disabled: is_requesting(),
+                onclick: on_request,
+                if is_requesting() {
+                    "Reenviando..."
+                } else {
+                    "Reenviar codigo"
+                }
+            }
+            if let Some(message) = general_message {
+                p { class: "phone-verification-error", role: "alert", "{message}" }
+            }
         }
     }
 }

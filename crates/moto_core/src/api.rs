@@ -6,10 +6,11 @@
 
 use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload, BroadcastAuthResponse,
-    Coordinates, DataEnvelope, DriverEarningsSummary, LoginPayload, RateDriverPayload,
-    RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload, Ride,
-    RideCancellation, RideEstimate, RideEstimateRequestPayload, RideRating, RideReceipt,
-    RideRequestPayload, UpdateProfilePayload, UpdateVehiclePayload, User, Vehicle,
+    ConfirmPhoneVerificationPayload, Coordinates, DataEnvelope, DriverEarningsSummary,
+    LoginPayload, RateDriverPayload, RegisterDriverPayload, RegisterPassengerPayload,
+    RegisterVehiclePayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
+    RideRating, RideReceipt, RideRequestPayload, UpdateProfilePayload, UpdateVehiclePayload, User,
+    Vehicle,
 };
 
 #[cfg(test)]
@@ -330,6 +331,99 @@ impl UpdateProfileError {
     pub fn field_message(&self, field: &str) -> Option<String> {
         match self {
             UpdateProfileError::Validation(body) => body
+                .errors
+                .as_ref()
+                .and_then(|errors| errors.get(field))
+                .and_then(|messages| messages.first())
+                .cloned(),
+            _ => None,
+        }
+    }
+}
+
+/// Fallos posibles de `POST /api/v1/me/phone/verification`.
+///
+/// No hay validacion de entrada del lado del cliente: la request no lleva
+/// cuerpo, todo lo que puede fallar es del servidor.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RequestPhoneVerificationError {
+    /// Se supero el limite de 3 solicitudes cada 10 minutos
+    /// (`throttle:phone-verification` en el backend).
+    RateLimited,
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for RequestPhoneVerificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequestPhoneVerificationError::RateLimited => write!(
+                f,
+                "Ya pediste varios codigos seguidos. Espera unos minutos e intenta de nuevo."
+            ),
+            RequestPhoneVerificationError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            RequestPhoneVerificationError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            RequestPhoneVerificationError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RequestPhoneVerificationError {}
+
+/// Fallos posibles de `POST /api/v1/me/phone/verification/confirm`.
+///
+/// El backend responde 422 bajo la clave `code` para las cuatro causas
+/// posibles (no hay verificacion pendiente, vencio, se agotaron los
+/// intentos, o el valor no coincide) — el cliente no las distingue porque
+/// para el usuario todas piden lo mismo: pedir un codigo nuevo.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfirmPhoneVerificationError {
+    EmptyCode,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for ConfirmPhoneVerificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfirmPhoneVerificationError::EmptyCode => write!(f, "Ingresa el codigo recibido."),
+            ConfirmPhoneVerificationError::Validation(body) => write!(f, "{}", body.message),
+            ConfirmPhoneVerificationError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            ConfirmPhoneVerificationError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            ConfirmPhoneVerificationError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfirmPhoneVerificationError {}
+
+impl ConfirmPhoneVerificationError {
+    /// Mensaje de validacion especifico para `field`, igual que
+    /// `UpdateProfileError::field_message`.
+    pub fn field_message(&self, field: &str) -> Option<String> {
+        match self {
+            ConfirmPhoneVerificationError::Validation(body) => body
                 .errors
                 .as_ref()
                 .and_then(|errors| errors.get(field))
@@ -1080,6 +1174,15 @@ enum PostOutcome<T> {
     Validation(ApiErrorBody),
 }
 
+/// A diferencia de `PostOutcome`, esta request no tiene cuerpo de exito (204)
+/// ni cuerpo de validacion (no hay campos que validar) — lo unico que puede
+/// pasar del lado del servidor es autenticacion, limite de tasa, o exito.
+enum PhoneVerificationRequestOutcome {
+    Success,
+    Unauthorized,
+    RateLimited,
+}
+
 enum PostRideOutcome<T> {
     Success(T),
     Unauthorized,
@@ -1733,6 +1836,178 @@ impl ApiClient {
                 Ok(PatchOutcome::Validation(body))
             }
             other => Err(UpdateProfileError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/me/phone/verification` — issue #69 del backend. Genera
+    /// un codigo de verificacion y lo manda por SMS al celular de la cuenta.
+    /// Pedir uno nuevo reemplaza cualquier codigo vigente anterior — no hay
+    /// nada que el cliente deba limpiar antes de llamarlo de nuevo.
+    ///
+    /// Reintenta una vez con refresh de token ante un 401, igual que
+    /// `update_profile`; un 429 (limite de 3 cada 10 minutos) nunca se
+    /// reintenta.
+    pub async fn request_phone_verification(
+        &self,
+        token: &AuthToken,
+    ) -> Result<AuthenticatedFetch<()>, RequestPhoneVerificationError> {
+        match self
+            .post_phone_verification_request(&token.access_token)
+            .await?
+        {
+            PhoneVerificationRequestOutcome::Success => {
+                return Ok(AuthenticatedFetch {
+                    data: (),
+                    refreshed_token: None,
+                });
+            }
+            PhoneVerificationRequestOutcome::RateLimited => {
+                return Err(RequestPhoneVerificationError::RateLimited);
+            }
+            PhoneVerificationRequestOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| RequestPhoneVerificationError::SessionExpired)?;
+
+        match self
+            .post_phone_verification_request(&renewed.access_token)
+            .await?
+        {
+            PhoneVerificationRequestOutcome::Success => Ok(AuthenticatedFetch {
+                data: (),
+                refreshed_token: Some(renewed),
+            }),
+            PhoneVerificationRequestOutcome::RateLimited => {
+                Err(RequestPhoneVerificationError::RateLimited)
+            }
+            PhoneVerificationRequestOutcome::Unauthorized => {
+                Err(RequestPhoneVerificationError::SessionExpired)
+            }
+        }
+    }
+
+    async fn post_phone_verification_request(
+        &self,
+        access_token: &str,
+    ) -> Result<PhoneVerificationRequestOutcome, RequestPhoneVerificationError> {
+        let url = format!("{}/api/v1/me/phone/verification", self.base_url);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|err| RequestPhoneVerificationError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            return Ok(PhoneVerificationRequestOutcome::Success);
+        }
+
+        match status.as_u16() {
+            401 => Ok(PhoneVerificationRequestOutcome::Unauthorized),
+            429 => Ok(PhoneVerificationRequestOutcome::RateLimited),
+            other => Err(RequestPhoneVerificationError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/me/phone/verification/confirm` — issue #69 del backend.
+    /// Devuelve la cuenta actualizada (`phone_verified: true` si el codigo
+    /// era correcto) para que la UI no tenga que pedir `GET /me` aparte.
+    ///
+    /// Reintenta una vez con refresh de token ante un 401, igual que
+    /// `update_profile`; un 422 (codigo incorrecto, vencido, o intentos
+    /// agotados) nunca se reintenta — reintentar mandaria el mismo codigo
+    /// otra vez y solo gastaria otro intento.
+    pub async fn confirm_phone_verification(
+        &self,
+        token: &AuthToken,
+        code: &str,
+    ) -> Result<AuthenticatedFetch<User>, ConfirmPhoneVerificationError> {
+        let code = code.trim();
+        if code.is_empty() {
+            return Err(ConfirmPhoneVerificationError::EmptyCode);
+        }
+
+        let payload = ConfirmPhoneVerificationPayload {
+            code: code.to_string(),
+        };
+
+        match self
+            .post_phone_verification_confirm(&token.access_token, &payload)
+            .await?
+        {
+            PostOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            PostOutcome::Validation(body) => {
+                return Err(ConfirmPhoneVerificationError::Validation(body));
+            }
+            PostOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| ConfirmPhoneVerificationError::SessionExpired)?;
+
+        match self
+            .post_phone_verification_confirm(&renewed.access_token, &payload)
+            .await?
+        {
+            PostOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            PostOutcome::Validation(body) => Err(ConfirmPhoneVerificationError::Validation(body)),
+            PostOutcome::Unauthorized => Err(ConfirmPhoneVerificationError::SessionExpired),
+        }
+    }
+
+    async fn post_phone_verification_confirm(
+        &self,
+        access_token: &str,
+        body: &ConfirmPhoneVerificationPayload,
+    ) -> Result<PostOutcome<User>, ConfirmPhoneVerificationError> {
+        let url = format!("{}/api/v1/me/phone/verification/confirm", self.base_url);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| ConfirmPhoneVerificationError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<User> = response
+                .json()
+                .await
+                .map_err(|err| ConfirmPhoneVerificationError::Network(err.to_string()))?;
+            return Ok(PostOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(PostOutcome::Unauthorized),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| ConfirmPhoneVerificationError::Network(err.to_string()))?;
+                Ok(PostOutcome::Validation(body))
+            }
+            other => Err(ConfirmPhoneVerificationError::Unexpected(other)),
         }
     }
 
@@ -3033,6 +3308,7 @@ mod tests {
                         "name": "Ana Garcia",
                         "email": "ana@example.com",
                         "phone": "+573001234567",
+                        "phone_verified": false,
                         "role": "passenger",
                     },
                     "token": {
@@ -3174,6 +3450,7 @@ mod tests {
                         "name": "Ana Garcia",
                         "email": "ana@example.com",
                         "phone": "+573001234567",
+                        "phone_verified": false,
                         "role": "passenger",
                     },
                     "token": {
@@ -3432,6 +3709,7 @@ mod tests {
                         "name": "Carlos Perez",
                         "email": "carlos@example.com",
                         "phone": "+573001234567",
+                        "phone_verified": false,
                         "role": "driver",
                     },
                     "token": {
@@ -3771,6 +4049,7 @@ mod tests {
                     "name": "Ana Garcia",
                     "email": "ana@example.com",
                     "phone": "+573001234567",
+                    "phone_verified": false,
                     "role": "passenger",
                 }
             })))
@@ -4192,6 +4471,7 @@ mod tests {
                     "name": "Ana Garcia Perez",
                     "email": "ana@example.com",
                     "phone": "+573007654321",
+                    "phone_verified": false,
                     "role": "passenger",
                 }
             })))
@@ -4303,6 +4583,7 @@ mod tests {
                     "name": "Ana Garcia Perez",
                     "email": "ana@example.com",
                     "phone": "+573001234567",
+                    "phone_verified": false,
                     "role": "passenger",
                 }
             })))
@@ -4376,6 +4657,320 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, UpdateProfileError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn request_phone_verification_sends_the_bearer_token_and_returns_no_data() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/phone/verification"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .request_phone_verification(&sample_token())
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data, ());
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn request_phone_verification_returns_rate_limited_on_429_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/phone/verification"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
+                "message": "Too Many Attempts.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .request_phone_verification(&sample_token())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, RequestPhoneVerificationError::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn request_phone_verification_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/phone/verification"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/phone/verification"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .request_phone_verification(&sample_token())
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn request_phone_verification_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/phone/verification"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .request_phone_verification(&sample_token())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, RequestPhoneVerificationError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn request_phone_verification_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .request_phone_verification(&sample_token())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RequestPhoneVerificationError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn confirm_phone_verification_rejects_an_empty_code_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .confirm_phone_verification(&sample_token(), "   ")
+                .await,
+            Err(ConfirmPhoneVerificationError::EmptyCode)
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_phone_verification_sends_the_trimmed_code_and_returns_the_updated_account() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/phone/verification/confirm"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .and(body_json(serde_json::json!({ "code": "482913" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": 1,
+                    "name": "Ana Garcia",
+                    "email": "ana@example.com",
+                    "phone": "+573001234567",
+                    "phone_verified": true,
+                    "role": "passenger",
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .confirm_phone_verification(&sample_token(), "  482913  ")
+            .await
+            .unwrap();
+
+        assert!(fetch.data.phone_verified);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn confirm_phone_verification_returns_validation_error_on_422_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/phone/verification/confirm"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "El codigo no es correcto.",
+                "errors": {
+                    "code": ["El codigo no es correcto."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .confirm_phone_verification(&sample_token(), "000000")
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            ConfirmPhoneVerificationError::Validation(ApiErrorBody {
+                message: "El codigo no es correcto.".to_string(),
+                errors: Some(HashMap::from([(
+                    "code".to_string(),
+                    vec!["El codigo no es correcto.".to_string()]
+                )])),
+            })
+        );
+        assert_eq!(
+            error.field_message("code"),
+            Some("El codigo no es correcto.".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_phone_verification_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/phone/verification/confirm"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/phone/verification/confirm"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": 1,
+                    "name": "Ana Garcia",
+                    "email": "ana@example.com",
+                    "phone": "+573001234567",
+                    "phone_verified": true,
+                    "role": "passenger",
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .confirm_phone_verification(&sample_token(), "482913")
+            .await
+            .unwrap();
+
+        assert!(fetch.data.phone_verified);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn confirm_phone_verification_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/phone/verification/confirm"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .confirm_phone_verification(&sample_token(), "482913")
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, ConfirmPhoneVerificationError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn confirm_phone_verification_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .confirm_phone_verification(&sample_token(), "482913")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ConfirmPhoneVerificationError::Network(_)));
     }
 
     #[tokio::test]
