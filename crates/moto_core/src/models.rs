@@ -118,6 +118,20 @@ pub struct ConfirmPhoneVerificationPayload {
     pub code: String,
 }
 
+/// Body de `POST /api/v1/auth/password/forgot`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RequestPasswordResetPayload {
+    pub phone: String,
+}
+
+/// Body de `POST /api/v1/auth/password/reset`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ConfirmPasswordResetPayload {
+    pub phone: String,
+    pub code: String,
+    pub password: String,
+}
+
 /// Tipo de documento de verificacion del conductor
 /// (`openapi.yaml#/components/schemas/DriverDocument` de `Back_App_MotoCarros`).
 ///

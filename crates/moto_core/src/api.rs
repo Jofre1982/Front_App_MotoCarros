@@ -6,12 +6,12 @@
 
 use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload, BroadcastAuthResponse,
-    ConfirmPhoneVerificationPayload, Coordinates, DataEnvelope, DocumentType,
-    DriverEarningsSummary, DriverVerification, LoginPayload, RateDriverPayload,
-    RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload, Ride,
-    RideCancellation, RideEstimate, RideEstimateRequestPayload, RideRating, RideReceipt,
-    RideRequestPayload, UpdateProfilePayload, UpdateVehiclePayload, UploadedDriverDocument, User,
-    Vehicle, VehicleType,
+    ConfirmPasswordResetPayload, ConfirmPhoneVerificationPayload, Coordinates, DataEnvelope,
+    DocumentType, DriverEarningsSummary, DriverVerification, LoginPayload, RateDriverPayload,
+    RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload,
+    RequestPasswordResetPayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
+    RideRating, RideReceipt, RideRequestPayload, UpdateProfilePayload, UpdateVehiclePayload,
+    UploadedDriverDocument, User, Vehicle, VehicleType,
 };
 
 #[cfg(test)]
@@ -120,6 +120,117 @@ impl RegisterError {
     pub fn field_message(&self, field: &str) -> Option<String> {
         match self {
             RegisterError::Validation(body) => body
+                .errors
+                .as_ref()
+                .and_then(|errors| errors.get(field))
+                .and_then(|messages| messages.first())
+                .cloned(),
+            _ => None,
+        }
+    }
+}
+
+/// Fallos posibles de `POST /api/v1/auth/password/forgot`. No hay variante
+/// para "el celular no tiene cuenta": el backend responde 204 sin importar
+/// el resultado, a proposito, para no ser un oraculo de que numeros estan
+/// registrados en MotoYa.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RequestPasswordResetError {
+    EmptyFields,
+    InvalidPhone,
+    Validation(ApiErrorBody),
+    /// Limite de 3 solicitudes cada 10 minutos por IP (ver openapi.yaml):
+    /// cada acierto le va a costar un SMS real apenas haya un proveedor
+    /// conectado.
+    RateLimited,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for RequestPasswordResetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequestPasswordResetError::EmptyFields => write!(f, "Ingresa tu numero de celular."),
+            RequestPasswordResetError::InvalidPhone => {
+                write!(f, "Ingresa un telefono valido (7 a 15 digitos).")
+            }
+            RequestPasswordResetError::Validation(body) => write!(f, "{}", body.message),
+            RequestPasswordResetError::RateLimited => {
+                write!(
+                    f,
+                    "Superaste el limite de solicitudes. Intenta de nuevo en unos minutos."
+                )
+            }
+            RequestPasswordResetError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            RequestPasswordResetError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RequestPasswordResetError {}
+
+impl RequestPasswordResetError {
+    pub fn field_message(&self, field: &str) -> Option<String> {
+        match self {
+            RequestPasswordResetError::Validation(body) => body
+                .errors
+                .as_ref()
+                .and_then(|errors| errors.get(field))
+                .and_then(|messages| messages.first())
+                .cloned(),
+            _ => None,
+        }
+    }
+}
+
+/// Fallos posibles de `POST /api/v1/auth/password/reset`. Todas las razones
+/// por las que el backend no acepta el codigo —celular sin cuenta, sin
+/// recuperacion pendiente, vencido, intentos agotados, o el valor no
+/// coincide— llegan como `Validation` bajo la misma clave `code`, mismo
+/// criterio que `ConfirmPhoneVerificationError`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfirmPasswordResetError {
+    EmptyFields,
+    InvalidPhone,
+    Validation(ApiErrorBody),
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for ConfirmPasswordResetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfirmPasswordResetError::EmptyFields => write!(f, "Completa todos los campos."),
+            ConfirmPasswordResetError::InvalidPhone => {
+                write!(f, "Ingresa un telefono valido (7 a 15 digitos).")
+            }
+            ConfirmPasswordResetError::Validation(body) => write!(f, "{}", body.message),
+            ConfirmPasswordResetError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            ConfirmPasswordResetError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfirmPasswordResetError {}
+
+impl ConfirmPasswordResetError {
+    pub fn field_message(&self, field: &str) -> Option<String> {
+        match self {
+            ConfirmPasswordResetError::Validation(body) => body
                 .errors
                 .as_ref()
                 .and_then(|errors| errors.get(field))
@@ -1401,6 +1512,111 @@ impl ApiClient {
                 Err(LoginError::Validation(body))
             }
             other => Err(LoginError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/auth/password/forgot`. Responde exito sin importar si
+    /// el celular tiene cuenta o no —el backend nunca lo informa, a
+    /// proposito—, asi que un `Ok` acá solo significa "la solicitud llego
+    /// bien", no "el celular tiene cuenta".
+    pub async fn request_password_reset(
+        &self,
+        phone: &str,
+    ) -> Result<(), RequestPasswordResetError> {
+        let phone = phone.trim();
+        if phone.is_empty() {
+            return Err(RequestPasswordResetError::EmptyFields);
+        }
+        if !is_valid_phone(phone) {
+            return Err(RequestPasswordResetError::InvalidPhone);
+        }
+
+        let url = format!("{}/api/v1/auth/password/forgot", self.base_url);
+        let payload = RequestPasswordResetPayload {
+            phone: phone.to_string(),
+        };
+
+        let response = self
+            .http
+            .post(url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|err| RequestPasswordResetError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            return Ok(());
+        }
+
+        match status.as_u16() {
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| RequestPasswordResetError::Network(err.to_string()))?;
+                Err(RequestPasswordResetError::Validation(body))
+            }
+            429 => Err(RequestPasswordResetError::RateLimited),
+            other => Err(RequestPasswordResetError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/auth/password/reset`. Si el codigo es correcto, deja la
+    /// cuenta autenticada de una vez (mismo shape `AuthenticatedUser` que
+    /// `login`), para no obligar a volver a escribir la contrasena recien
+    /// elegida.
+    pub async fn confirm_password_reset(
+        &self,
+        phone: &str,
+        code: &str,
+        password: &str,
+    ) -> Result<AuthenticatedUser, ConfirmPasswordResetError> {
+        let phone = phone.trim();
+        let code = code.trim();
+
+        if phone.is_empty() || code.is_empty() || password.is_empty() {
+            return Err(ConfirmPasswordResetError::EmptyFields);
+        }
+        if !is_valid_phone(phone) {
+            return Err(ConfirmPasswordResetError::InvalidPhone);
+        }
+
+        let url = format!("{}/api/v1/auth/password/reset", self.base_url);
+        let payload = ConfirmPasswordResetPayload {
+            phone: phone.to_string(),
+            code: code.to_string(),
+            password: password.to_string(),
+        };
+
+        let response = self
+            .http
+            .post(url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|err| ConfirmPasswordResetError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<AuthenticatedUser> = response
+                .json()
+                .await
+                .map_err(|err| ConfirmPasswordResetError::Network(err.to_string()))?;
+            return Ok(envelope.data);
+        }
+
+        match status.as_u16() {
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| ConfirmPasswordResetError::Network(err.to_string()))?;
+                Err(ConfirmPasswordResetError::Validation(body))
+            }
+            other => Err(ConfirmPasswordResetError::Unexpected(other)),
         }
     }
 
@@ -3571,6 +3787,197 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, LoginError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn request_password_reset_rejects_empty_fields_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client.request_password_reset("").await,
+            Err(RequestPasswordResetError::EmptyFields)
+        );
+        assert_eq!(
+            client.request_password_reset("   ").await,
+            Err(RequestPasswordResetError::EmptyFields)
+        );
+    }
+
+    #[tokio::test]
+    async fn request_password_reset_rejects_invalid_phone_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client.request_password_reset("123").await,
+            Err(RequestPasswordResetError::InvalidPhone)
+        );
+    }
+
+    #[tokio::test]
+    async fn request_password_reset_succeeds_on_204_regardless_of_whether_the_account_exists() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/password/forgot"))
+            .and(body_json(serde_json::json!({
+                "phone": "+573001234567",
+            })))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+
+        assert_eq!(client.request_password_reset("+573001234567").await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn request_password_reset_returns_rate_limited_on_429() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/password/forgot"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
+                "message": "Too Many Attempts.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .request_password_reset("+573001234567")
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, RequestPasswordResetError::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn request_password_reset_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .request_password_reset("+573001234567")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RequestPasswordResetError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn confirm_password_reset_rejects_empty_fields_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .confirm_password_reset("", "123456", "nuevaClave2026")
+                .await,
+            Err(ConfirmPasswordResetError::EmptyFields)
+        );
+        assert_eq!(
+            client
+                .confirm_password_reset("+573001234567", "", "nuevaClave2026")
+                .await,
+            Err(ConfirmPasswordResetError::EmptyFields)
+        );
+        assert_eq!(
+            client
+                .confirm_password_reset("+573001234567", "123456", "")
+                .await,
+            Err(ConfirmPasswordResetError::EmptyFields)
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_password_reset_rejects_invalid_phone_without_sending_a_request() {
+        let client = ApiClient::new("https://unreachable.invalid");
+
+        assert_eq!(
+            client
+                .confirm_password_reset("123", "123456", "nuevaClave2026")
+                .await,
+            Err(ConfirmPasswordResetError::InvalidPhone)
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_password_reset_returns_authenticated_user_on_success() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/password/reset"))
+            .and(body_json(serde_json::json!({
+                "phone": "+573001234567",
+                "code": "123456",
+                "password": "nuevaClave2026",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "user": {
+                        "id": 1,
+                        "name": "Ana Garcia",
+                        "email": "ana@example.com",
+                        "phone": "+573001234567",
+                        "phone_verified": false,
+                        "role": "passenger",
+                    },
+                    "token": {
+                        "access_token": "jwt-token",
+                        "token_type": "bearer",
+                        "expires_in": 900,
+                    },
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let authenticated = client
+            .confirm_password_reset("+573001234567", "123456", "nuevaClave2026")
+            .await
+            .unwrap();
+
+        assert_eq!(authenticated.user.email, "ana@example.com");
+        assert_eq!(authenticated.token.access_token, "jwt-token");
+    }
+
+    #[tokio::test]
+    async fn confirm_password_reset_returns_validation_error_on_422() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/password/reset"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "El código no es correcto.",
+                "errors": {
+                    "code": ["El código no es correcto."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .confirm_password_reset("+573001234567", "000000", "nuevaClave2026")
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.field_message("code"),
+            Some("El código no es correcto.".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_password_reset_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .confirm_password_reset("+573001234567", "123456", "nuevaClave2026")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ConfirmPasswordResetError::Network(_)));
     }
 
     #[tokio::test]

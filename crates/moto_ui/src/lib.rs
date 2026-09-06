@@ -12,6 +12,7 @@ pub mod screens;
 pub use map::{MapMarker, MapView};
 pub use screens::documents::DocumentsScreen;
 pub use screens::driver_earnings::DriverEarningsScreen;
+pub use screens::forgot_password::ForgotPasswordScreen;
 pub use screens::login::LoginScreen;
 pub use screens::nearby_rides::NearbyRidesScreen;
 pub use screens::profile::ProfileScreen;
@@ -28,6 +29,7 @@ enum AuthScreen {
     Login,
     RegisterPassenger,
     RegisterDriver,
+    ForgotPassword,
 }
 
 /// Raiz de la UI, agnostica de plataforma.
@@ -60,6 +62,7 @@ pub fn App() -> Element {
                     LoginScreen {
                         on_register_click: move |_| auth_screen.set(AuthScreen::RegisterPassenger),
                         on_register_driver_click: move |_| auth_screen.set(AuthScreen::RegisterDriver),
+                        on_forgot_password_click: move |_| auth_screen.set(AuthScreen::ForgotPassword),
                     }
                 },
                 AuthScreen::RegisterPassenger => rsx! {
@@ -69,6 +72,11 @@ pub fn App() -> Element {
                 },
                 AuthScreen::RegisterDriver => rsx! {
                     RegisterDriverScreen {
+                        on_login_click: move |_| auth_screen.set(AuthScreen::Login),
+                    }
+                },
+                AuthScreen::ForgotPassword => rsx! {
+                    ForgotPasswordScreen {
                         on_login_click: move |_| auth_screen.set(AuthScreen::Login),
                     }
                 },
