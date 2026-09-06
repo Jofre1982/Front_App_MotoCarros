@@ -8,6 +8,7 @@ use moto_core::storage::TokenStorage;
 
 pub mod map;
 pub mod screens;
+mod theme;
 
 pub use map::{MapMarker, MapView};
 pub use screens::documents::DocumentsScreen;
@@ -54,6 +55,7 @@ pub fn App() -> Element {
     });
 
     rsx! {
+        document::Style { "{theme::STYLES}" }
         if session.is_authenticated() {
             Home {}
         } else {
@@ -158,12 +160,6 @@ fn Home() -> Element {
                     onclick: move |_| section.set(HomeSection::Profile),
                     "Mi perfil"
                 }
-                button {
-                    r#type: "button",
-                    disabled: section() == HomeSection::RideEstimate,
-                    onclick: move |_| section.set(HomeSection::RideEstimate),
-                    "Ver tarifa estimada"
-                }
                 if is_driver {
                     button {
                         r#type: "button",
@@ -190,6 +186,19 @@ fn Home() -> Element {
                         "Historial y ganancias"
                     }
                 } else {
+                    // "Ver tarifa estimada" (estimar + solicitar un viaje) es
+                    // un flujo del pasajero: el conductor no pide viajes,
+                    // los recibe en "Solicitudes cercanas". El backend ya
+                    // rechaza la creacion del viaje si la intenta una cuenta
+                    // de conductor (`RidePolicy::create()`), pero mostrarle
+                    // la pestana igual invitaba a un 403 confuso en vez de
+                    // que la opcion ni aparezca.
+                    button {
+                        r#type: "button",
+                        disabled: section() == HomeSection::RideEstimate,
+                        onclick: move |_| section.set(HomeSection::RideEstimate),
+                        "Ver tarifa estimada"
+                    }
                     button {
                         r#type: "button",
                         disabled: section() == HomeSection::RideHistory,
