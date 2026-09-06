@@ -2,10 +2,13 @@
 //! backend (`Back_App_MotoCarros`).
 //!
 //! Consulta `GET /api/v1/me/documents` al entrar y ofrece un campo de
-//! archivo por cada tipo exigido hoy (`identidad`, `tarjeta_propiedad`) para
-//! subirlo o reemplazarlo con `POST /api/v1/me/documents`. No es una pantalla
-//! de aprobacion: eso lo hace un administrador desde fuera de esta app (ver
-//! historia tecnica #64 del backend) — acá solo se sube y se ve el estado.
+//! archivo por cada tipo exigido hoy (`identidad`, `tarjeta_propiedad`,
+//! `foto_vehiculo`) para subirlo o reemplazarlo con `POST /api/v1/me/documents`.
+//! Elegir el archivo no lo sube solo: hace falta confirmar con el boton
+//! "Cargar", para que quede claro si la subida funciono en vez de que
+//! parezca que no paso nada. No es una pantalla de aprobacion: eso lo hace
+//! un administrador desde fuera de esta app (ver historia tecnica #64 del
+//! backend) — acá solo se sube y se ve el estado.
 //!
 //! La lectura de los bytes del archivo (`FileData::read_bytes`, de
 //! `dioxus-html`) es la misma API en web y en movil nativo: es lo que evita
@@ -14,6 +17,7 @@
 
 use std::sync::Arc;
 
+use dioxus::html::FileData;
 use dioxus::prelude::*;
 use moto_core::api::{ApiClient, AuthenticatedRequestError, UploadDriverDocumentError};
 use moto_core::models::{
@@ -161,19 +165,33 @@ fn DocumentRow(props: DocumentRowProps) -> Element {
 
     let mut is_uploading = use_signal(|| false);
     let mut upload_error = use_signal(|| None::<UploadDriverDocumentError>);
+    let mut selected_file = use_signal(|| None::<FileData>);
 
     let document_type = props.document.document_type;
     let on_uploaded = props.on_uploaded;
+    let input_id = format!("document-file-{}", document_type_slug(document_type));
 
+    // Elegir el archivo ya no lo sube: solo lo deja listo para que el
+    // conductor confirme con el boton "Cargar" (issue pedido por el
+    // usuario, viendo la app: sin este paso no quedaba claro si la subida
+    // habia funcionado).
     let on_file_selected = move |event: FormEvent| {
+        upload_error.set(None);
+        selected_file.set(event.files().into_iter().next());
+    };
+
+    let input_id_for_upload = input_id.clone();
+
+    let on_upload_click = move |_| {
         let Some(token) = session.token() else {
             return;
         };
-        let Some(file) = event.files().into_iter().next() else {
+        let Some(file) = selected_file() else {
             return;
         };
         let api_client = api_client.clone();
         let storage = storage.clone();
+        let input_id = input_id_for_upload.clone();
 
         spawn(async move {
             is_uploading.set(true);
@@ -208,6 +226,16 @@ fn DocumentRow(props: DocumentRowProps) -> Element {
                         session.update_token(refreshed, storage.as_ref());
                     }
                     on_uploaded.call(fetch.data);
+                    selected_file.set(None);
+                    // El navegador no deja limpiar `value` de un <input
+                    // type="file"> asignandolo desde Rust/JS salvo con la
+                    // cadena vacia exacta: sin este eval, el campo seguiria
+                    // mostrando el nombre del archivo ya subido aunque
+                    // `selected_file` (y por lo tanto el boton "Cargar") ya
+                    // se hayan reiniciado.
+                    let _ = document::eval(&format!(
+                        "document.getElementById('{input_id}').value = '';"
+                    ));
                 }
                 Err(UploadDriverDocumentError::SessionExpired) => {
                     session.logout(storage.as_ref());
@@ -232,7 +260,6 @@ fn DocumentRow(props: DocumentRowProps) -> Element {
     } else {
         current_error.as_ref().map(|err| err.to_string())
     };
-    let input_id = format!("document-file-{}", document_type_slug(document_type));
 
     rsx! {
         div { class: "document-row",
@@ -251,8 +278,18 @@ fn DocumentRow(props: DocumentRowProps) -> Element {
                 disabled: is_uploading(),
                 onchange: on_file_selected,
             }
-            if is_uploading() {
-                p { "Subiendo..." }
+            if let Some(file) = selected_file() {
+                p { class: "document-selected-file", "Archivo elegido: {file.name()}" }
+            }
+            button {
+                r#type: "button",
+                disabled: is_uploading() || selected_file().is_none(),
+                onclick: on_upload_click,
+                if is_uploading() {
+                    "Cargando..."
+                } else {
+                    "Cargar"
+                }
             }
             if let Some(message) = &file_error {
                 p { class: "document-field-error", role: "alert", "{message}" }
