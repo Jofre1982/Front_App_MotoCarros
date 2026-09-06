@@ -18,6 +18,8 @@ pub struct LoginScreenProps {
     /// Se dispara cuando el usuario pide ir a crear una cuenta de conductor
     /// (issue #7).
     pub on_register_driver_click: EventHandler<()>,
+    /// Se dispara cuando el usuario pide recuperar su contrasena.
+    pub on_forgot_password_click: EventHandler<()>,
 }
 
 #[component]
@@ -88,6 +90,12 @@ pub fn LoginScreen(props: LoginScreenProps) -> Element {
             }
             if let Some(message) = error_message() {
                 p { class: "login-error", role: "alert", "{message}" }
+            }
+            button {
+                r#type: "button",
+                class: "login-forgot-password-link",
+                onclick: move |_| props.on_forgot_password_click.call(()),
+                "Olvide mi contrasena"
             }
             button {
                 r#type: "button",
