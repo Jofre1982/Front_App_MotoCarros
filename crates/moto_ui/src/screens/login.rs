@@ -60,11 +60,7 @@ pub fn LoginScreen(props: LoginScreenProps) -> Element {
 
     rsx! {
         div { class: "login-screen",
-            div { class: "motoya-brand",
-                crate::icons::MavicureHillsIcon {}
-                h1 { "MotoYa" }
-            }
-            h2 { "Iniciar sesion" }
+            h1 { "Iniciar sesion" }
             form { onsubmit: on_submit,
                 label { r#for: "login-email", "Email" }
                 input {
