@@ -1,204 +1,325 @@
-//! Identidad visual de MotoYa (paleta e iconos del Guainia) — issue #54.
+//! Estilos globales de la app, inyectados una sola vez desde `App` (ver
+//! `lib.rs`) con `dioxus::document::Style`.
 //!
-//! `GlobalStyles` inyecta la paleta, la tipografia y las reglas de layout
-//! compartidas una sola vez, via `document::Style`/`document::Link`
-//! (cabecera de la pagina), asi que funciona igual en el build `web`
-//! (WASM) y en el renderer movil basado en webview, sin un `index.html`
-//! propio — ver `.claude/STANDARDS.md` para el mismo patron aplicado a
-//! Leaflet en `map.rs`.
+//! Vive como una sola hoja de estilos con selectores por convención de
+//! nombre (`[class$="-screen"]`, `[class*="-error"]`, etc.) en vez de tocar
+//! cada pantalla: todas las pantallas ya nombran sus clases con el mismo
+//! patrón consistente (`<seccion>-<parte>`, ver los distintos archivos de
+//! `screens/`), así que un solo lugar alcanza para darle una apariencia
+//! coherente a toda la app sin repetir estilos pantalla por pantalla.
 //!
-//! Las reglas de layout compartidas (`[class$="-screen"]`, `[class$="-form"]`,
-//! etc.) seleccionan por el sufijo de nombre de clase que cada pantalla ya
-//! usa (ver `crates/moto_ui/src/screens/*.rs`), en vez de listar cada una de
-//! las ~90 clases existentes una por una: la convencion de nombres ya es
-//! consistente en todo el codigo (`*-screen`, `*-form`, `*-list`, `*-row`,
-//! `*-error`, `*-empty`, `*-link`, `*-panel`, `*-status`), asi que una
-//! pantalla nueva que la siga queda estilada automaticamente.
+//! **Tema definitivo, confirmado por el dueño del producto (2026-09-13):
+//! blanco y naranja, sin iconos personalizados ni tipografías especiales.**
+//! Antes hubo un intento con la paleta e iconos del Guainía (issue #54,
+//! rama `agent/feat-54-identidad-visual-guainia`) que se llegó a fusionar a
+//! `main` por error de una sesión que no verificó la decisión vigente — se
+//! revirtió. No restaurar esa paleta ni esos iconos sin que el usuario lo
+//! pida explícitamente de nuevo.
 
-use dioxus::prelude::*;
-
-const GLOBAL_CSS: &str = r#"
+pub const STYLES: &str = r#"
 :root {
-    --selva: #14231C;
-    --selva-2: #1C3327;
-    --rio: #1F5C57;
-    --cerro: #C97244;
-    --cerro-dim: #9A5732;
-    --flor: #E23178;
-    --roca: #3A2116;
-    --arena: #F3EDE2;
-    --arena-dim: #B9C4BB;
-
-    --motoya-font-heading: "Fraunces", serif;
-    --motoya-font-body: "Manrope", sans-serif;
+    --color-primary: #e8590c;
+    --color-primary-dark: #c94f0a;
+    --color-primary-light: #fff0e6;
+    --color-text: #22272b;
+    --color-muted: #667085;
+    --color-bg: #f6f4f1;
+    --color-surface: #ffffff;
+    --color-border: #e4e0da;
+    --color-error: #c92a2a;
+    --color-error-bg: #fff1f0;
+    --color-success: #2b8a3e;
+    --color-success-bg: #ebfbee;
+    --radius: 10px;
+    --shadow: 0 1px 3px rgba(20, 15, 5, 0.08);
 }
 
-*, *::before, *::after {
+* {
     box-sizing: border-box;
 }
 
 html, body {
     margin: 0;
-    min-height: 100%;
-    background: var(--selva);
-    color: var(--arena);
+    padding: 0;
+    background: var(--color-bg);
 }
 
 body {
-    font-family: var(--motoya-font-body);
-    padding: 1rem;
-    line-height: 1.4;
+    color: var(--color-text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 17px;
+    line-height: 1.45;
+    max-width: 480px;
+    margin: 0 auto;
+    min-height: 100vh;
+    padding: 20px 18px 48px;
 }
 
-h1, h2, h3, h4 {
-    font-family: var(--motoya-font-heading);
-    color: var(--cerro);
-    margin: 0 0 0.5rem;
+h1 {
+    font-size: 1.5rem;
+    margin: 4px 0 18px;
+    color: var(--color-primary-dark);
 }
 
-a {
-    color: var(--flor);
+h2 {
+    font-size: 1.25rem;
+    margin: 0 0 14px;
 }
 
+h3 {
+    font-size: 1.05rem;
+    margin: 0 0 6px;
+}
+
+p {
+    margin: 0 0 12px;
+}
+
+/* Formularios: etiqueta arriba, campo grande y facil de tocar. */
 label {
-    color: var(--arena-dim);
-    font-size: 0.9rem;
+    display: block;
+    font-weight: 600;
+    font-size: 0.92rem;
+    margin: 14px 0 6px;
+    color: var(--color-text);
 }
 
-button {
-    font-family: var(--motoya-font-body);
+input,
+select,
+textarea {
+    width: 100%;
+    padding: 12px 14px;
     font-size: 1rem;
-    background: var(--rio);
-    color: var(--arena);
-    border: 1px solid var(--roca);
-    border-radius: 0.5rem;
-    padding: 0.6rem 1rem;
+    font-family: inherit;
+    color: var(--color-text);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+    background: var(--color-bg);
+    color: var(--color-muted);
+}
+
+textarea {
+    resize: vertical;
+}
+
+/* Botones: los `<button type="submit">` de un formulario son la accion
+   principal (llenos, color de marca); el resto (enlaces de navegacion como
+   "Olvide mi contrasena", "Crear cuenta...", "Cancelar") son secundarios y
+   se distinguen por el sufijo `-link` que ya usa cada pantalla. */
+button {
+    display: inline-block;
+    width: 100%;
+    padding: 13px 16px;
+    margin-top: 14px;
+    font-size: 1rem;
+    font-weight: 600;
+    font-family: inherit;
+    color: #fff;
+    background: var(--color-primary);
+    border: none;
+    border-radius: var(--radius);
     cursor: pointer;
-    transition: background-color 0.15s ease, opacity 0.15s ease;
+    transition: background-color 0.15s ease;
 }
 
 button:hover:not(:disabled) {
-    background: var(--cerro-dim);
+    background: var(--color-primary-dark);
 }
 
 button:disabled {
-    opacity: 0.55;
+    background: var(--color-border);
+    color: var(--color-muted);
     cursor: default;
-    background: var(--roca);
 }
 
-input, select, textarea {
-    font-family: var(--motoya-font-body);
-    font-size: 1rem;
-    background: var(--selva-2);
-    color: var(--arena);
-    border: 1px solid var(--roca);
-    border-radius: 0.375rem;
-    padding: 0.5rem 0.6rem;
-    width: 100%;
-}
-
-input::placeholder, textarea::placeholder {
-    color: var(--arena-dim);
-}
-
-/* Layout compartido por convencion de sufijo — ver comentario del modulo. */
-[class$="-screen"] {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-    max-width: 480px;
-    margin: 0 auto;
-}
-
-[class$="-form"] {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-}
-
-[class$="-list"] {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-}
-
-[class$="-row"],
-[class$="-result"],
-[class$="-summary"],
-[class*="-panel"] {
-    background: var(--selva-2);
-    border: 1px solid var(--roca);
-    border-radius: 0.75rem;
-    padding: 0.9rem;
-}
-
-[class$="-empty"] {
-    color: var(--arena-dim);
-    font-style: italic;
-}
-
-[class*="-error"] {
-    color: var(--flor);
-}
-
-[class*="-status"] {
-    font-size: 0.9rem;
-    color: var(--arena-dim);
-}
-
-/* Los "*-link" son <button> secundarios (navegacion entre pantallas), no
-   <a> — se ven como enlace de texto para distinguirse de la accion
-   primaria de cada pantalla. La combinacion `button[class$="-link"]` pesa
-   mas que el `button` de arriba, asi que gana sin depender del orden. */
 button[class$="-link"] {
+    width: auto;
+    display: block;
+    margin: 10px auto 0;
+    padding: 8px 4px;
     background: none;
-    border: none;
-    color: var(--flor);
+    color: var(--color-primary-dark);
+    font-weight: 500;
     text-decoration: underline;
-    padding: 0.25rem 0;
+    text-align: center;
 }
 
 button[class$="-link"]:hover:not(:disabled) {
     background: none;
-    color: var(--cerro);
+    color: var(--color-primary);
 }
 
-/* Cancelar/descartar: menos enfasis que la accion primaria de la pantalla. */
-button[class*="-cancel"],
-button[class*="-dismiss"] {
-    background: transparent;
-    color: var(--arena-dim);
-    border-color: var(--roca);
+/* Mensajes de error y de exito, sin importar la pantalla: toda clase que
+   termine en "-error" ya viene con role="alert" desde el componente. */
+p[class$="-error"] {
+    background: var(--color-error-bg);
+    color: var(--color-error);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    font-size: 0.92rem;
+    margin-top: 10px;
 }
 
-button[class*="-cancel"]:hover:not(:disabled),
-button[class*="-dismiss"]:hover:not(:disabled) {
-    background: var(--roca);
-    color: var(--arena);
+p[class*="field-error"] {
+    background: none;
+    color: var(--color-error);
+    padding: 0;
+    margin: -4px 0 4px;
+    font-size: 0.85rem;
 }
 
-.home-nav {
+/* Resultados/paneles tipo tarjeta: toda "dl" de la app se usa para mostrar
+   datos clave-valor (perfil, vehiculo, tarifa estimada...), asi que se
+   estiliza sin depender de una clase particular; resumenes, secciones
+   agrupadas y filas de listas si distinguen por sufijo de clase. */
+dl,
+div[class$="-summary"],
+div[class$="-panel"],
+div[class$="-section"],
+li[class$="-row"],
+div[class$="-row"] {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 14px 16px;
+    margin: 8px 0;
+}
+
+dl dt,
+div[class$="-summary"] dt {
+    font-size: 0.8rem;
+    color: var(--color-muted);
+    margin-top: 10px;
+}
+
+dl dt:first-child,
+div[class$="-summary"] dt:first-child {
+    margin-top: 0;
+}
+
+dl dd,
+div[class$="-summary"] dd {
+    margin: 2px 0 0;
+    font-size: 1.02rem;
+    font-weight: 600;
+}
+
+ul[class$="-list"] {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+p[class$="-empty"] {
+    color: var(--color-muted);
+    text-align: center;
+    padding: 24px 0;
+}
+
+/* Estados con nombre (pendiente/aprobado/etc.): un texto corto tipo
+   etiqueta, mismo criterio para cualquier pantalla que use "-status". */
+[class$="-status"] {
+    display: inline-block;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-muted);
+    background: var(--color-bg);
+    border-radius: 999px;
+    padding: 3px 12px;
+    margin: 4px 0;
+}
+
+p[class$="-selected-file"] {
+    font-size: 0.88rem;
+    color: var(--color-muted);
+    margin: 4px 0 0;
+}
+
+p[class$="-rejection-reason"] {
+    color: var(--color-error);
+    font-size: 0.9rem;
+}
+
+p[class$="-verified"] {
+    color: var(--color-success);
+    font-weight: 600;
+}
+
+p[class$="-unverified"] {
+    color: var(--color-muted);
+}
+
+/* Barra de navegacion de Home: pestañas horizontales que se pueden
+   envolver en varias filas en pantallas angostas. El tab activo se marca
+   con `disabled` (ver lib.rs) en vez de una clase aparte, asi que se
+   distingue por color en vez de verse "deshabilitado". */
+nav.home-nav {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.5rem;
+    gap: 6px;
+    margin-bottom: 20px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--color-border);
 }
 
-.motoya-map-view {
-    border-radius: 0.75rem;
-    overflow: hidden;
-    border: 1px solid var(--roca);
+nav.home-nav button {
+    width: auto;
+    margin-top: 0;
+    padding: 8px 14px;
+    font-size: 0.88rem;
+    font-weight: 600;
+    background: var(--color-surface);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
 }
 
-.motoya-brand {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-family: var(--motoya-font-heading);
-    color: var(--cerro);
+nav.home-nav button:hover:not(:disabled) {
+    background: var(--color-primary-light);
+    color: var(--color-primary-dark);
+}
+
+nav.home-nav button:disabled {
+    background: var(--color-primary);
+    color: #fff;
+    border-color: var(--color-primary);
+    cursor: default;
+    opacity: 1;
+}
+
+/* Botones de accion sobre un viaje puntual (aceptar/iniciar/completar/
+   cancelar): colores distintos segun la intencion, mismo criterio de
+   nombre por sufijo que el resto de la hoja. */
+button[class*="accept"],
+button[class*="complete"] {
+    background: var(--color-success);
+}
+
+button[class*="accept"]:hover:not(:disabled),
+button[class*="complete"]:hover:not(:disabled) {
+    background: #22742f;
+}
+
+button[class*="cancel"] {
+    background: var(--color-error);
+}
+
+button[class*="cancel"]:hover:not(:disabled) {
+    background: #a61e1e;
 }
 
 /* Fondo de la pantalla de login (imagen provista por el usuario, ver
@@ -223,31 +344,3 @@ button[class*="-dismiss"]:hover:not(:disabled) {
     margin: -4px 0 0;
 }
 "#;
-
-/// Inyecta la paleta/tipografia/layout de MotoYa en la cabecera de la
-/// pagina. Se renderiza una sola vez desde `App` (raiz agnostica de
-/// plataforma en `lib.rs`), asi que cubre tanto `web` como `mobile` sin
-/// wiring adicional por binario.
-///
-/// Google Fonts se carga con el patron `preconnect` + hoja de estilos
-/// recomendado por Google (dos origenes: `fonts.googleapis.com` sirve el
-/// CSS, `fonts.gstatic.com` los archivos de fuente reales).
-#[component]
-pub fn GlobalStyles() -> Element {
-    rsx! {
-        document::Link {
-            rel: "preconnect",
-            href: "https://fonts.googleapis.com",
-        }
-        document::Link {
-            rel: "preconnect",
-            href: "https://fonts.gstatic.com",
-            crossorigin: "anonymous",
-        }
-        document::Link {
-            rel: "stylesheet",
-            href: "https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,600;0,700;1,600&family=Manrope:wght@400;500;700&display=swap",
-        }
-        document::Style { "{GLOBAL_CSS}" }
-    }
-}

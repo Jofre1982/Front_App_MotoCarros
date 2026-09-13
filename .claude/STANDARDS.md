@@ -120,3 +120,49 @@ en el mismo cambio.
 - `#[allow(clippy::...)]` requiere justificación explícita en el PR, no se usa
   para silenciar sin más.
 - `.unwrap()`/`.expect()` solo en tests o casos verdaderamente infalibles.
+
+## Identidad visual: blanco y naranja, sin iconos propios (confirmado 2026-09-13)
+
+**El tema definitivo de la app es blanco y naranja** (`crates/moto_ui/src/theme.rs`,
+`pub const STYLES`), **sin iconos personalizados ni tipografías especiales** — fuentes
+del sistema, sin componentes de icono SVG propios. La única excepción es la pantalla
+de login, que además lleva de fondo la foto del motocarro y la flor de Inírida
+(`crates/moto_ui/assets/fondo-login.jpg`, embebida como data URI en el propio
+`theme.rs`, selector `.login-screen`), decisión tomada explícitamente para no afectar
+la interacción del resto de la app.
+
+**Hubo un intento previo con una paleta oscura inspirada en el Guainía** (verde
+selva, tipografías Fraunces/Manrope, 3 iconos SVG propios — issue #54,
+rama `agent/feat-54-identidad-visual-guainia`, PR #59). **Esa paleta fue descartada
+por el dueño del producto**, quien decidió el tema blanco/naranja actual en una
+conversación posterior que nunca quedó registrada en un issue ni en este documento
+— la única razón por la que una sesión (esta) llegó a fusionar por error la paleta
+del Guainía a `main`, pensando que la nota "definitiva, aprobada" del issue #54
+seguía vigente. Se revirtió en el mismo día.
+
+**No restaurar la paleta del Guainía, sus iconos, ni las tipografías Fraunces/Manrope
+sin que el usuario lo pida explícitamente de nuevo.** Si en algún momento se retoma
+esa dirección, el código sigue disponible en el historial de git (commit
+`3a2a64e`, "feat(#54): identidad visual del Guainia") por si sirve de referencia.
+
+## Problema de entorno conocido: crashes intermitentes de `rustc` en esta máquina
+
+En la máquina de desarrollo local (Windows, toolchain `stable-x86_64-pc-windows-gnu`),
+`cargo build`/`clippy`/`test` fallan de forma intermitente y no determinística con
+`STATUS_ACCESS_VIOLATION` (0xc0000005) o un ICE del compilador, en distintos crates
+cada vez (se vio en `serde_derive`, `futures-util`, `subsecond`) — no es un problema
+del código de este repo, ocurre incluso en un `git worktree` limpio de `main` sin
+ningún cambio. Descartado hasta ahora: tamaño de stack, el crate `mobile`, y (parece)
+paralelismo (`-j 1` no lo evita, así que no es una simple carrera de hilos).
+
+`dx serve` para el crate `web` a veces sí logra compilar y servir (probablemente
+porque reusa artefactos ya cacheados de una corrida anterior en vez de compilar todo
+de cero), así que sigue siendo la vía más confiable para verificar visualmente un
+cambio en esta máquina — pero no es una prueba de que `cargo test`/`clippy` fueran a
+pasar limpio. **La validación real de un PR es el CI de GitHub Actions** (Linux, sin
+este problema), no el resultado local en esta máquina.
+
+Sigue sin diagnosticarse la causa raíz (sospecha: conflicto de DLL entre las dos
+instalaciones de mingw64 en el `PATH`, o una instalación corrupta de `rustup`).
+Alguien con acceso directo a la máquina tiene que reinstalar o alinear el toolchain
+para que `cargo test`/`clippy` vuelvan a ser confiables localmente.
