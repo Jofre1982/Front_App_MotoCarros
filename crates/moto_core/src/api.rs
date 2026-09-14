@@ -10,7 +10,7 @@ use crate::models::{
     DocumentType, DriverEarningsSummary, DriverProfile, DriverVerification, LoginPayload,
     RateDriverPayload, RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload,
     RequestPasswordResetPayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
-    RideRating, RideReceipt, RideRequestPayload, UpdateErrandAvailabilityPayload,
+    RideRating, RideReceipt, RideRequestPayload, Site, UpdateErrandAvailabilityPayload,
     UpdateProfilePayload, UpdateVehiclePayload, UploadedDriverDocument, User, Vehicle, VehicleType,
 };
 
@@ -2799,6 +2799,18 @@ impl ApiClient {
         }
     }
 
+    /// `GET /api/v1/sites` — historia #85 del backend (issue #74 de este
+    /// repo). Catalogo de sitios con sus precios fijos, para que el pasajero
+    /// elija destino al pedir un viaje en vez de tocar el mapa libremente.
+    /// De solo lectura: cualquier cuenta autenticada puede consultarlo.
+    pub async fn list_sites(
+        &self,
+        token: &AuthToken,
+    ) -> Result<AuthenticatedFetch<Vec<Site>>, AuthenticatedRequestError> {
+        self.get_authenticated::<Vec<Site>>("/api/v1/sites", token)
+            .await
+    }
+
     /// `PATCH /api/v1/me/availability/errands` — historia #92 del backend
     /// (issue #77 de este repo). Pool de disponibilidad separado del de
     /// viajes normales (`PATCH /me/availability`, fuera de alcance aca): este
@@ -2908,18 +2920,23 @@ impl ApiClient {
 
     /// `POST /api/v1/rides/estimate` — issue #13. No manda nada a `/me`: es
     /// una consulta puntual, no un sub-recurso de la cuenta (ver
-    /// `openapi.yaml`). Reintenta una vez con refresh de token ante un 401,
-    /// igual que `update_profile`; un 422 (validacion o ruta no encontrada)
+    /// `openapi.yaml`). Desde la historia #87 del backend (issue #74 de este
+    /// repo) el destino es un sitio del catalogo (`GET /sites`), no
+    /// coordenadas, y se agrega cuantos pasajeros van. Reintenta una vez con
+    /// refresh de token ante un 401, igual que `update_profile`; un 422
+    /// (validacion, sitio inexistente, o sitio sin precio de pasajero)
     /// nunca se reintenta.
     pub async fn estimate_ride(
         &self,
         token: &AuthToken,
         origin: Coordinates,
-        destination: Coordinates,
+        destination_site_id: u64,
+        passenger_count: u8,
     ) -> Result<AuthenticatedFetch<RideEstimate>, EstimateRideError> {
         let payload = RideEstimateRequestPayload {
             origin,
-            destination,
+            destination_site_id,
+            passenger_count,
         };
 
         match self
@@ -2993,21 +3010,24 @@ impl ApiClient {
         }
     }
 
-    /// `POST /api/v1/rides` — issue #14. Manda el mismo par de coordenadas
-    /// que `estimate_ride`: el backend vuelve a calcular distancia, duracion
-    /// y tarifa al crear el viaje, no reutiliza el estimado anterior.
-    /// Reintenta una vez con refresh de token ante un 401, igual que
-    /// `estimate_ride`; un 403 (cuenta no pasajero) o un 422 (validacion o
-    /// viaje activo ya existente) nunca se reintentan.
+    /// `POST /api/v1/rides` — issue #14. Manda el mismo sitio de destino y
+    /// cantidad de pasajeros que `estimate_ride` (historia #87 del backend,
+    /// issue #74 de este repo): el backend vuelve a calcular la tarifa al
+    /// crear el viaje con el mismo motor de precio fijo, no reutiliza el
+    /// estimado anterior. Reintenta una vez con refresh de token ante un
+    /// 401, igual que `estimate_ride`; un 403 (cuenta no pasajero) o un 422
+    /// (validacion o viaje activo ya existente) nunca se reintentan.
     pub async fn request_ride(
         &self,
         token: &AuthToken,
         origin: Coordinates,
-        destination: Coordinates,
+        destination_site_id: u64,
+        passenger_count: u8,
     ) -> Result<AuthenticatedFetch<Ride>, RequestRideError> {
         let payload = RideRequestPayload {
             origin,
-            destination,
+            destination_site_id,
+            passenger_count,
         };
 
         match self
@@ -4885,9 +4905,8 @@ mod tests {
                         "id": 2,
                         "status": "completed",
                         "origin": { "latitude": 4.710989, "longitude": -74.072092 },
-                        "destination": { "latitude": 4.698, "longitude": -74.061 },
-                        "distance_meters": 7421,
-                        "duration_seconds": 842,
+                        "destination": { "site_id": 1, "name": "Casco urbano" },
+                        "passenger_count": 1,
                         "currency": "COP",
                         "estimated_fare": 8850,
                         "driver": { "id": 5, "name": "Carlos Perez" },
@@ -4901,9 +4920,8 @@ mod tests {
                         "id": 1,
                         "status": "cancelled",
                         "origin": { "latitude": 4.71, "longitude": -74.07 },
-                        "destination": { "latitude": 4.69, "longitude": -74.06 },
-                        "distance_meters": 5000,
-                        "duration_seconds": 600,
+                        "destination": { "site_id": 2, "name": "Zona norte" },
+                        "passenger_count": 2,
                         "currency": "COP",
                         "estimated_fare": 6000,
                         "driver": null,
@@ -4971,6 +4989,88 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let error = client.ride_history(&sample_token()).await.unwrap_err();
+
+        assert_eq!(error, AuthenticatedRequestError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn list_sites_returns_the_catalog_with_fares() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/sites"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": 1,
+                        "name": "Casco urbano",
+                        "fares": [
+                            {
+                                "vehicle_type": "motocarro",
+                                "pricing_unit": "per_person",
+                                "day_price": 4000,
+                                "night_price": 5000,
+                            }
+                        ]
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.list_sites(&sample_token()).await.unwrap();
+
+        assert_eq!(fetch.data.len(), 1);
+        assert_eq!(fetch.data[0].id, 1);
+        assert_eq!(fetch.data[0].name, "Casco urbano");
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn list_sites_returns_an_empty_list_when_the_catalog_has_no_sites() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/sites"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": []
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.list_sites(&sample_token()).await.unwrap();
+
+        assert!(fetch.data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sites_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/sites"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.list_sites(&sample_token()).await.unwrap_err();
 
         assert_eq!(error, AuthenticatedRequestError::SessionExpired);
     }
@@ -6893,13 +6993,6 @@ mod tests {
         }
     }
 
-    fn sample_destination() -> Coordinates {
-        Coordinates {
-            latitude: 4.698,
-            longitude: -74.061,
-        }
-    }
-
     #[tokio::test]
     async fn estimate_ride_sends_origin_and_destination_and_returns_the_estimate() {
         let server = MockServer::start().await;
@@ -6912,12 +7005,13 @@ mod tests {
             ))
             .and(body_json(serde_json::json!({
                 "origin": {"latitude": 4.710989, "longitude": -74.072092},
-                "destination": {"latitude": 4.698, "longitude": -74.061},
+                "destination_site_id": 1,
+                "passenger_count": 1,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": {
-                    "distance_meters": 7421,
-                    "duration_seconds": 842,
+                    "destination": {"site_id": 1, "name": "Casco urbano"},
+                    "passenger_count": 1,
                     "currency": "COP",
                     "estimated_fare": 8850,
                     "is_estimate": true,
@@ -6928,12 +7022,13 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let fetch = client
-            .estimate_ride(&sample_token(), sample_origin(), sample_destination())
+            .estimate_ride(&sample_token(), sample_origin(), 1, 1)
             .await
             .unwrap();
 
-        assert_eq!(fetch.data.distance_meters, 7421);
-        assert_eq!(fetch.data.duration_seconds, 842);
+        assert_eq!(fetch.data.destination.site_id, 1);
+        assert_eq!(fetch.data.destination.name, "Casco urbano");
+        assert_eq!(fetch.data.passenger_count, 1);
         assert_eq!(fetch.data.currency, "COP");
         assert_eq!(fetch.data.estimated_fare, 8850);
         assert!(fetch.data.is_estimate);
@@ -6954,7 +7049,7 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let error = client
-            .estimate_ride(&sample_token(), sample_origin(), sample_destination())
+            .estimate_ride(&sample_token(), sample_origin(), 1, 1)
             .await
             .unwrap_err();
 
@@ -7007,8 +7102,8 @@ mod tests {
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": {
-                    "distance_meters": 7421,
-                    "duration_seconds": 842,
+                    "destination": {"site_id": 1, "name": "Casco urbano"},
+                    "passenger_count": 1,
                     "currency": "COP",
                     "estimated_fare": 8850,
                     "is_estimate": true,
@@ -7019,11 +7114,11 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let fetch = client
-            .estimate_ride(&sample_token(), sample_origin(), sample_destination())
+            .estimate_ride(&sample_token(), sample_origin(), 1, 1)
             .await
             .unwrap();
 
-        assert_eq!(fetch.data.distance_meters, 7421);
+        assert_eq!(fetch.data.destination.site_id, 1);
         assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
     }
 
@@ -7049,7 +7144,7 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let error = client
-            .estimate_ride(&sample_token(), sample_origin(), sample_destination())
+            .estimate_ride(&sample_token(), sample_origin(), 1, 1)
             .await
             .unwrap_err();
 
@@ -7061,7 +7156,7 @@ mod tests {
         let client = ApiClient::new("http://127.0.0.1:1");
 
         let error = client
-            .estimate_ride(&sample_token(), sample_origin(), sample_destination())
+            .estimate_ride(&sample_token(), sample_origin(), 1, 1)
             .await
             .unwrap_err();
 
@@ -7073,9 +7168,8 @@ mod tests {
             "id": 1,
             "status": "requested",
             "origin": {"latitude": 4.710989, "longitude": -74.072092},
-            "destination": {"latitude": 4.698, "longitude": -74.061},
-            "distance_meters": 7421,
-            "duration_seconds": 842,
+            "destination": {"site_id": 1, "name": "Casco urbano"},
+            "passenger_count": 1,
             "currency": "COP",
             "estimated_fare": 8850,
             "driver": null,
@@ -7099,7 +7193,8 @@ mod tests {
             ))
             .and(body_json(serde_json::json!({
                 "origin": {"latitude": 4.710989, "longitude": -74.072092},
-                "destination": {"latitude": 4.698, "longitude": -74.061},
+                "destination_site_id": 1,
+                "passenger_count": 1,
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "data": sample_ride_json(),
@@ -7109,7 +7204,7 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let fetch = client
-            .request_ride(&sample_token(), sample_origin(), sample_destination())
+            .request_ride(&sample_token(), sample_origin(), 1, 1)
             .await
             .unwrap();
 
@@ -7133,7 +7228,7 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let error = client
-            .request_ride(&sample_token(), sample_origin(), sample_destination())
+            .request_ride(&sample_token(), sample_origin(), 1, 1)
             .await
             .unwrap_err();
 
@@ -7157,7 +7252,7 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let error = client
-            .request_ride(&sample_token(), sample_origin(), sample_destination())
+            .request_ride(&sample_token(), sample_origin(), 1, 1)
             .await
             .unwrap_err();
 
@@ -7223,7 +7318,7 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let fetch = client
-            .request_ride(&sample_token(), sample_origin(), sample_destination())
+            .request_ride(&sample_token(), sample_origin(), 1, 1)
             .await
             .unwrap();
 
@@ -7253,7 +7348,7 @@ mod tests {
 
         let client = ApiClient::new(server.uri());
         let error = client
-            .request_ride(&sample_token(), sample_origin(), sample_destination())
+            .request_ride(&sample_token(), sample_origin(), 1, 1)
             .await
             .unwrap_err();
 
@@ -7265,7 +7360,7 @@ mod tests {
         let client = ApiClient::new("http://127.0.0.1:1");
 
         let error = client
-            .request_ride(&sample_token(), sample_origin(), sample_destination())
+            .request_ride(&sample_token(), sample_origin(), 1, 1)
             .await
             .unwrap_err();
 
