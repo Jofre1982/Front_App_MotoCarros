@@ -465,20 +465,22 @@ fn PhoneVerificationSection() -> Element {
 /// #77 de este repo) — solo se monta para cuentas de conductor, ver
 /// `ProfileScreen`.
 ///
-/// `availability` arranca en `None` a proposito: el backend no tiene un
-/// `GET` para esto (a diferencia de `me`/`me/vehicle`), asi que no hay forma
-/// de precargar el valor real al entrar a la pantalla. Mostrar `false` por
-/// defecto seria mentirle al conductor si ya se habia marcado disponible en
-/// una sesion anterior — en cambio, la seccion dice explicitamente que no
-/// sabe el estado actual hasta que el conductor elige una opcion, y desde
-/// ahi refleja lo que el propio `PATCH` devuelve.
+/// `session.errand_availability()` arranca en `None` a proposito: el backend
+/// no tiene un `GET` para esto (a diferencia de `me`/`me/vehicle`), asi que
+/// no hay forma de precargar el valor real al entrar a la pantalla. Mostrar
+/// `false` por defecto seria mentirle al conductor si ya se habia marcado
+/// disponible en una sesion anterior — en cambio, la seccion dice
+/// explicitamente que no sabe el estado actual hasta que el conductor elige
+/// una opcion, y desde ahi refleja lo que el propio `PATCH` devuelve. Vive
+/// en `SessionState` y no en un signal local de este componente porque la
+/// pantalla de mandados cercanos (issue #78) tambien lo necesita para
+/// distinguir "no disponible" de "no hay mandados ahora".
 #[component]
 fn ErrandAvailabilitySection() -> Element {
     let api_client = use_context::<ApiClient>();
     let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context::<SessionState>();
 
-    let mut availability = use_signal(|| None::<bool>);
     let mut is_saving = use_signal(|| false);
     let mut update_error = use_signal(|| None::<UpdateErrandAvailabilityError>);
 
@@ -501,7 +503,7 @@ fn ErrandAvailabilitySection() -> Element {
                     if let Some(refreshed) = fetch.refreshed_token {
                         session.update_token(refreshed, storage.as_ref());
                     }
-                    availability.set(Some(fetch.data.is_available_for_errands));
+                    session.set_errand_availability(fetch.data.is_available_for_errands);
                 }
                 Err(UpdateErrandAvailabilityError::SessionExpired) => {
                     session.logout(storage.as_ref());
@@ -531,7 +533,7 @@ fn ErrandAvailabilitySection() -> Element {
                     if let Some(refreshed) = fetch.refreshed_token {
                         session.update_token(refreshed, storage.as_ref());
                     }
-                    availability.set(Some(fetch.data.is_available_for_errands));
+                    session.set_errand_availability(fetch.data.is_available_for_errands);
                 }
                 Err(UpdateErrandAvailabilityError::SessionExpired) => {
                     session.logout(storage.as_ref());
@@ -545,7 +547,7 @@ fn ErrandAvailabilitySection() -> Element {
         });
     };
 
-    let status_message = match availability() {
+    let status_message = match session.errand_availability() {
         None => "Todavia no sabemos tu disponibilidad para mandados en esta sesion.",
         Some(true) => "Estas disponible para recibir mandados.",
         Some(false) => "No estas disponible para recibir mandados.",
@@ -558,13 +560,13 @@ fn ErrandAvailabilitySection() -> Element {
             p { "{status_message}" }
             button {
                 r#type: "button",
-                disabled: is_saving() || availability() == Some(true),
+                disabled: is_saving() || session.errand_availability() == Some(true),
                 onclick: on_mark_available,
                 "Marcarme disponible para mandados"
             }
             button {
                 r#type: "button",
-                disabled: is_saving() || availability() == Some(false),
+                disabled: is_saving() || session.errand_availability() == Some(false),
                 onclick: on_mark_unavailable,
                 "Marcarme no disponible para mandados"
             }

@@ -16,6 +16,15 @@ use crate::storage::TokenStorage;
 pub struct SessionState {
     user: Signal<Option<User>>,
     token: Signal<Option<AuthToken>>,
+    /// Disponibilidad del conductor para mandados (historia #92 del backend,
+    /// issues #77/#78 de este repo), tal como la dejo el ultimo
+    /// `PATCH /me/availability/errands` exitoso en esta sesion. Vive aca y
+    /// no como estado local de `ProfileScreen` porque tanto esa pantalla
+    /// como la de mandados cercanos (#78) lo necesitan: el backend no
+    /// expone ningun `GET` para leerlo, asi que este signal es la unica
+    /// fuente de verdad que tiene la app — `None` significa "todavia no lo
+    /// sabemos en esta sesion", nunca se asume `false`.
+    errand_availability: Signal<Option<bool>>,
 }
 
 impl SessionState {
@@ -23,6 +32,7 @@ impl SessionState {
         Self {
             user: Signal::new(None),
             token: Signal::new(None),
+            errand_availability: Signal::new(None),
         }
     }
 
@@ -53,6 +63,7 @@ impl SessionState {
         storage.clear();
         self.user.set(None);
         self.token.set(None);
+        self.errand_availability.set(None);
     }
 
     /// Restaura el token persistido (si hay uno) al arrancar la app.
@@ -79,6 +90,19 @@ impl SessionState {
     /// junto a la respuesta debe persistirlo aparte con `update_token`.
     pub fn set_user(&mut self, user: User) {
         self.user.set(Some(user));
+    }
+
+    /// Lo que esta sesion sabe sobre la disponibilidad del conductor para
+    /// mandados. `None` mientras no se haya llamado a
+    /// `set_errand_availability` todavia (ver el campo homonimo).
+    pub fn errand_availability(&self) -> Option<bool> {
+        *self.errand_availability.read()
+    }
+
+    /// Guarda el valor que devolvio el ultimo
+    /// `PATCH /me/availability/errands` exitoso (`ApiClient::update_errand_availability`).
+    pub fn set_errand_availability(&mut self, is_available_for_errands: bool) {
+        self.errand_availability.set(Some(is_available_for_errands));
     }
 }
 
@@ -267,5 +291,43 @@ mod tests {
 
         assert_eq!(user.unwrap().name, "Ana Garcia Actualizada");
         assert_eq!(token.unwrap().access_token, "jwt-token");
+    }
+
+    #[test]
+    fn errand_availability_starts_unknown_and_reflects_the_last_value_set() {
+        let (before, after_true, after_false) = run_in_runtime(|| {
+            let mut session = SessionState::new();
+            let before = session.errand_availability();
+
+            session.set_errand_availability(true);
+            let after_true = session.errand_availability();
+
+            session.set_errand_availability(false);
+            let after_false = session.errand_availability();
+
+            (before, after_true, after_false)
+        });
+
+        assert_eq!(before, None);
+        assert_eq!(after_true, Some(true));
+        assert_eq!(after_false, Some(false));
+    }
+
+    #[test]
+    fn logout_resets_errand_availability_to_unknown() {
+        let (before_logout, after_logout) = run_in_runtime(|| {
+            let storage = InMemoryTokenStorage::new();
+            let mut session = SessionState::new();
+            session.authenticate(sample_authenticated(), &storage);
+            session.set_errand_availability(true);
+            let before_logout = session.errand_availability();
+
+            session.logout(&storage);
+
+            (before_logout, session.errand_availability())
+        });
+
+        assert_eq!(before_logout, Some(true));
+        assert_eq!(after_logout, None);
     }
 }
