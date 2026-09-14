@@ -1,5 +1,13 @@
 //! Pantalla de solicitudes de viaje cercanas (conductor) — issues #16 y #17.
 //!
+//! Desde la historia #87 del backend (issue #74 de este repo), el destino
+//! que trae el evento `ride.requested` es un sitio del catalogo (nombre,
+//! sin coordenadas), no un punto libre — `NearbyRideRequest` en
+//! `moto_core::models` refleja ese cambio. Antes de este fix, el modelo
+//! seguia esperando coordenadas: como un `data` que no deserializa al tipo
+//! esperado se ignora en silencio (ver `apply_nearby_ride_event`), el
+//! conductor dejaba de recibir solicitudes nuevas sin ningun error visible.
+//!
 //! Al entrar, primero valida que el conductor ya tenga un vehiculo
 //! registrado con `GET /api/v1/me/vehicle` — mismo criterio y mismo 404
 //! (`GetVehicleError::NotFound`) que usa `VehicleScreen` (issues #11/#12)
@@ -493,9 +501,8 @@ fn NearbyRideRow(props: NearbyRideRowProps) -> Element {
     rsx! {
         li { class: "nearby-ride-request",
             p { "Origen: {props.request.origin.latitude}, {props.request.origin.longitude}" }
-            p {
-                "Destino: {props.request.destination.latitude}, {props.request.destination.longitude}"
-            }
+            p { "Destino: {props.request.destination.name}" }
+            p { "Pasajeros: {props.request.passenger_count}" }
             p { "Tarifa estimada: {props.request.currency} {props.request.estimated_fare}" }
             button {
                 r#type: "button",

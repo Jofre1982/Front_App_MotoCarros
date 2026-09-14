@@ -126,7 +126,7 @@ fn DriverRideHistoryRow(props: DriverRideHistoryRowProps) -> Element {
             p { class: "driver-ride-history-status", "{ride_status_label(ride.status)}" }
             p { "Fecha: {ride.requested_at}" }
             p { "Origen: {ride.origin.latitude}, {ride.origin.longitude}" }
-            p { "Destino: {ride.destination.latitude}, {ride.destination.longitude}" }
+            p { "Destino: {ride.destination.name}" }
             p { "Tarifa: {ride.currency} {fare}" }
         }
     }
