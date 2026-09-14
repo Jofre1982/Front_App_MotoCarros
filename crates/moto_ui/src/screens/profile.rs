@@ -17,13 +17,22 @@
 //! codigo, `session.set_user()` deja `phone_verified` en `true` y la propia
 //! reactividad de Dioxus hace que la seccion desaparezca sin ningun callback
 //! explicito.
+//!
+//! La disponibilidad para mandados (historia #92 del backend, issue #77 de
+//! este repo) tambien vive aca, solo visible para cuentas de conductor
+//! (`ErrandAvailabilitySection`). El backend no expone ningun `GET` para
+//! leer el valor actual — el unico endpoint que existe es el `PATCH` que lo
+//! cambia (`ApiClient::update_errand_availability`) — asi que la seccion
+//! arranca en un estado "desconocido" en vez de asumir `false`, y solo
+//! refleja un valor real despues de que el conductor lo cambia el mismo en
+//! esta sesion.
 
 use std::sync::Arc;
 
 use dioxus::prelude::*;
 use moto_core::api::{
     ApiClient, AuthenticatedRequestError, ConfirmPhoneVerificationError,
-    RequestPhoneVerificationError, UpdateProfileError,
+    RequestPhoneVerificationError, UpdateErrandAvailabilityError, UpdateProfileError,
 };
 use moto_core::models::{Role, UpdateProfilePayload, User};
 use moto_core::state::SessionState;
@@ -125,6 +134,9 @@ pub fn ProfileScreen() -> Element {
                     }
                     if !user.phone_verified {
                         PhoneVerificationSection {}
+                    }
+                    if user.role == Role::Driver {
+                        ErrandAvailabilitySection {}
                     }
                     button {
                         r#type: "button",
@@ -444,6 +456,122 @@ fn PhoneVerificationSection() -> Element {
             }
             if let Some(message) = general_message {
                 p { class: "phone-verification-error", role: "alert", "{message}" }
+            }
+        }
+    }
+}
+
+/// Control de disponibilidad para mandados (historia #92 del backend, issue
+/// #77 de este repo) — solo se monta para cuentas de conductor, ver
+/// `ProfileScreen`.
+///
+/// `session.errand_availability()` arranca en `None` a proposito: el backend
+/// no tiene un `GET` para esto (a diferencia de `me`/`me/vehicle`), asi que
+/// no hay forma de precargar el valor real al entrar a la pantalla. Mostrar
+/// `false` por defecto seria mentirle al conductor si ya se habia marcado
+/// disponible en una sesion anterior — en cambio, la seccion dice
+/// explicitamente que no sabe el estado actual hasta que el conductor elige
+/// una opcion, y desde ahi refleja lo que el propio `PATCH` devuelve. Vive
+/// en `SessionState` y no en un signal local de este componente porque la
+/// pantalla de mandados cercanos (issue #78) tambien lo necesita para
+/// distinguir "no disponible" de "no hay mandados ahora".
+#[component]
+fn ErrandAvailabilitySection() -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+
+    let mut is_saving = use_signal(|| false);
+    let mut update_error = use_signal(|| None::<UpdateErrandAvailabilityError>);
+
+    let api_client_for_available = api_client.clone();
+    let storage_for_available = storage.clone();
+
+    let on_mark_available = move |_| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let api_client = api_client_for_available.clone();
+        let storage = storage_for_available.clone();
+
+        spawn(async move {
+            is_saving.set(true);
+            update_error.set(None);
+
+            match api_client.update_errand_availability(&token, true).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    session.set_errand_availability(fetch.data.is_available_for_errands);
+                }
+                Err(UpdateErrandAvailabilityError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                Err(err) => {
+                    update_error.set(Some(err));
+                }
+            }
+
+            is_saving.set(false);
+        });
+    };
+
+    let on_mark_unavailable = move |_| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+
+        spawn(async move {
+            is_saving.set(true);
+            update_error.set(None);
+
+            match api_client.update_errand_availability(&token, false).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    session.set_errand_availability(fetch.data.is_available_for_errands);
+                }
+                Err(UpdateErrandAvailabilityError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                Err(err) => {
+                    update_error.set(Some(err));
+                }
+            }
+
+            is_saving.set(false);
+        });
+    };
+
+    let status_message = match session.errand_availability() {
+        None => "Todavia no sabemos tu disponibilidad para mandados en esta sesion.",
+        Some(true) => "Estas disponible para recibir mandados.",
+        Some(false) => "No estas disponible para recibir mandados.",
+    };
+    let error_message = update_error().as_ref().map(|err| err.to_string());
+
+    rsx! {
+        div { class: "errand-availability-section",
+            h3 { "Disponibilidad para mandados" }
+            p { "{status_message}" }
+            button {
+                r#type: "button",
+                disabled: is_saving() || session.errand_availability() == Some(true),
+                onclick: on_mark_available,
+                "Marcarme disponible para mandados"
+            }
+            button {
+                r#type: "button",
+                disabled: is_saving() || session.errand_availability() == Some(false),
+                onclick: on_mark_unavailable,
+                "Marcarme no disponible para mandados"
+            }
+            if let Some(message) = error_message {
+                p { class: "errand-availability-error", role: "alert", "{message}" }
             }
         }
     }
