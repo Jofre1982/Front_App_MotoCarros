@@ -36,6 +36,14 @@
 //! (409, carrera documentada en `openapi.yaml`), la fila se saca igual pero
 //! con un aviso explicito en vez de un error generico, en vez de dejarla
 //! como si siguiera disponible.
+//!
+//! Cada mandado de "Mandados que aceptaste en esta sesion" ofrece "Completar"
+//! (issue #80, `ApiClient::complete_errand`) mientras siga `accepted`: al
+//! completarlo con exito se reemplaza en el lugar por la version que
+//! devuelve el backend (ahora `completed`), y el boton deja de ofrecerse —
+//! no hay ningun cobro ni recibo que mostrar, a diferencia de completar un
+//! viaje: el precio ya quedo fijado en `agreed_price` al aceptar (issue #79)
+//! y no hay pasarela de pago para mandados.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,8 +52,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use dioxus::prelude::*;
 use futures_timer::Delay;
-use moto_core::api::{AcceptErrandError, ApiClient, AuthenticatedRequestError};
-use moto_core::models::Errand;
+use moto_core::api::{
+    AcceptErrandError, ApiClient, AuthenticatedRequestError, CompleteErrandError,
+};
+use moto_core::models::{Errand, ErrandStatus};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
@@ -178,12 +188,21 @@ pub fn NearbyErrandsScreen() -> Element {
                     h3 { "Mandados que aceptaste en esta sesion" }
                     ul { class: "accepted-errands-list",
                         for errand in accepted_errands() {
-                            li { key: "{errand.id}", class: "accepted-errand-row",
-                                p { "{errand.description}" }
-                                p { "Destino: {errand.destination.name}" }
-                                if let Some(price) = errand.agreed_price {
-                                    p { "Precio acordado: {price}" }
-                                }
+                            AcceptedErrandRow {
+                                key: "{errand.id}",
+                                errand: errand.clone(),
+                                on_completed: move |completed: Errand| {
+                                    let completed_id = completed.id;
+                                    accepted_errands
+                                        .with_mut(|list| {
+                                            if let Some(existing) = list
+                                                .iter_mut()
+                                                .find(|e| e.id == completed_id)
+                                            {
+                                                *existing = completed;
+                                            }
+                                        });
+                                },
                             }
                         }
                     }
@@ -352,6 +371,86 @@ fn NearbyErrandRow(props: NearbyErrandRowProps) -> Element {
             }
             if let Some(message) = accept_error() {
                 p { class: "nearby-errand-accept-error", role: "alert", "{message}" }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct AcceptedErrandRowProps {
+    errand: Errand,
+    on_completed: EventHandler<Errand>,
+}
+
+/// Una fila de "Mandados que aceptaste en esta sesion" con su propio estado
+/// de "completar" (issue #80): componente aparte, mismo criterio que
+/// `NearbyErrandRow`, para que completar un mandado no afecte a los demas.
+#[component]
+fn AcceptedErrandRow(props: AcceptedErrandRowProps) -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+
+    let mut is_completing = use_signal(|| false);
+    let mut complete_error = use_signal(|| None::<String>);
+
+    let errand_id = props.errand.id;
+    let on_completed = props.on_completed;
+
+    let on_complete_click = move |_| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+
+        spawn(async move {
+            is_completing.set(true);
+            complete_error.set(None);
+
+            match api_client.complete_errand(&token, errand_id).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    on_completed.call(fetch.data);
+                }
+                Err(CompleteErrandError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                Err(err) => {
+                    complete_error.set(Some(err.to_string()));
+                }
+            }
+
+            is_completing.set(false);
+        });
+    };
+
+    rsx! {
+        li { class: "accepted-errand-row",
+            p { "{props.errand.description}" }
+            p { "Destino: {props.errand.destination.name}" }
+            if let Some(price) = props.errand.agreed_price {
+                p { "Precio acordado: {price}" }
+            }
+            if props.errand.status == ErrandStatus::Completed {
+                p { class: "accepted-errand-completed", "Completado." }
+            } else {
+                button {
+                    r#type: "button",
+                    class: "accepted-errand-complete-button",
+                    disabled: is_completing(),
+                    onclick: on_complete_click,
+                    if is_completing() {
+                        "Completando..."
+                    } else {
+                        "Completar"
+                    }
+                }
+                if let Some(message) = complete_error() {
+                    p { class: "accepted-errand-complete-error", role: "alert", "{message}" }
+                }
             }
         }
     }
