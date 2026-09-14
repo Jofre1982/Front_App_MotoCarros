@@ -7,11 +7,11 @@
 use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload, BroadcastAuthResponse,
     ConfirmPasswordResetPayload, ConfirmPhoneVerificationPayload, Coordinates, DataEnvelope,
-    DocumentType, DriverEarningsSummary, DriverVerification, LoginPayload, RateDriverPayload,
-    RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload,
+    DocumentType, DriverEarningsSummary, DriverProfile, DriverVerification, LoginPayload,
+    RateDriverPayload, RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload,
     RequestPasswordResetPayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
-    RideRating, RideReceipt, RideRequestPayload, UpdateProfilePayload, UpdateVehiclePayload,
-    UploadedDriverDocument, User, Vehicle, VehicleType,
+    RideRating, RideReceipt, RideRequestPayload, UpdateErrandAvailabilityPayload,
+    UpdateProfilePayload, UpdateVehiclePayload, UploadedDriverDocument, User, Vehicle, VehicleType,
 };
 
 #[cfg(test)]
@@ -798,6 +798,56 @@ impl UpdateVehicleError {
     }
 }
 
+/// Fallos posibles de `PATCH /api/v1/me/availability/errands` (historia #92
+/// del backend, issue #77 de este repo).
+///
+/// `Forbidden`/`NotFound` son el mismo criterio que `UpdateVehicleError`: la
+/// cuenta no es de conductor, o es de conductor pero todavia no tiene perfil
+/// creado. A diferencia de `UpdateVehicleError`, no hay `NoFields` ni
+/// validacion de formato en el cliente — el unico campo del payload es un
+/// booleano que siempre viaja, no hay "campo ausente" ni "formato invalido"
+/// posible de este lado.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateErrandAvailabilityError {
+    /// La cuenta no es de conductor (`DriverProfilePolicy::updateAvailability`
+    /// en el backend).
+    Forbidden,
+    /// El conductor todavia no tiene un perfil de conductor creado.
+    NotFound,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for UpdateErrandAvailabilityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateErrandAvailabilityError::Forbidden => {
+                write!(f, "Esta cuenta no puede tomar mandados.")
+            }
+            UpdateErrandAvailabilityError::NotFound => {
+                write!(f, "No tienes un perfil de conductor.")
+            }
+            UpdateErrandAvailabilityError::Validation(body) => write!(f, "{}", body.message),
+            UpdateErrandAvailabilityError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            UpdateErrandAvailabilityError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            UpdateErrandAvailabilityError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for UpdateErrandAvailabilityError {}
+
 /// Fallos posibles de `POST /api/v1/rides/estimate` (issue #14, consumido
 /// desde la app en issue #13).
 ///
@@ -1373,6 +1423,14 @@ enum GetVehicleOutcome<T> {
 }
 
 enum PatchVehicleOutcome<T> {
+    Success(T),
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Validation(ApiErrorBody),
+}
+
+enum PatchErrandAvailabilityOutcome<T> {
     Success(T),
     Unauthorized,
     Forbidden,
@@ -2738,6 +2796,113 @@ impl ApiClient {
                 Ok(PatchVehicleOutcome::Validation(body))
             }
             other => Err(UpdateVehicleError::Unexpected(other)),
+        }
+    }
+
+    /// `PATCH /api/v1/me/availability/errands` — historia #92 del backend
+    /// (issue #77 de este repo). Pool de disponibilidad separado del de
+    /// viajes normales (`PATCH /me/availability`, fuera de alcance aca): este
+    /// metodo solo toca `is_available_for_errands`. Reintenta una vez con
+    /// refresh de token ante un 401, igual que `update_vehicle`; un 403
+    /// (cuenta no conductora), 404 (sin perfil de conductor) o 422
+    /// (validacion) nunca se reintentan.
+    pub async fn update_errand_availability(
+        &self,
+        token: &AuthToken,
+        is_available_for_errands: bool,
+    ) -> Result<AuthenticatedFetch<DriverProfile>, UpdateErrandAvailabilityError> {
+        let payload = UpdateErrandAvailabilityPayload {
+            is_available_for_errands,
+        };
+
+        match self
+            .patch_errand_availability_with_token(&token.access_token, &payload)
+            .await?
+        {
+            PatchErrandAvailabilityOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            PatchErrandAvailabilityOutcome::Forbidden => {
+                return Err(UpdateErrandAvailabilityError::Forbidden);
+            }
+            PatchErrandAvailabilityOutcome::NotFound => {
+                return Err(UpdateErrandAvailabilityError::NotFound);
+            }
+            PatchErrandAvailabilityOutcome::Validation(body) => {
+                return Err(UpdateErrandAvailabilityError::Validation(body));
+            }
+            PatchErrandAvailabilityOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| UpdateErrandAvailabilityError::SessionExpired)?;
+
+        match self
+            .patch_errand_availability_with_token(&renewed.access_token, &payload)
+            .await?
+        {
+            PatchErrandAvailabilityOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            PatchErrandAvailabilityOutcome::Forbidden => {
+                Err(UpdateErrandAvailabilityError::Forbidden)
+            }
+            PatchErrandAvailabilityOutcome::NotFound => {
+                Err(UpdateErrandAvailabilityError::NotFound)
+            }
+            PatchErrandAvailabilityOutcome::Validation(body) => {
+                Err(UpdateErrandAvailabilityError::Validation(body))
+            }
+            PatchErrandAvailabilityOutcome::Unauthorized => {
+                Err(UpdateErrandAvailabilityError::SessionExpired)
+            }
+        }
+    }
+
+    async fn patch_errand_availability_with_token(
+        &self,
+        access_token: &str,
+        body: &UpdateErrandAvailabilityPayload,
+    ) -> Result<PatchErrandAvailabilityOutcome<DriverProfile>, UpdateErrandAvailabilityError> {
+        let url = format!("{}/api/v1/me/availability/errands", self.base_url);
+
+        let response = self
+            .http
+            .patch(url)
+            .bearer_auth(access_token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| UpdateErrandAvailabilityError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<DriverProfile> = response
+                .json()
+                .await
+                .map_err(|err| UpdateErrandAvailabilityError::Network(err.to_string()))?;
+            return Ok(PatchErrandAvailabilityOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(PatchErrandAvailabilityOutcome::Unauthorized),
+            403 => Ok(PatchErrandAvailabilityOutcome::Forbidden),
+            404 => Ok(PatchErrandAvailabilityOutcome::NotFound),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| UpdateErrandAvailabilityError::Network(err.to_string()))?;
+                Ok(PatchErrandAvailabilityOutcome::Validation(body))
+            }
+            other => Err(UpdateErrandAvailabilityError::Unexpected(other)),
         }
     }
 
@@ -6507,6 +6672,218 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, UpdateVehicleError::Network(_)));
+    }
+
+    fn sample_driver_profile_body(is_available_for_errands: bool) -> serde_json::Value {
+        serde_json::json!({
+            "data": {
+                "license_number": "LIC-445566",
+                "is_available": false,
+                "is_available_for_errands": is_available_for_errands,
+                "latitude": null,
+                "longitude": null,
+                "location_updated_at": null,
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn update_errand_availability_sends_the_flag_and_returns_the_updated_profile() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/availability/errands"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .and(body_json(serde_json::json!({
+                "is_available_for_errands": true,
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(sample_driver_profile_body(true)),
+            )
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .update_errand_availability(&sample_token(), true)
+            .await
+            .unwrap();
+
+        assert!(fetch.data.is_available_for_errands);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn update_errand_availability_returns_forbidden_when_the_account_is_not_a_driver() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/availability/errands"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .update_errand_availability(&sample_token(), true)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, UpdateErrandAvailabilityError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn update_errand_availability_returns_not_found_when_the_driver_has_no_profile() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/availability/errands"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No tienes un perfil de conductor; registrate como conductor antes de marcarte disponible.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .update_errand_availability(&sample_token(), true)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, UpdateErrandAvailabilityError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn update_errand_availability_returns_validation_error_on_422_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/availability/errands"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "The is available for errands field is required.",
+                "errors": {
+                    "is_available_for_errands": ["The is available for errands field is required."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .update_errand_availability(&sample_token(), true)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            UpdateErrandAvailabilityError::Validation(ApiErrorBody {
+                message: "The is available for errands field is required.".to_string(),
+                errors: Some(HashMap::from([(
+                    "is_available_for_errands".to_string(),
+                    vec!["The is available for errands field is required.".to_string()]
+                )])),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn update_errand_availability_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/availability/errands"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/availability/errands"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(sample_driver_profile_body(true)),
+            )
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .update_errand_availability(&sample_token(), true)
+            .await
+            .unwrap();
+
+        assert!(fetch.data.is_available_for_errands);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn update_errand_availability_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/availability/errands"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .update_errand_availability(&sample_token(), true)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, UpdateErrandAvailabilityError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn update_errand_availability_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .update_errand_availability(&sample_token(), true)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, UpdateErrandAvailabilityError::Network(_)));
     }
 
     fn sample_origin() -> Coordinates {
