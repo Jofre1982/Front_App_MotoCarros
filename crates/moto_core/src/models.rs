@@ -256,33 +256,105 @@ pub struct UpdateVehiclePayload {
     pub year: Option<u16>,
 }
 
-/// Un punto geografico (`openapi.yaml#/components/schemas/Coordinates`), usado
-/// tanto en el origen como en el destino de `POST /api/v1/rides/estimate`
-/// (issue #13) y de `POST /api/v1/rides` (issue #14).
+/// Un punto geografico (`openapi.yaml#/components/schemas/Coordinates`),
+/// usado para el origen de un viaje (issue #13/#14). Desde la historia #87
+/// del backend el destino ya no es libre — ver `DestinationSite` — asi que
+/// esto solo describe el origen (issue #74).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Coordinates {
     pub latitude: f64,
     pub longitude: f64,
 }
 
+/// Unidad de cobro de un `SiteFare` (`openapi.yaml#/components/schemas/SiteFare.pricing_unit`,
+/// historia #85 del backend). `PerPerson` se cobra por cada pasajero;
+/// `PerTrip` es un monto unico sin importar cuantos vayan.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PricingUnit {
+    PerPerson,
+    PerTrip,
+}
+
+/// El precio fijo de pasajero de un sitio para un tipo de vehiculo
+/// (`openapi.yaml#/components/schemas/SiteFare`, historia #85 del backend).
+/// Un sitio tiene a lo sumo un precio de Motocarro y uno de Motocarga; el
+/// flujo de viajes de pasajero (issue #74) solo usa el de Motocarro — el
+/// backend fija ese tipo de vehiculo el mismo, nunca lo elige el cliente
+/// (ver `EstimateRideController`/`CreateRideAction` de `Back_App_MotoCarros`).
+///
+/// `night_price` es `None` en los sitios sin recargo nocturno: esos cobran
+/// siempre `day_price`, sin importar la hora. Esta app no replica la regla
+/// de que hora cuenta como "noche" (22:00-05:00, decidida por el backend
+/// con su propio reloj): mostrar `day_price` como referencia en la lista de
+/// sitios (issue #74) es suficiente, el monto exacto sale siempre de
+/// `POST /rides/estimate`.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+pub struct SiteFare {
+    pub vehicle_type: VehicleType,
+    pub pricing_unit: PricingUnit,
+    pub day_price: i64,
+    pub night_price: Option<i64>,
+}
+
+/// `openapi.yaml#/components/schemas/Site` — un destino del catalogo con sus
+/// precios fijos (historia #85 del backend, issue #74 de este repo).
+/// Reemplaza el mapa libre como forma de elegir destino al pedir un viaje.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Site {
+    pub id: u64,
+    pub name: String,
+    pub fares: Vec<SiteFare>,
+}
+
+impl Site {
+    /// El precio de Motocarro del sitio, si el admin ya lo cargo (historia
+    /// #85 del backend) — el unico que le importa al flujo de pasajero
+    /// (issue #74). Un sitio sin este precio no deberia poder elegirse como
+    /// destino (`POST /rides/estimate` lo rechaza con 422), pero esta
+    /// consulta es defensiva: no asume que el backend siempre lo tenga.
+    pub fn motocarro_fare(&self) -> Option<&SiteFare> {
+        self.fares
+            .iter()
+            .find(|fare| fare.vehicle_type == VehicleType::Motocarro)
+    }
+}
+
+/// El sitio de destino de un viaje o una estimacion
+/// (`openapi.yaml#/components/schemas/Ride.destination`, historia #87 del
+/// backend, issue #74 de este repo). Sin coordenadas: el sitio no tiene una
+/// ubicacion en el mapa, solo nombre — ver el comentario de modulo de
+/// `ride_estimate.rs` sobre como afecta esto al seguimiento en tiempo real.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DestinationSite {
+    pub site_id: u64,
+    pub name: String,
+}
+
 /// Body de `POST /api/v1/rides/estimate`
-/// (`openapi.yaml#/components/schemas/RideEstimateRequest`).
+/// (`openapi.yaml#/components/schemas/RideRequest`, historia #87 del
+/// backend, issue #74 de este repo). El destino ya no es un punto libre:
+/// es un sitio del catalogo (`GET /sites`), y se agrega cuantos pasajeros
+/// van (1 a 3, la capacidad de un motocarro).
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 pub struct RideEstimateRequestPayload {
     pub origin: Coordinates,
-    pub destination: Coordinates,
+    pub destination_site_id: u64,
+    pub passenger_count: u8,
 }
 
 /// `openapi.yaml#/components/schemas/RideEstimate` — respuesta de
-/// `POST /api/v1/rides/estimate` (issue #13).
+/// `POST /api/v1/rides/estimate` (issue #13, historia #87 del backend para
+/// el precio fijo por sitio, issue #74 de este repo).
 ///
 /// `estimated_fare` es un entero en la unidad minima de `currency`, nunca un
 /// decimal: el backend nunca lo devuelve fraccionado (ver `FareBreakdown` de
-/// `Back_App_MotoCarros`).
+/// `Back_App_MotoCarros`). Ya no trae `distance_meters`/`duration_seconds`:
+/// el precio es fijo por sitio, no depende del trayecto recorrido.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RideEstimate {
-    pub distance_meters: u32,
-    pub duration_seconds: u32,
+    pub destination: DestinationSite,
+    pub passenger_count: u8,
     pub currency: String,
     pub estimated_fare: i64,
     pub is_estimate: bool,
@@ -309,7 +381,8 @@ pub enum RideStatus {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 pub struct RideRequestPayload {
     pub origin: Coordinates,
-    pub destination: Coordinates,
+    pub destination_site_id: u64,
+    pub passenger_count: u8,
 }
 
 /// `openapi.yaml#/components/schemas/RideDriver` — el conductor asignado a un
@@ -342,14 +415,17 @@ pub struct Payment {
 /// `payment` viajan siempre presentes pero en `null` hasta que la historia
 /// correspondiente los produzca (aceptar #17, iniciar #18, completar #23,
 /// pagar #24) — por eso son `Option` en vez de campos opcionales del struct.
+///
+/// Desde la historia #87 del backend (issue #74 de este repo) ya no trae
+/// `distance_meters`/`duration_seconds`: el precio es fijo por sitio, no
+/// depende del trayecto recorrido. Agrega `passenger_count`.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Ride {
     pub id: u64,
     pub status: RideStatus,
     pub origin: Coordinates,
-    pub destination: Coordinates,
-    pub distance_meters: u32,
-    pub duration_seconds: u32,
+    pub destination: DestinationSite,
+    pub passenger_count: u8,
     pub currency: String,
     pub estimated_fare: i64,
     pub driver: Option<RideDriver>,
@@ -457,11 +533,15 @@ pub struct DriverEarningsSummary {
 /// cuando hay un viaje nuevo cerca (issue #16). Sin envelope `data`: viaja tal
 /// cual lo publica `app/Events/Realtime/RideRequested.php` de
 /// `Back_App_MotoCarros` dentro del frame de Pusher, no como respuesta HTTP.
+///
+/// Desde la historia #87 del backend (issue #74 de este repo) `destination`
+/// es un sitio del catalogo, no coordenadas — el mismo cambio que `Ride`.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct NearbyRideRequest {
     pub ride_id: u64,
     pub origin: Coordinates,
-    pub destination: Coordinates,
+    pub destination: DestinationSite,
+    pub passenger_count: u8,
     pub currency: String,
     pub estimated_fare: i64,
 }
@@ -709,6 +789,64 @@ mod tests {
     }
 
     #[test]
+    fn deserializes_site_list_envelope_with_night_price() {
+        let json = r#"{
+            "data": [
+                {
+                    "id": 1,
+                    "name": "Casco urbano",
+                    "fares": [
+                        {
+                            "vehicle_type": "motocarro",
+                            "pricing_unit": "per_person",
+                            "day_price": 4000,
+                            "night_price": 5000
+                        },
+                        {
+                            "vehicle_type": "motocarga",
+                            "pricing_unit": "per_trip",
+                            "day_price": 15000,
+                            "night_price": null
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let envelope: DataEnvelope<Vec<Site>> = serde_json::from_str(json).unwrap();
+
+        assert_eq!(envelope.data.len(), 1);
+        let site = &envelope.data[0];
+        assert_eq!(site.id, 1);
+        assert_eq!(site.name, "Casco urbano");
+        assert_eq!(
+            site.motocarro_fare(),
+            Some(&SiteFare {
+                vehicle_type: VehicleType::Motocarro,
+                pricing_unit: PricingUnit::PerPerson,
+                day_price: 4000,
+                night_price: Some(5000),
+            })
+        );
+    }
+
+    #[test]
+    fn site_motocarro_fare_is_none_without_a_motocarro_price() {
+        let site = Site {
+            id: 1,
+            name: "Casco urbano".to_string(),
+            fares: vec![SiteFare {
+                vehicle_type: VehicleType::Motocarga,
+                pricing_unit: PricingUnit::PerTrip,
+                day_price: 15000,
+                night_price: None,
+            }],
+        };
+
+        assert_eq!(site.motocarro_fare(), None);
+    }
+
+    #[test]
     fn deserializes_driver_verification_envelope_with_a_document_not_uploaded_yet() {
         let json = r#"{
             "data": {
@@ -775,10 +913,8 @@ mod tests {
                 latitude: 4.710989,
                 longitude: -74.072092,
             },
-            destination: Coordinates {
-                latitude: 4.698,
-                longitude: -74.061,
-            },
+            destination_site_id: 1,
+            passenger_count: 2,
         };
 
         let json = serde_json::to_value(payload).unwrap();
@@ -787,7 +923,8 @@ mod tests {
             json,
             serde_json::json!({
                 "origin": {"latitude": 4.710989, "longitude": -74.072092},
-                "destination": {"latitude": 4.698, "longitude": -74.061},
+                "destination_site_id": 1,
+                "passenger_count": 2,
             })
         );
     }
@@ -796,8 +933,8 @@ mod tests {
     fn deserializes_ride_estimate_envelope() {
         let json = r#"{
             "data": {
-                "distance_meters": 7421,
-                "duration_seconds": 842,
+                "destination": {"site_id": 1, "name": "Casco urbano"},
+                "passenger_count": 2,
                 "currency": "COP",
                 "estimated_fare": 8850,
                 "is_estimate": true
@@ -806,8 +943,14 @@ mod tests {
 
         let envelope: DataEnvelope<RideEstimate> = serde_json::from_str(json).unwrap();
 
-        assert_eq!(envelope.data.distance_meters, 7421);
-        assert_eq!(envelope.data.duration_seconds, 842);
+        assert_eq!(
+            envelope.data.destination,
+            DestinationSite {
+                site_id: 1,
+                name: "Casco urbano".to_string(),
+            }
+        );
+        assert_eq!(envelope.data.passenger_count, 2);
         assert_eq!(envelope.data.currency, "COP");
         assert_eq!(envelope.data.estimated_fare, 8850);
         assert!(envelope.data.is_estimate);
@@ -820,10 +963,8 @@ mod tests {
                 latitude: 4.710989,
                 longitude: -74.072092,
             },
-            destination: Coordinates {
-                latitude: 4.698,
-                longitude: -74.061,
-            },
+            destination_site_id: 1,
+            passenger_count: 2,
         };
 
         let json = serde_json::to_value(payload).unwrap();
@@ -832,7 +973,8 @@ mod tests {
             json,
             serde_json::json!({
                 "origin": {"latitude": 4.710989, "longitude": -74.072092},
-                "destination": {"latitude": 4.698, "longitude": -74.061},
+                "destination_site_id": 1,
+                "passenger_count": 2,
             })
         );
     }
@@ -844,9 +986,8 @@ mod tests {
                 "id": 1,
                 "status": "requested",
                 "origin": {"latitude": 4.710989, "longitude": -74.072092},
-                "destination": {"latitude": 4.698, "longitude": -74.061},
-                "distance_meters": 7421,
-                "duration_seconds": 842,
+                "destination": {"site_id": 1, "name": "Casco urbano"},
+                "passenger_count": 1,
                 "currency": "COP",
                 "estimated_fare": 8850,
                 "driver": null,
@@ -874,9 +1015,8 @@ mod tests {
             "id": 1,
             "status": "completed",
             "origin": {"latitude": 4.710989, "longitude": -74.072092},
-            "destination": {"latitude": 4.698, "longitude": -74.061},
-            "distance_meters": 7421,
-            "duration_seconds": 842,
+            "destination": {"site_id": 1, "name": "Casco urbano"},
+            "passenger_count": 1,
             "currency": "COP",
             "estimated_fare": 8850,
             "driver": {"id": 42, "name": "Carlos Perez"},
@@ -960,9 +1100,8 @@ mod tests {
                 "id": 1,
                 "status": "cancelled",
                 "origin": {"latitude": 4.710989, "longitude": -74.072092},
-                "destination": {"latitude": 4.698, "longitude": -74.061},
-                "distance_meters": 7421,
-                "duration_seconds": 842,
+                "destination": {"site_id": 1, "name": "Casco urbano"},
+                "passenger_count": 1,
                 "currency": "COP",
                 "estimated_fare": 8850,
                 "driver": null,
@@ -987,9 +1126,8 @@ mod tests {
             "id": 1,
             "status": "requested",
             "origin": {"latitude": 4.710989, "longitude": -74.072092},
-            "destination": {"latitude": 4.698, "longitude": -74.061},
-            "distance_meters": 7421,
-            "duration_seconds": 842,
+            "destination": {"site_id": 1, "name": "Casco urbano"},
+            "passenger_count": 1,
             "currency": "COP",
             "estimated_fare": 8850,
             "driver": null,
@@ -1038,7 +1176,8 @@ mod tests {
         let json = r#"{
             "ride_id": 7,
             "origin": {"latitude": 4.710989, "longitude": -74.072092},
-            "destination": {"latitude": 4.698, "longitude": -74.061},
+            "destination": {"site_id": 1, "name": "Casco urbano"},
+            "passenger_count": 2,
             "currency": "COP",
             "estimated_fare": 8850
         }"#;
@@ -1046,6 +1185,14 @@ mod tests {
         let request: NearbyRideRequest = serde_json::from_str(json).unwrap();
 
         assert_eq!(request.ride_id, 7);
+        assert_eq!(
+            request.destination,
+            DestinationSite {
+                site_id: 1,
+                name: "Casco urbano".to_string(),
+            }
+        );
+        assert_eq!(request.passenger_count, 2);
         assert_eq!(request.currency, "COP");
         assert_eq!(request.estimated_fare, 8850);
         assert_eq!(request.origin.latitude, 4.710989);
@@ -1064,7 +1211,8 @@ mod tests {
         serde_json::json!({
             "ride_id": ride_id,
             "origin": {"latitude": 4.710989, "longitude": -74.072092},
-            "destination": {"latitude": 4.698, "longitude": -74.061},
+            "destination": {"site_id": 1, "name": "Casco urbano"},
+            "passenger_count": 1,
             "currency": "COP",
             "estimated_fare": 8850,
         })
@@ -1150,12 +1298,11 @@ mod tests {
                 latitude: 4.710989,
                 longitude: -74.072092,
             },
-            destination: Coordinates {
-                latitude: 4.698,
-                longitude: -74.061,
+            destination: DestinationSite {
+                site_id: 1,
+                name: "Casco urbano".to_string(),
             },
-            distance_meters: 7421,
-            duration_seconds: 842,
+            passenger_count: 1,
             currency: "COP".to_string(),
             estimated_fare: 8850,
             driver: None,
