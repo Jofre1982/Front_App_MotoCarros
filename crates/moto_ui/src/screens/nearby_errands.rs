@@ -24,6 +24,18 @@
 //! cabecera en una carga de imagen). Se pide una sola vez por mandado y
 //! queda cacheada mientras la fila siga montada, para no volver a pedirla en
 //! cada vuelta del sondeo.
+//!
+//! Cada fila tambien ofrece "Aceptar" con el precio acordado con el pasajero
+//! (issue #79, `ApiClient::accept_errand`). Al aceptar con exito, el mandado
+//! se saca de la lista de disponibles y pasa a "Mandados que aceptaste en
+//! esta sesion" — el backend no tiene ningun `GET` para recuperar los
+//! mandados aceptados por este conductor (`GET /errands` solo devuelve los
+//! `requested`), asi que esa lista es pura memoria de esta sesion, mismo
+//! criterio que `SessionState::errand_availability()` (issue #77): si el
+//! conductor recarga la app, la pierde. Si otro conductor lo acepto primero
+//! (409, carrera documentada en `openapi.yaml`), la fila se saca igual pero
+//! con un aviso explicito en vez de un error generico, en vez de dejarla
+//! como si siguiera disponible.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,7 +44,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use dioxus::prelude::*;
 use futures_timer::Delay;
-use moto_core::api::{ApiClient, AuthenticatedRequestError};
+use moto_core::api::{AcceptErrandError, ApiClient, AuthenticatedRequestError};
 use moto_core::models::Errand;
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
@@ -50,6 +62,15 @@ pub fn NearbyErrandsScreen() -> Element {
 
     let mut errands = use_signal(Vec::<Errand>::new);
     let mut load_error = use_signal(|| None::<String>);
+    // Mandados que este conductor acepto en esta sesion (issue #79) — ver el
+    // comentario de modulo: el backend no tiene forma de recuperarlos, asi
+    // que esta lista es la unica fuente de verdad que tiene la app.
+    let mut accepted_errands = use_signal(Vec::<Errand>::new);
+    // Aviso transitorio para cuando otro conductor acepta un mandado primero
+    // (409): la fila desaparece de `errands` igual que en `NearbyRideRow`,
+    // pero a diferencia de esa pantalla el criterio de aceptacion de esta
+    // historia pide un mensaje explicito, no solo que la fila se esfume.
+    let mut unavailable_notice = use_signal(|| None::<String>);
     // Mismo criterio que los loops de sondeo de `NearbyRidesList`: evita
     // levantar un segundo loop si el efecto se vuelve a disparar. Dioxus
     // cancela la tarea al desmontar el componente (`Home`, al cambiar de
@@ -104,6 +125,16 @@ pub fn NearbyErrandsScreen() -> Element {
     rsx! {
         div { class: "nearby-errands-screen",
             h2 { "Mandados cercanos" }
+            if let Some(message) = unavailable_notice() {
+                p { class: "nearby-errands-unavailable-notice", role: "alert",
+                    "{message}"
+                    button {
+                        r#type: "button",
+                        onclick: move |_| unavailable_notice.set(None),
+                        "Cerrar"
+                    }
+                }
+            }
             if let Some(message) = load_error() {
                 p { class: "nearby-errands-error", role: "alert", "{message}" }
             } else if errands().is_empty() {
@@ -125,7 +156,36 @@ pub fn NearbyErrandsScreen() -> Element {
             } else {
                 ul { class: "nearby-errands-list",
                     for errand in errands() {
-                        NearbyErrandRow { key: "{errand.id}", errand }
+                        NearbyErrandRow {
+                            key: "{errand.id}",
+                            errand: errand.clone(),
+                            on_accepted: move |accepted: Errand| {
+                                let accepted_id = accepted.id;
+                                errands.with_mut(|list| list.retain(|e| e.id != accepted_id));
+                                accepted_errands.with_mut(|list| list.push(accepted));
+                            },
+                            on_unavailable: move |errand_id: u64| {
+                                errands.with_mut(|list| list.retain(|e| e.id != errand_id));
+                                unavailable_notice
+                                    .set(Some("Este mandado ya no esta disponible: otro conductor lo acepto primero.".to_string()));
+                            },
+                        }
+                    }
+                }
+            }
+            if !accepted_errands().is_empty() {
+                div { class: "accepted-errands-section",
+                    h3 { "Mandados que aceptaste en esta sesion" }
+                    ul { class: "accepted-errands-list",
+                        for errand in accepted_errands() {
+                            li { key: "{errand.id}", class: "accepted-errand-row",
+                                p { "{errand.description}" }
+                                p { "Destino: {errand.destination.name}" }
+                                if let Some(price) = errand.agreed_price {
+                                    p { "Precio acordado: {price}" }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -136,11 +196,14 @@ pub fn NearbyErrandsScreen() -> Element {
 #[derive(Props, Clone, PartialEq)]
 struct NearbyErrandRowProps {
     errand: Errand,
+    on_accepted: EventHandler<Errand>,
+    on_unavailable: EventHandler<u64>,
 }
 
-/// Una fila de la lista con su propio estado de "ver foto" (issue #78):
-/// componente aparte, igual que `NearbyRideRow` en `nearby_rides.rs`, para
-/// que pedir la foto de un mandado no afecte a los demas.
+/// Una fila de la lista con su propio estado de "ver foto" (issue #78) y de
+/// "aceptar" (issue #79): componente aparte, igual que `NearbyRideRow` en
+/// `nearby_rides.rs`, para que estas acciones en un mandado no afecten a los
+/// demas.
 #[component]
 fn NearbyErrandRow(props: NearbyErrandRowProps) -> Element {
     let api_client = use_context::<ApiClient>();
@@ -151,7 +214,55 @@ fn NearbyErrandRow(props: NearbyErrandRowProps) -> Element {
     let mut photo_error = use_signal(|| None::<String>);
     let mut photo_data_uri = use_signal(|| None::<String>);
 
+    let mut agreed_price = use_signal(String::new);
+    let mut is_accepting = use_signal(|| false);
+    let mut accept_error = use_signal(|| None::<String>);
+
     let errand_id = props.errand.id;
+    let on_accepted = props.on_accepted;
+    let on_unavailable = props.on_unavailable;
+
+    let api_client_for_accept = api_client.clone();
+    let storage_for_accept = storage.clone();
+
+    let on_accept_click = move |_| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let Ok(price) = agreed_price().trim().parse::<i64>() else {
+            return;
+        };
+        if price < 1 {
+            return;
+        }
+        let api_client = api_client_for_accept.clone();
+        let storage = storage_for_accept.clone();
+
+        spawn(async move {
+            is_accepting.set(true);
+            accept_error.set(None);
+
+            match api_client.accept_errand(&token, errand_id, price).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    on_accepted.call(fetch.data);
+                }
+                Err(AcceptErrandError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                Err(AcceptErrandError::Conflict) => {
+                    on_unavailable.call(errand_id);
+                }
+                Err(err) => {
+                    accept_error.set(Some(err.to_string()));
+                }
+            }
+
+            is_accepting.set(false);
+        });
+    };
 
     let on_view_photo_click = move |_| {
         let Some(token) = session.token() else {
@@ -187,6 +298,11 @@ fn NearbyErrandRow(props: NearbyErrandRowProps) -> Element {
         });
     };
 
+    let price_is_valid = agreed_price()
+        .trim()
+        .parse::<i64>()
+        .is_ok_and(|price| price >= 1);
+
     rsx! {
         li { class: "nearby-errand-row",
             p { "{props.errand.description}" }
@@ -213,6 +329,29 @@ fn NearbyErrandRow(props: NearbyErrandRowProps) -> Element {
                 if let Some(message) = photo_error() {
                     p { class: "nearby-errand-photo-error", role: "alert", "{message}" }
                 }
+            }
+            label { r#for: "errand-{errand_id}-price", "Precio acordado" }
+            input {
+                id: "errand-{errand_id}-price",
+                r#type: "number",
+                min: "1",
+                disabled: is_accepting(),
+                value: "{agreed_price}",
+                oninput: move |event| agreed_price.set(event.value()),
+            }
+            button {
+                r#type: "button",
+                class: "nearby-errand-accept-button",
+                disabled: is_accepting() || !price_is_valid,
+                onclick: on_accept_click,
+                if is_accepting() {
+                    "Aceptando..."
+                } else {
+                    "Aceptar"
+                }
+            }
+            if let Some(message) = accept_error() {
+                p { class: "nearby-errand-accept-error", role: "alert", "{message}" }
             }
         }
     }

@@ -5,13 +5,14 @@
 //! `Back_App_MotoCarros`).
 
 use crate::models::{
-    ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload, BroadcastAuthResponse,
-    ConfirmPasswordResetPayload, ConfirmPhoneVerificationPayload, Coordinates, DataEnvelope,
-    DocumentType, DriverEarningsSummary, DriverProfile, DriverVerification, Errand, LoginPayload,
-    RateDriverPayload, RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload,
-    RequestPasswordResetPayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
-    RideRating, RideReceipt, RideRequestPayload, UpdateErrandAvailabilityPayload,
-    UpdateProfilePayload, UpdateVehiclePayload, UploadedDriverDocument, User, Vehicle, VehicleType,
+    AcceptErrandPayload, ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload,
+    BroadcastAuthResponse, ConfirmPasswordResetPayload, ConfirmPhoneVerificationPayload,
+    Coordinates, DataEnvelope, DocumentType, DriverEarningsSummary, DriverProfile,
+    DriverVerification, Errand, LoginPayload, RateDriverPayload, RegisterDriverPayload,
+    RegisterPassengerPayload, RegisterVehiclePayload, RequestPasswordResetPayload, Ride,
+    RideCancellation, RideEstimate, RideEstimateRequestPayload, RideRating, RideReceipt,
+    RideRequestPayload, UpdateErrandAvailabilityPayload, UpdateProfilePayload,
+    UpdateVehiclePayload, UploadedDriverDocument, User, Vehicle, VehicleType,
 };
 
 #[cfg(test)]
@@ -859,6 +860,52 @@ impl std::fmt::Display for UpdateErrandAvailabilityError {
 
 impl std::error::Error for UpdateErrandAvailabilityError {}
 
+/// Fallos posibles de `POST /api/v1/errands/{id}/accept` (historia #92 del
+/// backend, issue #79 de este repo). Mismo criterio que `AcceptRideError`:
+/// `Conflict` es la carrera documentada en `openapi.yaml` — dos conductores
+/// intentando aceptar el mismo mandado casi al mismo tiempo, solo el primero
+/// en llegar lo consigue.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AcceptErrandError {
+    /// La cuenta autenticada no es de un conductor.
+    Forbidden,
+    /// No existe ningun mandado con ese id.
+    NotFound,
+    /// El mandado ya no esta disponible: otro conductor lo acepto primero.
+    Conflict,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for AcceptErrandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AcceptErrandError::Forbidden => {
+                write!(f, "Esta cuenta no puede aceptar mandados.")
+            }
+            AcceptErrandError::NotFound => write!(f, "El mandado ya no existe."),
+            AcceptErrandError::Conflict => write!(f, "Este mandado ya no esta disponible."),
+            AcceptErrandError::Validation(body) => write!(f, "{}", body.message),
+            AcceptErrandError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            AcceptErrandError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            AcceptErrandError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AcceptErrandError {}
+
 /// Fallos posibles de `POST /api/v1/rides/estimate` (issue #14, consumido
 /// desde la app en issue #13).
 ///
@@ -1464,6 +1511,15 @@ enum CancelRideOutcome {
 
 enum AcceptRideOutcome {
     Success(Ride),
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Conflict,
+    Validation(ApiErrorBody),
+}
+
+enum AcceptErrandOutcome {
+    Success(Errand),
     Unauthorized,
     Forbidden,
     NotFound,
@@ -2108,6 +2164,102 @@ impl ApiClient {
         }
 
         Err(AuthenticatedRequestError::Unexpected(status.as_u16()))
+    }
+
+    /// `POST /api/v1/errands/{id}/accept` — historia #92 del backend (issue
+    /// #79 de este repo). Reintenta una vez con refresh de token ante un
+    /// 401, igual que `accept_ride`; un 403 (cuenta no conductora), 404 (no
+    /// existe), 409 (otro conductor lo acepto primero) o 422 (validacion)
+    /// nunca se reintentan.
+    pub async fn accept_errand(
+        &self,
+        token: &AuthToken,
+        errand_id: u64,
+        agreed_price: i64,
+    ) -> Result<AuthenticatedFetch<Errand>, AcceptErrandError> {
+        let payload = AcceptErrandPayload { agreed_price };
+
+        match self
+            .post_accept_errand_with_token(errand_id, &token.access_token, &payload)
+            .await?
+        {
+            AcceptErrandOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            AcceptErrandOutcome::Forbidden => return Err(AcceptErrandError::Forbidden),
+            AcceptErrandOutcome::NotFound => return Err(AcceptErrandError::NotFound),
+            AcceptErrandOutcome::Conflict => return Err(AcceptErrandError::Conflict),
+            AcceptErrandOutcome::Validation(body) => {
+                return Err(AcceptErrandError::Validation(body));
+            }
+            AcceptErrandOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| AcceptErrandError::SessionExpired)?;
+
+        match self
+            .post_accept_errand_with_token(errand_id, &renewed.access_token, &payload)
+            .await?
+        {
+            AcceptErrandOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            AcceptErrandOutcome::Forbidden => Err(AcceptErrandError::Forbidden),
+            AcceptErrandOutcome::NotFound => Err(AcceptErrandError::NotFound),
+            AcceptErrandOutcome::Conflict => Err(AcceptErrandError::Conflict),
+            AcceptErrandOutcome::Validation(body) => Err(AcceptErrandError::Validation(body)),
+            AcceptErrandOutcome::Unauthorized => Err(AcceptErrandError::SessionExpired),
+        }
+    }
+
+    async fn post_accept_errand_with_token(
+        &self,
+        errand_id: u64,
+        access_token: &str,
+        body: &AcceptErrandPayload,
+    ) -> Result<AcceptErrandOutcome, AcceptErrandError> {
+        let url = format!("{}/api/v1/errands/{}/accept", self.base_url, errand_id);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| AcceptErrandError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<Errand> = response
+                .json()
+                .await
+                .map_err(|err| AcceptErrandError::Network(err.to_string()))?;
+            return Ok(AcceptErrandOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(AcceptErrandOutcome::Unauthorized),
+            403 => Ok(AcceptErrandOutcome::Forbidden),
+            404 => Ok(AcceptErrandOutcome::NotFound),
+            409 => Ok(AcceptErrandOutcome::Conflict),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| AcceptErrandError::Network(err.to_string()))?;
+                Ok(AcceptErrandOutcome::Validation(body))
+            }
+            other => Err(AcceptErrandError::Unexpected(other)),
+        }
     }
 
     /// `GET /api/v1/me/earnings` — historia #29. `from`/`to` viajan tal cual
@@ -7977,6 +8129,251 @@ mod tests {
         let error = client.accept_ride(&sample_token(), 1).await.unwrap_err();
 
         assert!(matches!(error, AcceptRideError::Network(_)));
+    }
+
+    fn sample_accepted_errand_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": 1,
+            "status": "accepted",
+            "description": "Recoger un paquete en la farmacia del centro.",
+            "has_photo": false,
+            "photo_url": null,
+            "origin": {"latitude": 4.710989, "longitude": -74.072092},
+            "destination": {"site_id": 1, "name": "Casco urbano"},
+            "driver": {"id": 42, "name": "Carlos Perez"},
+            "agreed_price": 15000,
+            "requested_at": "2026-09-13T14:03:21+00:00",
+            "completed_at": null
+        })
+    }
+
+    #[tokio::test]
+    async fn accept_errand_returns_the_accepted_errand_with_the_agreed_price() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/1/accept"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .and(body_json(serde_json::json!({
+                "agreed_price": 15000,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_accepted_errand_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .accept_errand(&sample_token(), 1, 15000)
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.data.status, ErrandStatus::Accepted);
+        assert_eq!(fetch.data.agreed_price, Some(15000));
+        assert_eq!(
+            fetch.data.driver,
+            Some(crate::models::RideDriver {
+                id: 42,
+                name: "Carlos Perez".to_string(),
+            })
+        );
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn accept_errand_returns_forbidden_on_403_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/1/accept"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .accept_errand(&sample_token(), 1, 15000)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, AcceptErrandError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn accept_errand_returns_not_found_on_404_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/999/accept"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No query results for model [App\\Models\\Errand] 999.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .accept_errand(&sample_token(), 999, 15000)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, AcceptErrandError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn accept_errand_returns_conflict_on_409_when_another_driver_accepted_first() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/1/accept"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "message": "Este mandado ya no está disponible.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .accept_errand(&sample_token(), 1, 15000)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, AcceptErrandError::Conflict);
+    }
+
+    #[tokio::test]
+    async fn accept_errand_returns_validation_error_on_422_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/1/accept"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "The agreed price field is required.",
+                "errors": {
+                    "agreed_price": ["The agreed price field is required."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .accept_errand(&sample_token(), 1, 15000)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            AcceptErrandError::Validation(ApiErrorBody {
+                message: "The agreed price field is required.".to_string(),
+                errors: Some(HashMap::from([(
+                    "agreed_price".to_string(),
+                    vec!["The agreed price field is required.".to_string()]
+                )])),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_errand_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/1/accept"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/1/accept"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_accepted_errand_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .accept_errand(&sample_token(), 1, 15000)
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn accept_errand_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/1/accept"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .accept_errand(&sample_token(), 1, 15000)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, AcceptErrandError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn accept_errand_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .accept_errand(&sample_token(), 1, 15000)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AcceptErrandError::Network(_)));
     }
 
     fn sample_started_ride_json() -> serde_json::Value {
