@@ -471,6 +471,16 @@ pub struct Errand {
     pub completed_at: Option<String>,
 }
 
+/// Body de `POST /api/v1/errands/{id}/accept` (historia #92 del backend,
+/// issue #79 de este repo). Unico campo del endpoint: el precio que el
+/// conductor negocio con el pasajero por fuera del sistema, entero en la
+/// unidad minima de la moneda, nunca 0 o negativo (el backend lo exige con
+/// `min:1`, ver `AcceptErrandRequest`).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct AcceptErrandPayload {
+    pub agreed_price: i64,
+}
+
 /// Resultado del cobro de un viaje completado
 /// (`openapi.yaml#/components/schemas/Payment`, historia #25).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
