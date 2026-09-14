@@ -10,9 +10,17 @@
 //! flujo de estimar/solicitar (un pasajero solo puede tener un viaje activo a
 //! la vez, ver `openapi.yaml`).
 //!
-//! Origen y destino se eligen tocando el mapa (`MapView::on_click`, ver
-//! `moto_ui/src/map.rs`), no con campos de texto: la historia depende
-//! explicitamente del componente de mapa (issue #4).
+//! Desde la historia #87 del backend (issue #74 de este repo), el destino ya
+//! no es un punto libre en el mapa: es un sitio del catalogo con precio fijo
+//! (`GET /sites`, `ApiClient::list_sites`), elegido de una lista con su
+//! precio de referencia visible. El origen sigue siendo un punto libre
+//! (`MapView::on_click`, ver `moto_ui/src/map.rs`): el conductor tiene que
+//! encontrar al pasajero donde este, eso no cambio. Se agrega tambien un
+//! selector de cantidad de pasajeros (1 a 3, la capacidad de un motocarro).
+//! El precio de referencia que se muestra junto a cada sitio es `day_price`:
+//! esta pantalla no replica la regla de recargo nocturno del backend (hora
+//! exacta, huso horario del servidor), el monto exacto siempre sale de
+//! `POST /rides/estimate`.
 //!
 //! Mientras el viaje solicitado sigue en `requested` o `accepted`, el
 //! pasajero puede desistir con `POST /api/v1/rides/{ride}/cancel`
@@ -38,7 +46,9 @@
 //! se aplican con `moto_core::models::apply_ride_tracking_event`, logica
 //! pura testeada aparte de Dioxus. El mapa reusa `MapView` (issue #4), que
 //! desde esta historia actualiza sus marcadores reactivamente en vez de solo
-//! al montarse (ver `moto_ui/src/map.rs`).
+//! al montarse (ver `moto_ui/src/map.rs`). Desde la historia #87 del backend
+//! (issue #74) el mapa de seguimiento ya no marca el destino: un sitio no
+//! tiene coordenadas, solo nombre — el nombre se muestra aparte como texto.
 //!
 //! Una vez `completed`, el pasajero ve el resultado del cobro leyendo
 //! `Ride::payment` (historia #24) -- el cobro mismo ya ocurrio de forma
@@ -53,11 +63,12 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use futures_timer::Delay;
 use moto_core::api::{
-    ApiClient, CancelRideError, EstimateRideError, GetRideError, RequestRideError,
+    ApiClient, AuthenticatedRequestError, CancelRideError, EstimateRideError, GetRideError,
+    RequestRideError,
 };
 use moto_core::models::{
     Coordinates, PaymentStatus, Ride, RideCancellation, RideEstimate, RideStatus, RideTracking,
-    apply_ride_tracking_event,
+    Site, apply_ride_tracking_event,
 };
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
@@ -80,21 +91,23 @@ const RIDE_TRACKING_POLL_INTERVAL: Duration = Duration::from_millis(700);
 const DEFAULT_CENTER_LAT: f64 = 4.710989;
 const DEFAULT_CENTER_LNG: f64 = -74.072092;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum PickTarget {
-    Origin,
-    Destination,
-}
-
 #[component]
 pub fn RideEstimateScreen() -> Element {
     let api_client = use_context::<ApiClient>();
     let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context::<SessionState>();
 
+    let mut sites = use_signal(Vec::<Site>::new);
+    let mut sites_error = use_signal(|| None::<String>);
+    let mut is_loading_sites = use_signal(|| false);
+    // Mismo criterio que `ProfileScreen`/`VehicleScreen`: evita reprogramar
+    // el efecto en un loop si `session.update_token`/`logout` (dentro del
+    // propio fetch) volviera a disparar la lectura de `session.token()`.
+    let mut has_fetched_sites = use_signal(|| false);
+
     let mut origin = use_signal(|| None::<(f64, f64)>);
-    let mut destination = use_signal(|| None::<(f64, f64)>);
-    let mut pick_target = use_signal(|| PickTarget::Origin);
+    let mut destination_site_id = use_signal(|| None::<u64>);
+    let mut passenger_count = use_signal(|| 1u8);
     let mut estimate_error = use_signal(|| None::<EstimateRideError>);
     let mut estimate = use_signal(|| None::<RideEstimate>);
     let mut is_loading = use_signal(|| false);
@@ -105,19 +118,49 @@ pub fn RideEstimateScreen() -> Element {
     let mut is_cancelling = use_signal(|| false);
     let mut cancellation_result = use_signal(|| None::<RideCancellation>);
 
+    let api_client_for_sites = api_client.clone();
+    let storage_for_sites = storage.clone();
+
+    use_effect(move || {
+        if has_fetched_sites() {
+            return;
+        }
+
+        let Some(token) = session.token() else {
+            return;
+        };
+        has_fetched_sites.set(true);
+
+        let api_client = api_client_for_sites.clone();
+        let storage = storage_for_sites.clone();
+
+        spawn(async move {
+            is_loading_sites.set(true);
+            sites_error.set(None);
+
+            match api_client.list_sites(&token).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    sites.set(fetch.data);
+                }
+                Err(AuthenticatedRequestError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                Err(err) => {
+                    sites_error.set(Some(err.to_string()));
+                }
+            }
+
+            is_loading_sites.set(false);
+        });
+    });
+
     let on_map_click = move |(lat, lng): (f64, f64)| {
         estimate.set(None);
         estimate_error.set(None);
-
-        match pick_target() {
-            PickTarget::Origin => {
-                origin.set(Some((lat, lng)));
-                pick_target.set(PickTarget::Destination);
-            }
-            PickTarget::Destination => {
-                destination.set(Some((lat, lng)));
-            }
-        }
+        origin.set(Some((lat, lng)));
     };
 
     let on_estimate_click = {
@@ -130,9 +173,10 @@ pub fn RideEstimateScreen() -> Element {
             let Some((origin_lat, origin_lng)) = origin() else {
                 return;
             };
-            let Some((destination_lat, destination_lng)) = destination() else {
+            let Some(site_id) = destination_site_id() else {
                 return;
             };
+            let count = passenger_count();
             let api_client = api_client.clone();
             let storage = storage.clone();
 
@@ -144,13 +188,9 @@ pub fn RideEstimateScreen() -> Element {
                     latitude: origin_lat,
                     longitude: origin_lng,
                 };
-                let destination_coords = Coordinates {
-                    latitude: destination_lat,
-                    longitude: destination_lng,
-                };
 
                 match api_client
-                    .estimate_ride(&token, origin_coords, destination_coords)
+                    .estimate_ride(&token, origin_coords, site_id, count)
                     .await
                 {
                     Ok(fetch) => {
@@ -182,9 +222,10 @@ pub fn RideEstimateScreen() -> Element {
             let Some((origin_lat, origin_lng)) = origin() else {
                 return;
             };
-            let Some((destination_lat, destination_lng)) = destination() else {
+            let Some(site_id) = destination_site_id() else {
                 return;
             };
+            let count = passenger_count();
             let api_client = api_client.clone();
             let storage = storage.clone();
 
@@ -196,13 +237,9 @@ pub fn RideEstimateScreen() -> Element {
                     latitude: origin_lat,
                     longitude: origin_lng,
                 };
-                let destination_coords = Coordinates {
-                    latitude: destination_lat,
-                    longitude: destination_lng,
-                };
 
                 match api_client
-                    .request_ride(&token, origin_coords, destination_coords)
+                    .request_ride(&token, origin_coords, site_id, count)
                     .await
                 {
                     Ok(fetch) => {
@@ -268,32 +305,23 @@ pub fn RideEstimateScreen() -> Element {
         ride_error.set(None);
         cancel_error.set(None);
         origin.set(None);
-        destination.set(None);
-        pick_target.set(PickTarget::Origin);
+        destination_site_id.set(None);
+        passenger_count.set(1);
     };
 
-    let markers: Vec<MapMarker> = [
-        origin().map(|(lat, lng)| MapMarker {
+    // Solo el origen tiene marcador propio: desde la historia #87 del
+    // backend (issue #74) el destino es un sitio sin coordenadas, no un
+    // punto en el mapa.
+    let markers: Vec<MapMarker> = origin()
+        .map(|(lat, lng)| MapMarker {
             lat,
             lng,
             label: Some("Origen".to_string()),
-        }),
-        destination().map(|(lat, lng)| MapMarker {
-            lat,
-            lng,
-            label: Some("Destino".to_string()),
-        }),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+        })
+        .into_iter()
+        .collect();
 
-    let can_estimate = origin().is_some() && destination().is_some();
-
-    let instructions = match pick_target() {
-        PickTarget::Origin => "Toca el mapa para elegir el origen.",
-        PickTarget::Destination => "Toca el mapa para elegir el destino.",
-    };
+    let can_estimate = origin().is_some() && destination_site_id().is_some();
 
     if let Some(cancellation) = cancellation_result() {
         // Confirmacion explicita de la penalizacion (issue #21) antes de
@@ -339,10 +367,10 @@ pub fn RideEstimateScreen() -> Element {
                 h2 { "Viaje solicitado" }
                 p { class: "ride-request-status", "{ride_status_label(ride.status)}" }
                 dl { class: "ride-request-result",
-                    dt { "Distancia" }
-                    dd { "{ride.distance_meters} m" }
-                    dt { "Duracion" }
-                    dd { "{ride.duration_seconds / 60} min" }
+                    dt { "Destino" }
+                    dd { "{ride.destination.name}" }
+                    dt { "Pasajeros" }
+                    dd { "{ride.passenger_count}" }
                     dt { "Tarifa estimada" }
                     dd { "{ride.currency} {ride.estimated_fare}" }
                 }
@@ -394,20 +422,8 @@ pub fn RideEstimateScreen() -> Element {
     rsx! {
         div { class: "ride-estimate-screen",
             h2 { "Ver tarifa estimada" }
-            p { class: "ride-estimate-instructions", "{instructions}" }
-            div { class: "ride-estimate-target-buttons",
-                button {
-                    r#type: "button",
-                    disabled: pick_target() == PickTarget::Origin,
-                    onclick: move |_| pick_target.set(PickTarget::Origin),
-                    "Elegir origen"
-                }
-                button {
-                    r#type: "button",
-                    disabled: pick_target() == PickTarget::Destination,
-                    onclick: move |_| pick_target.set(PickTarget::Destination),
-                    "Elegir destino"
-                }
+            p { class: "ride-estimate-instructions",
+                "Toca el mapa para elegir tu punto de origen."
             }
             div { class: "ride-estimate-map", style: "height: 320px;",
                 MapView {
@@ -416,6 +432,44 @@ pub fn RideEstimateScreen() -> Element {
                     markers,
                     on_click: on_map_click,
                 }
+            }
+            label { r#for: "ride-estimate-destination", "Destino" }
+            if is_loading_sites() {
+                p { "Cargando sitios..." }
+            } else if let Some(message) = sites_error() {
+                p { class: "ride-estimate-sites-error", role: "alert", "{message}" }
+            } else {
+                select {
+                    id: "ride-estimate-destination",
+                    value: destination_site_id().map(|id| id.to_string()).unwrap_or_default(),
+                    onchange: move |event| {
+                        destination_site_id.set(event.value().parse::<u64>().ok());
+                    },
+                    option { value: "", disabled: true, "Elige un sitio" }
+                    for site in sites().iter().filter(|site| site.motocarro_fare().is_some()) {
+                        {
+                            let fare = site.motocarro_fare().expect("filtrado arriba");
+                            rsx! {
+                                option { key: "{site.id}", value: "{site.id}",
+                                    "{site.name} — {fare.day_price} de dia"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            label { r#for: "ride-estimate-passenger-count", "Pasajeros" }
+            select {
+                id: "ride-estimate-passenger-count",
+                value: "{passenger_count}",
+                onchange: move |event| {
+                    if let Ok(count) = event.value().parse::<u8>() {
+                        passenger_count.set(count);
+                    }
+                },
+                option { value: "1", "1" }
+                option { value: "2", "2" }
+                option { value: "3", "3" }
             }
             button {
                 r#type: "button",
@@ -432,10 +486,10 @@ pub fn RideEstimateScreen() -> Element {
                 p { class: "ride-estimate-error", role: "alert", "{err}" }
             } else if let Some(value) = estimate() {
                 dl { class: "ride-estimate-result",
-                    dt { "Distancia" }
-                    dd { "{value.distance_meters} m" }
-                    dt { "Duracion" }
-                    dd { "{value.duration_seconds / 60} min" }
+                    dt { "Destino" }
+                    dd { "{value.destination.name}" }
+                    dt { "Pasajeros" }
+                    dd { "{value.passenger_count}" }
                     dt { "Tarifa estimada" }
                     dd { "{value.currency} {value.estimated_fare}" }
                 }
@@ -455,7 +509,7 @@ pub fn RideEstimateScreen() -> Element {
                 }
             } else if !can_estimate {
                 p { class: "ride-estimate-empty",
-                    "Elige un origen y un destino en el mapa para ver la tarifa."
+                    "Elige un origen en el mapa y un destino de la lista para ver la tarifa."
                 }
             }
         }
@@ -634,18 +688,16 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
     });
 
     let current = tracking.read();
-    let mut markers = vec![
-        MapMarker {
-            lat: current.ride.origin.latitude,
-            lng: current.ride.origin.longitude,
-            label: Some("Origen".to_string()),
-        },
-        MapMarker {
-            lat: current.ride.destination.latitude,
-            lng: current.ride.destination.longitude,
-            label: Some("Destino".to_string()),
-        },
-    ];
+    // Solo el origen y (si ya se conoce) el conductor tienen marcador: desde
+    // la historia #87 del backend (issue #74) el destino es un sitio sin
+    // coordenadas, asi que su nombre se muestra aparte como texto en vez de
+    // un marcador en el mapa.
+    let mut markers = vec![MapMarker {
+        lat: current.ride.origin.latitude,
+        lng: current.ride.origin.longitude,
+        label: Some("Origen".to_string()),
+    }];
+    let destination_name = current.ride.destination.name.clone();
     // El mapa sigue al conductor cuando ya se conoce su posicion: es lo que
     // el pasajero quiere ver para saber cuando va a llegar (criterio de
     // aceptacion del issue). Sin ubicacion todavia (viaje `requested`, o
@@ -665,6 +717,7 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
 
     rsx! {
         div { class: "ride-tracking-panel",
+            p { class: "ride-tracking-destination", "Destino: {destination_name}" }
             match status() {
                 RideRealtimeStatus::Connecting => rsx! {
                     p { class: "ride-tracking-status", "Conectando..." }
