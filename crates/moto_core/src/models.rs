@@ -299,7 +299,10 @@ pub struct Coordinates {
 
 /// Unidad de cobro de un `SiteFare` (`openapi.yaml#/components/schemas/SiteFare.pricing_unit`,
 /// historia #85 del backend). `PerPerson` se cobra por cada pasajero;
-/// `PerTrip` es un monto unico sin importar cuantos vayan.
+/// `PerTrip` es un monto unico sin importar cuantos vayan. Un mandado (issue
+/// #76) no usa esta tarifa — el precio se negocia por fuera y se registra al
+/// aceptar (`AcceptErrandPayload`) — pero el catalogo de sitios (`GET /sites`)
+/// es el mismo para elegir el destino en ambos flujos.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PricingUnit {
@@ -330,7 +333,9 @@ pub struct SiteFare {
 
 /// `openapi.yaml#/components/schemas/Site` — un destino del catalogo con sus
 /// precios fijos (historia #85 del backend, issue #74 de este repo).
-/// Reemplaza el mapa libre como forma de elegir destino al pedir un viaje.
+/// Reemplaza el mapa libre como forma de elegir destino al pedir un viaje. El
+/// flujo de pedir un mandado (issue #76) tambien lo usa para el selector de
+/// destino, aunque un mandado no tenga tarifa fija.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Site {
     pub id: u64,
@@ -469,6 +474,18 @@ pub struct Errand {
     pub agreed_price: Option<i64>,
     pub requested_at: String,
     pub completed_at: Option<String>,
+}
+
+/// Campos no-archivo de `POST /api/v1/errands` (historia #92 del backend,
+/// issue #76 de este repo). No incluye `photo`: el archivo se manda aparte
+/// como parte multipart en `ApiClient::create_errand`, mismo criterio que
+/// `ApiClient::upload_driver_document` (que tampoco agrupa sus campos en un
+/// solo payload serializable).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateErrandPayload {
+    pub description: String,
+    pub origin: Coordinates,
+    pub destination_site_id: u64,
 }
 
 /// Body de `POST /api/v1/errands/{id}/accept` (historia #92 del backend,

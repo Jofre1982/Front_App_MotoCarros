@@ -8,6 +8,7 @@ pub mod profile;
 pub mod register_driver;
 pub mod register_passenger;
 pub mod register_vehicle;
+pub mod request_errand;
 pub mod ride_estimate;
 pub mod ride_history;
 pub mod ride_receipt;

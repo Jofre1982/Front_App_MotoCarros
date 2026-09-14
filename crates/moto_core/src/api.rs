@@ -7,12 +7,12 @@
 use crate::models::{
     AcceptErrandPayload, ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload,
     BroadcastAuthResponse, ConfirmPasswordResetPayload, ConfirmPhoneVerificationPayload,
-    Coordinates, DataEnvelope, DocumentType, DriverEarningsSummary, DriverProfile,
-    DriverVerification, Errand, LoginPayload, RateDriverPayload, RegisterDriverPayload,
-    RegisterPassengerPayload, RegisterVehiclePayload, RequestPasswordResetPayload, Ride,
-    RideCancellation, RideEstimate, RideEstimateRequestPayload, RideRating, RideReceipt,
-    RideRequestPayload, Site, UpdateErrandAvailabilityPayload, UpdateProfilePayload,
-    UpdateVehiclePayload, UploadedDriverDocument, User, Vehicle, VehicleType,
+    Coordinates, CreateErrandPayload, DataEnvelope, DocumentType, DriverEarningsSummary,
+    DriverProfile, DriverVerification, Errand, LoginPayload, RateDriverPayload,
+    RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload,
+    RequestPasswordResetPayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
+    RideRating, RideReceipt, RideRequestPayload, Site, UpdateErrandAvailabilityPayload,
+    UpdateProfilePayload, UpdateVehiclePayload, UploadedDriverDocument, User, Vehicle, VehicleType,
 };
 
 #[cfg(test)]
@@ -860,6 +860,61 @@ impl std::fmt::Display for UpdateErrandAvailabilityError {
 
 impl std::error::Error for UpdateErrandAvailabilityError {}
 
+/// Fallos posibles de `POST /api/v1/errands` (historia #92 del backend,
+/// issue #76 de este repo). `Forbidden` es una cuenta de conductor (pedir un
+/// mandado es del rol pasajero, `ErrandPolicy::create`); un `destination_site_id`
+/// inexistente llega como `Validation`, no como un error de negocio aparte
+/// (`CreateErrandRequest::rules()` lo valida con `exists:sites,id`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CreateErrandError {
+    Forbidden,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for CreateErrandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CreateErrandError::Forbidden => {
+                write!(f, "Esta cuenta no puede pedir mandados.")
+            }
+            CreateErrandError::Validation(body) => write!(f, "{}", body.message),
+            CreateErrandError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            CreateErrandError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            CreateErrandError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CreateErrandError {}
+
+impl CreateErrandError {
+    /// Mensaje de validacion especifico para `field`, igual que
+    /// `UploadDriverDocumentError::field_message`.
+    pub fn field_message(&self, field: &str) -> Option<String> {
+        match self {
+            CreateErrandError::Validation(body) => body
+                .errors
+                .as_ref()
+                .and_then(|errors| errors.get(field))
+                .and_then(|messages| messages.first())
+                .cloned(),
+            _ => None,
+        }
+    }
+}
+
 /// Fallos posibles de `POST /api/v1/errands/{id}/accept` (historia #92 del
 /// backend, issue #79 de este repo). Mismo criterio que `AcceptRideError`:
 /// `Conflict` es la carrera documentada en `openapi.yaml` — dos conductores
@@ -1522,6 +1577,13 @@ enum PostVehicleOutcome<T> {
     Validation(ApiErrorBody),
 }
 
+enum PostErrandOutcome<T> {
+    Success(T),
+    Unauthorized,
+    Forbidden,
+    Validation(ApiErrorBody),
+}
+
 enum GetVehicleOutcome<T> {
     Success(T),
     Unauthorized,
@@ -2118,6 +2180,120 @@ impl ApiClient {
     ) -> Result<AuthenticatedFetch<Vec<Ride>>, AuthenticatedRequestError> {
         self.get_authenticated::<Vec<Ride>>("/api/v1/me/rides", token)
             .await
+    }
+
+    /// `POST /api/v1/errands` — historia #92 del backend (issue #76 de este
+    /// repo). Multipart, no JSON, porque `photo` es un archivo opcional:
+    /// mismo camino que `upload_driver_document`, que tampoco reusa
+    /// `post_authenticated` por la misma razon. `origin.latitude`/
+    /// `origin.longitude` viajan como campos `origin[latitude]`/
+    /// `origin[longitude]` porque asi arma Laravel el array anidado que lee
+    /// `CreateErrandRequest::rules()` a partir de un form-data (no aceptaria
+    /// la notacion con punto como nombre de campo).
+    ///
+    /// Reintenta una vez con refresh de token ante un 401, igual que
+    /// `upload_driver_document`; un 403 (cuenta no pasajera) o 422
+    /// (validacion) nunca se reintentan.
+    pub async fn create_errand(
+        &self,
+        token: &AuthToken,
+        payload: CreateErrandPayload,
+        photo: Option<(String, Option<String>, Vec<u8>)>,
+    ) -> Result<AuthenticatedFetch<Errand>, CreateErrandError> {
+        match self
+            .post_errand_with_token(&token.access_token, &payload, photo.clone())
+            .await?
+        {
+            PostErrandOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            PostErrandOutcome::Forbidden => return Err(CreateErrandError::Forbidden),
+            PostErrandOutcome::Validation(body) => {
+                return Err(CreateErrandError::Validation(body));
+            }
+            PostErrandOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| CreateErrandError::SessionExpired)?;
+
+        match self
+            .post_errand_with_token(&renewed.access_token, &payload, photo)
+            .await?
+        {
+            PostErrandOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            PostErrandOutcome::Forbidden => Err(CreateErrandError::Forbidden),
+            PostErrandOutcome::Validation(body) => Err(CreateErrandError::Validation(body)),
+            PostErrandOutcome::Unauthorized => Err(CreateErrandError::SessionExpired),
+        }
+    }
+
+    async fn post_errand_with_token(
+        &self,
+        access_token: &str,
+        payload: &CreateErrandPayload,
+        photo: Option<(String, Option<String>, Vec<u8>)>,
+    ) -> Result<PostErrandOutcome<Errand>, CreateErrandError> {
+        let url = format!("{}/api/v1/errands", self.base_url);
+
+        let mut form = reqwest::multipart::Form::new()
+            .text("description", payload.description.clone())
+            .text("origin[latitude]", payload.origin.latitude.to_string())
+            .text("origin[longitude]", payload.origin.longitude.to_string())
+            .text(
+                "destination_site_id",
+                payload.destination_site_id.to_string(),
+            );
+
+        if let Some((file_name, mime_type, bytes)) = photo {
+            let mut file_part = reqwest::multipart::Part::bytes(bytes).file_name(file_name);
+            if let Some(mime) = mime_type {
+                file_part = file_part
+                    .mime_str(&mime)
+                    .map_err(|err| CreateErrandError::Network(err.to_string()))?;
+            }
+            form = form.part("photo", file_part);
+        }
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|err| CreateErrandError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<Errand> = response
+                .json()
+                .await
+                .map_err(|err| CreateErrandError::Network(err.to_string()))?;
+            return Ok(PostErrandOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(PostErrandOutcome::Unauthorized),
+            403 => Ok(PostErrandOutcome::Forbidden),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| CreateErrandError::Network(err.to_string()))?;
+                Ok(PostErrandOutcome::Validation(body))
+            }
+            other => Err(CreateErrandError::Unexpected(other)),
+        }
     }
 
     /// `GET /api/v1/errands` — historia #92 del backend (issue #78 de este
@@ -5677,6 +5853,267 @@ mod tests {
         let error = client.errand_photo(&sample_token(), 1).await.unwrap_err();
 
         assert!(matches!(error, AuthenticatedRequestError::Network(_)));
+    }
+
+    fn sample_create_errand_payload() -> CreateErrandPayload {
+        CreateErrandPayload {
+            description: "Recoger un paquete en la farmacia del centro.".to_string(),
+            origin: Coordinates {
+                latitude: 4.710989,
+                longitude: -74.072092,
+            },
+            destination_site_id: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_errand_returns_the_requested_errand_without_a_photo() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "id": 1,
+                    "status": "requested",
+                    "description": "Recoger un paquete en la farmacia del centro.",
+                    "has_photo": false,
+                    "photo_url": null,
+                    "origin": {"latitude": 4.710989, "longitude": -74.072092},
+                    "destination": {"site_id": 1, "name": "Casco urbano"},
+                    "driver": null,
+                    "agreed_price": null,
+                    "requested_at": "2026-09-14T10:00:00+00:00",
+                    "completed_at": null
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .create_errand(&sample_token(), sample_create_errand_payload(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.data.status, ErrandStatus::Requested);
+        assert!(!fetch.data.has_photo);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn create_errand_returns_the_requested_errand_with_a_photo() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "id": 2,
+                    "status": "requested",
+                    "description": "Recoger un paquete en la farmacia del centro.",
+                    "has_photo": true,
+                    "photo_url": "http://localhost/api/v1/errands/2/photo",
+                    "origin": {"latitude": 4.710989, "longitude": -74.072092},
+                    "destination": {"site_id": 1, "name": "Casco urbano"},
+                    "driver": null,
+                    "agreed_price": null,
+                    "requested_at": "2026-09-14T10:00:00+00:00",
+                    "completed_at": null
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .create_errand(
+                &sample_token(),
+                sample_create_errand_payload(),
+                Some((
+                    "paquete.jpg".to_string(),
+                    Some("image/jpeg".to_string()),
+                    vec![1, 2, 3],
+                )),
+            )
+            .await
+            .unwrap();
+
+        assert!(fetch.data.has_photo);
+        assert_eq!(
+            fetch.data.photo_url,
+            Some("http://localhost/api/v1/errands/2/photo".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn create_errand_returns_forbidden_for_a_driver_account() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .create_errand(&sample_token(), sample_create_errand_payload(), None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, CreateErrandError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn create_errand_returns_validation_error_on_422_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "The selected destination site id is invalid.",
+                "errors": {
+                    "destination_site_id": ["The selected destination site id is invalid."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .create_errand(&sample_token(), sample_create_errand_payload(), None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            CreateErrandError::Validation(ApiErrorBody {
+                message: "The selected destination site id is invalid.".to_string(),
+                errors: Some(HashMap::from([(
+                    "destination_site_id".to_string(),
+                    vec!["The selected destination site id is invalid.".to_string()]
+                )])),
+            })
+        );
+        assert_eq!(
+            error.field_message("destination_site_id"),
+            Some("The selected destination site id is invalid.".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn create_errand_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "id": 1,
+                    "status": "requested",
+                    "description": "Recoger un paquete en la farmacia del centro.",
+                    "has_photo": false,
+                    "photo_url": null,
+                    "origin": {"latitude": 4.710989, "longitude": -74.072092},
+                    "destination": {"site_id": 1, "name": "Casco urbano"},
+                    "driver": null,
+                    "agreed_price": null,
+                    "requested_at": "2026-09-14T10:00:00+00:00",
+                    "completed_at": null
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .create_errand(&sample_token(), sample_create_errand_payload(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn create_errand_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .create_errand(&sample_token(), sample_create_errand_payload(), None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, CreateErrandError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn create_errand_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .create_errand(&sample_token(), sample_create_errand_payload(), None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, CreateErrandError::Network(_)));
     }
 
     #[tokio::test]
