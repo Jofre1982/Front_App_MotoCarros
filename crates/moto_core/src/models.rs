@@ -256,6 +256,37 @@ pub struct UpdateVehiclePayload {
     pub year: Option<u16>,
 }
 
+/// `openapi.yaml#/components/schemas/DriverProfile` — respuesta de
+/// `PATCH /api/v1/me/availability/errands` (historia #92 del backend, issue
+/// #77 de este repo). No lleva `id`/`user_id`: mismo criterio que `Vehicle`,
+/// el backend nunca los expone porque el perfil se direcciona por la cuenta,
+/// no por su propio id. `latitude`/`longitude`/`location_updated_at` son la
+/// ultima posicion conocida del conductor para el pool de viajes normales
+/// (issue #16, fuera de alcance aca); siempre viajan presentes, aunque valgan
+/// `null`, para que el cliente no distinga "sin ubicacion todavia" de "esta
+/// respuesta no lo trae".
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DriverProfile {
+    pub license_number: String,
+    pub is_available: bool,
+    pub is_available_for_errands: bool,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub location_updated_at: Option<String>,
+}
+
+/// Body de `PATCH /api/v1/me/availability/errands` (historia #92 del
+/// backend, issue #77 de este repo).
+///
+/// A diferencia de `UpdateVehiclePayload`, no es un PATCH parcial:
+/// `is_available_for_errands` es el unico campo del endpoint y el backend lo
+/// exige siempre presente (422 si falta), asi que viaja sin
+/// `skip_serializing_if`.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct UpdateErrandAvailabilityPayload {
+    pub is_available_for_errands: bool,
+}
+
 /// Un punto geografico (`openapi.yaml#/components/schemas/Coordinates`),
 /// usado para el origen de un viaje (issue #13/#14). Desde la historia #87
 /// del backend el destino ya no es libre — ver `DestinationSite` — asi que
