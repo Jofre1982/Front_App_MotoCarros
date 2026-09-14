@@ -906,6 +906,50 @@ impl std::fmt::Display for AcceptErrandError {
 
 impl std::error::Error for AcceptErrandError {}
 
+/// Fallos posibles de `POST /api/v1/errands/{id}/complete` (historia #92 del
+/// backend, issue #80 de este repo). Mismo criterio que `CompleteRideError`:
+/// que la cuenta no sea el conductor asignado es `Forbidden` (403); que el
+/// mandado no este `accepted` (ya completado, o nunca se acepto) es
+/// `Validation` (422), no un problema de permisos sino de en que punto del
+/// ciclo de vida esta.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompleteErrandError {
+    /// La cuenta autenticada no es el conductor asignado a este mandado.
+    Forbidden,
+    /// No existe ningun mandado con ese id.
+    NotFound,
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for CompleteErrandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompleteErrandError::Forbidden => {
+                write!(f, "Este mandado no te pertenece.")
+            }
+            CompleteErrandError::NotFound => write!(f, "El mandado ya no existe."),
+            CompleteErrandError::Validation(body) => write!(f, "{}", body.message),
+            CompleteErrandError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            CompleteErrandError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            CompleteErrandError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CompleteErrandError {}
+
 /// Fallos posibles de `POST /api/v1/rides/estimate` (issue #14, consumido
 /// desde la app en issue #13).
 ///
@@ -1537,6 +1581,14 @@ enum StartRideOutcome {
 
 enum CompleteRideOutcome {
     Success(Ride),
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Validation(ApiErrorBody),
+}
+
+enum CompleteErrandOutcome {
+    Success(Errand),
     Unauthorized,
     Forbidden,
     NotFound,
@@ -2259,6 +2311,95 @@ impl ApiClient {
                 Ok(AcceptErrandOutcome::Validation(body))
             }
             other => Err(AcceptErrandError::Unexpected(other)),
+        }
+    }
+
+    /// `POST /api/v1/errands/{id}/complete` — historia #92 del backend
+    /// (issue #80 de este repo). No manda ningun body: no hay nada que
+    /// negociar al completar, `agreed_price` ya quedo fijado al aceptar
+    /// (issue #79). Reintenta una vez con refresh de token ante un 401,
+    /// igual que `complete_ride`; un 403 (no es el conductor asignado), 404
+    /// o 422 (el mandado no esta `accepted`) nunca se reintentan.
+    pub async fn complete_errand(
+        &self,
+        token: &AuthToken,
+        errand_id: u64,
+    ) -> Result<AuthenticatedFetch<Errand>, CompleteErrandError> {
+        match self
+            .post_complete_errand_with_token(errand_id, &token.access_token)
+            .await?
+        {
+            CompleteErrandOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            CompleteErrandOutcome::Forbidden => return Err(CompleteErrandError::Forbidden),
+            CompleteErrandOutcome::NotFound => return Err(CompleteErrandError::NotFound),
+            CompleteErrandOutcome::Validation(body) => {
+                return Err(CompleteErrandError::Validation(body));
+            }
+            CompleteErrandOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| CompleteErrandError::SessionExpired)?;
+
+        match self
+            .post_complete_errand_with_token(errand_id, &renewed.access_token)
+            .await?
+        {
+            CompleteErrandOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            CompleteErrandOutcome::Forbidden => Err(CompleteErrandError::Forbidden),
+            CompleteErrandOutcome::NotFound => Err(CompleteErrandError::NotFound),
+            CompleteErrandOutcome::Validation(body) => Err(CompleteErrandError::Validation(body)),
+            CompleteErrandOutcome::Unauthorized => Err(CompleteErrandError::SessionExpired),
+        }
+    }
+
+    async fn post_complete_errand_with_token(
+        &self,
+        errand_id: u64,
+        access_token: &str,
+    ) -> Result<CompleteErrandOutcome, CompleteErrandError> {
+        let url = format!("{}/api/v1/errands/{}/complete", self.base_url, errand_id);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|err| CompleteErrandError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<Errand> = response
+                .json()
+                .await
+                .map_err(|err| CompleteErrandError::Network(err.to_string()))?;
+            return Ok(CompleteErrandOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(CompleteErrandOutcome::Unauthorized),
+            403 => Ok(CompleteErrandOutcome::Forbidden),
+            404 => Ok(CompleteErrandOutcome::NotFound),
+            422 => {
+                let body: ApiErrorBody = response
+                    .json()
+                    .await
+                    .map_err(|err| CompleteErrandError::Network(err.to_string()))?;
+                Ok(CompleteErrandOutcome::Validation(body))
+            }
+            other => Err(CompleteErrandError::Unexpected(other)),
         }
     }
 
@@ -8758,6 +8899,208 @@ mod tests {
         let error = client.complete_ride(&sample_token(), 1).await.unwrap_err();
 
         assert!(matches!(error, CompleteRideError::Network(_)));
+    }
+
+    fn sample_completed_errand_json() -> serde_json::Value {
+        let mut errand = sample_accepted_errand_json();
+        errand["status"] = serde_json::json!("completed");
+        errand["completed_at"] = serde_json::json!("2026-09-13T14:40:00+00:00");
+        errand
+    }
+
+    #[tokio::test]
+    async fn complete_errand_returns_the_completed_errand() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/1/complete"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_completed_errand_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.complete_errand(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.data.status, ErrandStatus::Completed);
+        assert_eq!(
+            fetch.data.completed_at.as_deref(),
+            Some("2026-09-13T14:40:00+00:00")
+        );
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn complete_errand_returns_forbidden_on_403_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/1/complete"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "message": "This action is unauthorized.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .complete_errand(&sample_token(), 1)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, CompleteErrandError::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn complete_errand_returns_not_found_on_404_without_retrying() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/999/complete"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "message": "No query results for model [App\\Models\\Errand] 999.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .complete_errand(&sample_token(), 999)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, CompleteErrandError::NotFound);
+    }
+
+    #[tokio::test]
+    async fn complete_errand_returns_validation_error_on_422_when_the_errand_is_not_accepted() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/1/complete"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "Solo se puede completar un mandado que esté aceptado.",
+                "errors": {
+                    "errand": ["Solo se puede completar un mandado que esté aceptado."],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .complete_errand(&sample_token(), 1)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            CompleteErrandError::Validation(ApiErrorBody {
+                message: "Solo se puede completar un mandado que esté aceptado.".to_string(),
+                errors: Some(HashMap::from([(
+                    "errand".to_string(),
+                    vec!["Solo se puede completar un mandado que esté aceptado.".to_string()]
+                )])),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_errand_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/1/complete"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/1/complete"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_completed_errand_json(),
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.complete_errand(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.id, 1);
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn complete_errand_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/1/complete"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .complete_errand(&sample_token(), 1)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, CompleteErrandError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn complete_errand_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client
+            .complete_errand(&sample_token(), 1)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, CompleteErrandError::Network(_)));
     }
 
     #[tokio::test]
