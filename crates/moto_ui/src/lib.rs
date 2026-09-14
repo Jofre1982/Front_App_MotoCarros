@@ -21,6 +21,7 @@ pub use screens::profile::ProfileScreen;
 pub use screens::register_driver::RegisterDriverScreen;
 pub use screens::register_passenger::RegisterPassengerScreen;
 pub use screens::register_vehicle::RegisterVehicleScreen;
+pub use screens::request_errand::RequestErrandScreen;
 pub use screens::ride_estimate::RideEstimateScreen;
 pub use screens::ride_history::RideHistoryScreen;
 pub use screens::vehicle::VehicleScreen;
@@ -96,6 +97,7 @@ pub fn App() -> Element {
 enum HomeSection {
     Profile,
     RideEstimate,
+    RequestErrand,
     Vehicle,
     Documents,
     NearbyRides,
@@ -117,10 +119,13 @@ enum HomeSection {
 /// `session.user()` ya cargo (`GET /api/v1/me`, issue #9) y es una cuenta de
 /// conductor: un pasajero nunca ve esos botones, y estructuralmente no puede
 /// llegar a esas pantallas desde esta navegacion. El historial de viajes
-/// simple (issue #28, `RideHistoryScreen`) es al reves: solo se ofrece a
-/// pasajero — el equivalente para conductor no reutiliza esa pantalla porque
-/// tambien necesita el resumen de ganancias, asi que vive en
-/// `DriverEarningsScreen`.
+/// simple (issue #28, `RideHistoryScreen`) y pedir un mandado (issue #76,
+/// `RequestErrandScreen`) son al reves: solo se ofrecen a pasajero — el
+/// equivalente de historial para conductor no reutiliza `RideHistoryScreen`
+/// porque tambien necesita el resumen de ganancias, asi que vive en
+/// `DriverEarningsScreen`; el equivalente de mandados para conductor es
+/// `NearbyErrandsScreen` (issue #78), un flujo completamente distinto
+/// (encontrar y aceptar, no pedir).
 #[component]
 fn Home() -> Element {
     let api_client = use_context::<ApiClient>();
@@ -210,6 +215,12 @@ fn Home() -> Element {
                     }
                     button {
                         r#type: "button",
+                        disabled: section() == HomeSection::RequestErrand,
+                        onclick: move |_| section.set(HomeSection::RequestErrand),
+                        "Pedir un mandado"
+                    }
+                    button {
+                        r#type: "button",
                         disabled: section() == HomeSection::RideHistory,
                         onclick: move |_| section.set(HomeSection::RideHistory),
                         "Historial de viajes"
@@ -222,6 +233,9 @@ fn Home() -> Element {
                 },
                 HomeSection::RideEstimate => rsx! {
                     RideEstimateScreen {}
+                },
+                HomeSection::RequestErrand => rsx! {
+                    RequestErrandScreen {}
                 },
                 HomeSection::Vehicle => rsx! {
                     VehicleScreen {}

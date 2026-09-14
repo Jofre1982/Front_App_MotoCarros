@@ -296,6 +296,41 @@ pub struct Coordinates {
     pub longitude: f64,
 }
 
+/// Unidad de cobro de un `SiteFare` (`openapi.yaml#/components/schemas/SiteFare`,
+/// historia #85 del backend). `PerPerson` se cobra por cada pasajero;
+/// `PerTrip` es un monto unico sin importar cuantos vayan. Un mandado (issue
+/// #76) no usa esta tarifa — el precio se negocia por fuera y se registra al
+/// aceptar (`AcceptErrandPayload`) — pero el catalogo de sitios (`GET /sites`)
+/// es el mismo para elegir el destino en ambos flujos.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PricingUnit {
+    PerPerson,
+    PerTrip,
+}
+
+/// El precio fijo de pasajero de un sitio para un tipo de vehiculo
+/// (`openapi.yaml#/components/schemas/SiteFare`, historia #85 del backend).
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+pub struct SiteFare {
+    pub vehicle_type: VehicleType,
+    pub pricing_unit: PricingUnit,
+    pub day_price: i64,
+    pub night_price: Option<i64>,
+}
+
+/// `openapi.yaml#/components/schemas/Site` — un destino del catalogo con sus
+/// precios fijos (historia #85 del backend). El flujo de pedir un mandado
+/// (issue #76) solo necesita `id`/`name` para el selector de destino: un
+/// mandado no tiene tarifa fija (`fares` viaja igual, por si algun dia hace
+/// falta mostrar el precio de referencia aca tambien).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Site {
+    pub id: u64,
+    pub name: String,
+    pub fares: Vec<SiteFare>,
+}
+
 /// Body de `POST /api/v1/rides/estimate`
 /// (`openapi.yaml#/components/schemas/RideEstimateRequest`).
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
@@ -396,6 +431,18 @@ pub struct Errand {
     pub agreed_price: Option<i64>,
     pub requested_at: String,
     pub completed_at: Option<String>,
+}
+
+/// Campos no-archivo de `POST /api/v1/errands` (historia #92 del backend,
+/// issue #76 de este repo). No incluye `photo`: el archivo se manda aparte
+/// como parte multipart en `ApiClient::create_errand`, mismo criterio que
+/// `ApiClient::upload_driver_document` (que tampoco agrupa sus campos en un
+/// solo payload serializable).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateErrandPayload {
+    pub description: String,
+    pub origin: Coordinates,
+    pub destination_site_id: u64,
 }
 
 /// Body de `POST /api/v1/errands/{id}/accept` (historia #92 del backend,
