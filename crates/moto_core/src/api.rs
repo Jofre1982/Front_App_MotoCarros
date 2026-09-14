@@ -7,7 +7,7 @@
 use crate::models::{
     ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload, BroadcastAuthResponse,
     ConfirmPasswordResetPayload, ConfirmPhoneVerificationPayload, Coordinates, DataEnvelope,
-    DocumentType, DriverEarningsSummary, DriverProfile, DriverVerification, LoginPayload,
+    DocumentType, DriverEarningsSummary, DriverProfile, DriverVerification, Errand, LoginPayload,
     RateDriverPayload, RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload,
     RequestPasswordResetPayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
     RideRating, RideReceipt, RideRequestPayload, Site, UpdateErrandAvailabilityPayload,
@@ -15,7 +15,7 @@ use crate::models::{
 };
 
 #[cfg(test)]
-use crate::models::{DocumentStatus, RideStatus, Role, VerificationStatus};
+use crate::models::{DocumentStatus, ErrandStatus, RideStatus, Role, VerificationStatus};
 
 #[derive(Debug, Clone)]
 pub struct ApiClient {
@@ -361,6 +361,17 @@ pub struct AuthenticatedFetch<T> {
     /// token antes de reintentar — el caller (dueno del `SessionState`) debe
     /// persistirlo con `SessionState::update_token`.
     pub refreshed_token: Option<AuthToken>,
+}
+
+/// Foto adjunta a un mandado, tal como la sirve
+/// `GET /api/v1/errands/{id}/photo` (historia #92 del backend, issue #78 de
+/// este repo): bytes crudos mas el `Content-Type` real que puso el backend
+/// (`Storage::response()`), no JSON — por eso no vive en `moto_core::models`
+/// junto a `Errand`, que si refleja el contrato JSON.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ErrandPhoto {
+    pub content_type: String,
+    pub bytes: Vec<u8>,
 }
 
 /// Fallos posibles de una request autenticada con reintento automatico.
@@ -1380,6 +1391,11 @@ enum GetOutcome<T> {
     Unauthorized,
 }
 
+enum GetErrandPhotoOutcome {
+    Success(ErrandPhoto),
+    Unauthorized,
+}
+
 enum PatchOutcome<T> {
     Success(T),
     Unauthorized,
@@ -1994,6 +2010,104 @@ impl ApiClient {
     ) -> Result<AuthenticatedFetch<Vec<Ride>>, AuthenticatedRequestError> {
         self.get_authenticated::<Vec<Ride>>("/api/v1/me/rides", token)
             .await
+    }
+
+    /// `GET /api/v1/errands` — historia #92 del backend (issue #78 de este
+    /// repo). Una lista vacia significa tanto "no hay ningun mandado
+    /// `requested`" como "el conductor no esta disponible para mandados"
+    /// (`ListErrandsController` no distingue los dos casos, ver
+    /// `openapi.yaml`): quien llama a este metodo tiene que resolver esa
+    /// ambiguedad con `SessionState::errand_availability()` (issue #77), no
+    /// con esta respuesta. Reintenta una vez con refresh de token ante un
+    /// 401, igual que `ride_history`; un 403 (cuenta no conductora) llega
+    /// como `AuthenticatedRequestError::Unexpected(403)`, mismo criterio que
+    /// `get_driver_documents`.
+    pub async fn list_errands(
+        &self,
+        token: &AuthToken,
+    ) -> Result<AuthenticatedFetch<Vec<Errand>>, AuthenticatedRequestError> {
+        self.get_authenticated::<Vec<Errand>>("/api/v1/errands", token)
+            .await
+    }
+
+    /// `GET /api/v1/errands/{id}/photo` — historia #92 del backend (issue
+    /// #78 de este repo). A diferencia de `get_authenticated`, la respuesta
+    /// no es JSON (`DataEnvelope<T>`): es la imagen cruda, asi que tiene su
+    /// propio camino en vez de reusar ese helper generico. Reintenta una vez
+    /// con refresh de token ante un 401, mismo criterio que el resto de los
+    /// `GET` autenticados.
+    pub async fn errand_photo(
+        &self,
+        token: &AuthToken,
+        errand_id: u64,
+    ) -> Result<AuthenticatedFetch<ErrandPhoto>, AuthenticatedRequestError> {
+        if let GetErrandPhotoOutcome::Success(photo) = self
+            .get_errand_photo_with_token(errand_id, &token.access_token)
+            .await?
+        {
+            return Ok(AuthenticatedFetch {
+                data: photo,
+                refreshed_token: None,
+            });
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| AuthenticatedRequestError::SessionExpired)?;
+
+        match self
+            .get_errand_photo_with_token(errand_id, &renewed.access_token)
+            .await?
+        {
+            GetErrandPhotoOutcome::Success(photo) => Ok(AuthenticatedFetch {
+                data: photo,
+                refreshed_token: Some(renewed),
+            }),
+            GetErrandPhotoOutcome::Unauthorized => Err(AuthenticatedRequestError::SessionExpired),
+        }
+    }
+
+    async fn get_errand_photo_with_token(
+        &self,
+        errand_id: u64,
+        access_token: &str,
+    ) -> Result<GetErrandPhotoOutcome, AuthenticatedRequestError> {
+        let url = format!("{}/api/v1/errands/{}/photo", self.base_url, errand_id);
+
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|err| AuthenticatedRequestError::Network(err.to_string()))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|err| AuthenticatedRequestError::Network(err.to_string()))?
+                .to_vec();
+            return Ok(GetErrandPhotoOutcome::Success(ErrandPhoto {
+                content_type,
+                bytes,
+            }));
+        }
+
+        if status.as_u16() == 401 {
+            return Ok(GetErrandPhotoOutcome::Unauthorized);
+        }
+
+        Err(AuthenticatedRequestError::Unexpected(status.as_u16()))
     }
 
     /// `GET /api/v1/me/earnings` — historia #29. `from`/`to` viajan tal cual
@@ -4994,6 +5108,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_errands_returns_the_available_errands() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/errands"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": 1,
+                        "status": "requested",
+                        "description": "Recoger un paquete en la farmacia del centro.",
+                        "has_photo": false,
+                        "photo_url": null,
+                        "origin": {"latitude": 4.710989, "longitude": -74.072092},
+                        "destination": {"site_id": 1, "name": "Casco urbano"},
+                        "driver": null,
+                        "agreed_price": null,
+                        "requested_at": "2026-09-13T14:03:21+00:00",
+                        "completed_at": null
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.list_errands(&sample_token()).await.unwrap();
+
+        assert_eq!(fetch.data.len(), 1);
+        assert_eq!(fetch.data[0].id, 1);
+        assert_eq!(fetch.data[0].status, ErrandStatus::Requested);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn list_errands_returns_an_empty_list_when_none_are_available() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/errands"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": []
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.list_errands(&sample_token()).await.unwrap();
+
+        assert!(fetch.data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_errands_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/errands"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.list_errands(&sample_token()).await.unwrap_err();
+
+        assert_eq!(error, AuthenticatedRequestError::SessionExpired);
+    }
+
+    #[tokio::test]
     async fn list_sites_returns_the_catalog_with_fares() {
         let server = MockServer::start().await;
 
@@ -5073,6 +5270,120 @@ mod tests {
         let error = client.list_sites(&sample_token()).await.unwrap_err();
 
         assert_eq!(error, AuthenticatedRequestError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn errand_photo_returns_the_bytes_and_content_type() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/errands/1/photo"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "image/jpeg")
+                    .set_body_bytes(vec![1, 2, 3, 4]),
+            )
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.errand_photo(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.content_type, "image/jpeg");
+        assert_eq!(fetch.data.bytes, vec![1, 2, 3, 4]);
+        assert_eq!(fetch.refreshed_token, None);
+    }
+
+    #[tokio::test]
+    async fn errand_photo_refreshes_once_and_retries_on_401() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/errands/1/photo"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "access_token": "new-jwt-token",
+                    "token_type": "bearer",
+                    "expires_in": 900,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/errands/1/photo"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer new-jwt-token",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "image/png")
+                    .set_body_bytes(vec![9, 9, 9]),
+            )
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client.errand_photo(&sample_token(), 1).await.unwrap();
+
+        assert_eq!(fetch.data.content_type, "image/png");
+        assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
+    }
+
+    #[tokio::test]
+    async fn errand_photo_forces_session_expired_when_the_token_cannot_be_renewed() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/errands/1/photo"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "Unauthenticated.",
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "message": "El token no es valido o ya expiro.",
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client.errand_photo(&sample_token(), 1).await.unwrap_err();
+
+        assert_eq!(error, AuthenticatedRequestError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn errand_photo_returns_network_error_when_server_is_unreachable() {
+        let client = ApiClient::new("http://127.0.0.1:1");
+
+        let error = client.errand_photo(&sample_token(), 1).await.unwrap_err();
+
+        assert!(matches!(error, AuthenticatedRequestError::Network(_)));
     }
 
     #[tokio::test]

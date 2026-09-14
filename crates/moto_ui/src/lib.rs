@@ -15,6 +15,7 @@ pub use screens::documents::DocumentsScreen;
 pub use screens::driver_earnings::DriverEarningsScreen;
 pub use screens::forgot_password::ForgotPasswordScreen;
 pub use screens::login::LoginScreen;
+pub use screens::nearby_errands::NearbyErrandsScreen;
 pub use screens::nearby_rides::NearbyRidesScreen;
 pub use screens::profile::ProfileScreen;
 pub use screens::register_driver::RegisterDriverScreen;
@@ -98,6 +99,7 @@ enum HomeSection {
     Vehicle,
     Documents,
     NearbyRides,
+    NearbyErrands,
     RideHistory,
     DriverEarnings,
 }
@@ -109,7 +111,8 @@ enum HomeSection {
 ///
 /// Las secciones de vehiculo (issues #11 y #12, `VehicleScreen`), de
 /// documentos de verificacion (issue #60, `DocumentsScreen`), de
-/// solicitudes cercanas (issue #16, `NearbyRidesScreen`) y de historial y
+/// solicitudes cercanas (issue #16, `NearbyRidesScreen`), de mandados
+/// cercanos (issue #78, `NearbyErrandsScreen`) y de historial y
 /// ganancias (historia #29, `DriverEarningsScreen`) solo se ofrecen cuando
 /// `session.user()` ya cargo (`GET /api/v1/me`, issue #9) y es una cuenta de
 /// conductor: un pasajero nunca ve esos botones, y estructuralmente no puede
@@ -181,6 +184,12 @@ fn Home() -> Element {
                     }
                     button {
                         r#type: "button",
+                        disabled: section() == HomeSection::NearbyErrands,
+                        onclick: move |_| section.set(HomeSection::NearbyErrands),
+                        "Mandados cercanos"
+                    }
+                    button {
+                        r#type: "button",
                         disabled: section() == HomeSection::DriverEarnings,
                         onclick: move |_| section.set(HomeSection::DriverEarnings),
                         "Historial y ganancias"
@@ -222,6 +231,9 @@ fn Home() -> Element {
                 },
                 HomeSection::NearbyRides => rsx! {
                     NearbyRidesScreen {}
+                },
+                HomeSection::NearbyErrands => rsx! {
+                    NearbyErrandsScreen {}
                 },
                 HomeSection::RideHistory => rsx! {
                     RideHistoryScreen {}

@@ -425,6 +425,52 @@ pub struct RideDriver {
     pub name: String,
 }
 
+/// Ciclo de vida de un mandado
+/// (`openapi.yaml#/components/schemas/Errand.status`, historia #92 del
+/// backend). Mas corto que `RideStatus`: no hay `in_progress` (nada que
+/// marcar "en curso" entre aceptar y completar, ver issue #79) ni
+/// `cancelled` (el backend no lo soporta para mandados).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrandStatus {
+    Requested,
+    Accepted,
+    Completed,
+}
+
+/// El sitio de destino de un mandado
+/// (`openapi.yaml#/components/schemas/Errand.destination`). El punto de
+/// recogida, en cambio, es libre — ver `Errand::origin`, un `Coordinates`
+/// cualquiera, no un sitio del catalogo.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ErrandDestination {
+    pub site_id: u64,
+    pub name: String,
+}
+
+/// `openapi.yaml#/components/schemas/Errand` — un mandado (servicio a
+/// domicilio, historia #92 del backend, issue #78 de este repo).
+///
+/// `driver`/`agreed_price` llegan `null` mientras nadie lo haya aceptado
+/// todavia, mismo criterio que `Ride::driver`/`Ride::final_fare`. No lleva
+/// ninguna tarifa calculada por el sistema: a diferencia de un viaje, el
+/// precio se negocia por fuera y el conductor lo registra al aceptar (issue
+/// #79) en `agreed_price`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Errand {
+    pub id: u64,
+    pub status: ErrandStatus,
+    pub description: String,
+    pub has_photo: bool,
+    pub photo_url: Option<String>,
+    pub origin: Coordinates,
+    pub destination: ErrandDestination,
+    pub driver: Option<RideDriver>,
+    pub agreed_price: Option<i64>,
+    pub requested_at: String,
+    pub completed_at: Option<String>,
+}
+
 /// Resultado del cobro de un viaje completado
 /// (`openapi.yaml#/components/schemas/Payment`, historia #25).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1074,6 +1120,69 @@ mod tests {
                 status: PaymentStatus::Paid,
             })
         );
+    }
+
+    #[test]
+    fn deserializes_errand_list_envelope_with_and_without_a_driver() {
+        let json = r#"{
+            "data": [
+                {
+                    "id": 2,
+                    "status": "accepted",
+                    "description": "Recoger un paquete en la farmacia del centro.",
+                    "has_photo": true,
+                    "photo_url": "https://api.example.com/api/v1/errands/2/photo",
+                    "origin": {"latitude": 4.710989, "longitude": -74.072092},
+                    "destination": {"site_id": 1, "name": "Casco urbano"},
+                    "driver": {"id": 42, "name": "Carlos Perez"},
+                    "agreed_price": 8000,
+                    "requested_at": "2026-09-13T14:03:21+00:00",
+                    "completed_at": null
+                },
+                {
+                    "id": 1,
+                    "status": "requested",
+                    "description": "Llevar unos documentos a la notaria.",
+                    "has_photo": false,
+                    "photo_url": null,
+                    "origin": {"latitude": 4.698, "longitude": -74.061},
+                    "destination": {"site_id": 2, "name": "Zona norte"},
+                    "driver": null,
+                    "agreed_price": null,
+                    "requested_at": "2026-09-13T13:00:00+00:00",
+                    "completed_at": null
+                }
+            ]
+        }"#;
+
+        let envelope: DataEnvelope<Vec<Errand>> = serde_json::from_str(json).unwrap();
+
+        assert_eq!(envelope.data.len(), 2);
+        assert_eq!(envelope.data[0].id, 2);
+        assert_eq!(envelope.data[0].status, ErrandStatus::Accepted);
+        assert!(envelope.data[0].has_photo);
+        assert_eq!(
+            envelope.data[0].destination,
+            ErrandDestination {
+                site_id: 1,
+                name: "Casco urbano".to_string(),
+            }
+        );
+        assert_eq!(
+            envelope.data[0].driver,
+            Some(RideDriver {
+                id: 42,
+                name: "Carlos Perez".to_string(),
+            })
+        );
+        assert_eq!(envelope.data[0].agreed_price, Some(8000));
+
+        assert_eq!(envelope.data[1].id, 1);
+        assert_eq!(envelope.data[1].status, ErrandStatus::Requested);
+        assert!(!envelope.data[1].has_photo);
+        assert_eq!(envelope.data[1].photo_url, None);
+        assert_eq!(envelope.data[1].driver, None);
+        assert_eq!(envelope.data[1].agreed_price, None);
     }
 
     #[test]
