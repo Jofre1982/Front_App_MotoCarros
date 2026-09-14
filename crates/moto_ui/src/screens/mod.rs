@@ -2,6 +2,7 @@ pub mod documents;
 pub mod driver_earnings;
 pub mod forgot_password;
 pub mod login;
+pub mod nearby_errands;
 pub mod nearby_rides;
 pub mod profile;
 pub mod register_driver;
