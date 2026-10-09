@@ -1695,11 +1695,48 @@ enum GetEarningsOutcome<T> {
     Validation(ApiErrorBody),
 }
 
+/// Tope para establecer la conexion TCP/TLS con el backend.
+#[cfg(not(target_arch = "wasm32"))]
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Tope para la request completa. Sin esto, una conexion que no prospera
+/// (backend inalcanzable, URL mal configurada en el build, red movil
+/// inestable) deja la pantalla en "cargando" para siempre en vez de mostrar
+/// el error de red. Holgado a proposito: las subidas de documentos del
+/// conductor van por esta misma via.
+#[cfg(not(target_arch = "wasm32"))]
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// En nativo (movil) el timeout vive en el cliente y aplica a todas las
+/// requests. En WASM `reqwest` no expone timeout a nivel de cliente (solo por
+/// request), asi que ahi se queda con el cliente por defecto.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_http_client() -> reqwest::Client {
+    build_http_client_with_timeouts(CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn build_http_client_with_timeouts(
+    connect: std::time::Duration,
+    request: std::time::Duration,
+) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(connect)
+        .timeout(request)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
 impl ApiClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            http: reqwest::Client::new(),
+            http: build_http_client(),
         }
     }
 
@@ -4462,6 +4499,37 @@ mod tests {
     fn new_stores_base_url() {
         let client = ApiClient::new("https://api.example.com");
         assert_eq!(client.base_url, "https://api.example.com");
+    }
+
+    #[tokio::test]
+    async fn register_passenger_returns_network_error_when_server_does_not_answer_in_time() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/register/passenger"))
+            .respond_with(ResponseTemplate::new(201).set_delay(std::time::Duration::from_secs(5)))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient {
+            base_url: server.uri(),
+            http: build_http_client_with_timeouts(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_millis(300),
+            ),
+        };
+
+        let started = std::time::Instant::now();
+        let result = client
+            .register_passenger(
+                "Ana Garcia",
+                "ana@example.com",
+                "+573001234567",
+                "motoya2026",
+            )
+            .await;
+
+        assert!(matches!(result, Err(RegisterError::Network(_))));
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
     }
 
     #[tokio::test]
