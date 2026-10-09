@@ -44,7 +44,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+          targets: aarch64-linux-android
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -65,7 +65,9 @@ jobs:
         working-directory: crates/mobile
         run: |
           echo "Backend: $MOTOYA_API_BASE_URL"
-          dx bundle --platform android --release
+          # Sin --target, dx compila para x86_64 (emulador) y la APK no se
+          # instala en un celular real, que es arm64.
+          dx bundle --platform android --release --target aarch64-linux-android
 
       - name: Firmar APK
         run: |
@@ -90,6 +92,7 @@ jobs:
           # y sin INTERNET Android le niega toda conexion: ambos casos son la
           # misma "carga infinita" que motivo este workflow.
           test "$URL_HITS" -gt 0
+          echo "$ABIS" | grep -q "arm64-v8a" || { echo "::error::La APK no incluye arm64-v8a (celulares reales)"; exit 1; }
           echo "$PERMS" | grep -q "android.permission.INTERNET" || { echo "::error::La APK no tiene permiso INTERNET"; exit 1; }
 
       - uses: actions/upload-artifact@v4
