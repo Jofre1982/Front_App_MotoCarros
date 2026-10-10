@@ -74,13 +74,44 @@ jobs:
           # instala en un celular real, que es arm64.
           dx bundle --platform android --release --target aarch64-linux-android
 
+      - name: Icono y nombre de la app
+        # dx 0.7 siempre escribe su icono por defecto en el proyecto Gradle que
+        # genera (no lee `bundle.icon` para Android). Se reemplaza aca por el
+        # de crates/mobile/icons y se vuelve a empaquetar con el mismo Gradle.
+        run: |
+          set -euo pipefail
+          PROJ=$(dirname "$(find target/dx -name gradlew -path '*android*' | head -n 1)")
+          RES="$PROJ/app/src/main/res"
+          ICONS=crates/mobile/icons
+          test -d "$RES"
+          rm -f "$RES"/mipmap-*/ic_launcher.webp "$RES"/drawable-v24/ic_launcher_foreground.xml \
+                "$RES"/drawable/ic_launcher_background.xml
+          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            mkdir -p "$RES/mipmap-$d"
+            cp "$ICONS/ic_launcher-$d.png" "$RES/mipmap-$d/ic_launcher.png"
+          done
+          mkdir -p "$RES/drawable-nodpi" "$RES/drawable" "$RES/mipmap-anydpi-v26"
+          cp "$ICONS/ic_launcher_background.png" "$RES/drawable-nodpi/ic_launcher_background.png"
+          printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+            '<color xmlns:android="http://schemas.android.com/apk/res/android" android:color="#00000000" />' \
+            > "$RES/drawable/ic_launcher_foreground.xml"
+          printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+            '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
+            '    <background android:drawable="@drawable/ic_launcher_background" />' \
+            '    <foreground android:drawable="@drawable/ic_launcher_foreground" />' \
+            '</adaptive-icon>' > "$RES/mipmap-anydpi-v26/ic_launcher.xml"
+          sed -i 's#<string name="app_name">[^<]*</string>#<string name="app_name">MotoYa</string>#' \
+            "$RES/values/strings.xml"
+          grep app_name "$RES/values/strings.xml"
+          chmod +x "$PROJ/gradlew"
+          (cd "$PROJ" && ./gradlew assembleDebug --no-daemon -q)
+
       - name: Firmar APK
         run: |
           set -euo pipefail
           echo "APKs generadas:"
           find target -name "*.apk" -not -path "*/intermediates/*" -print
-          APK=$(find target -name "*.apk" -not -path "*/intermediates/*" -path "*release*" | head -n 1)
-          if [ -z "$APK" ]; then APK=$(find target -name "*.apk" -not -path "*/intermediates/*" | head -n 1); fi
+          APK=$(find target -name "*.apk" -not -path "*/intermediates/*" -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)
           test -n "$APK"
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
           keytool -genkeypair -keystore motoya.jks -alias motoya -storepass motoya123 -keypass motoya123 \
@@ -98,6 +129,7 @@ jobs:
           # misma "carga infinita" que motivo este workflow.
           test "$URL_HITS" -gt 0
           echo "$ABIS" | grep -q "arm64-v8a" || { echo "::error::La APK no incluye arm64-v8a (celulares reales)"; exit 1; }
+          unzip -l MotoYa.apk | grep -q "ic_launcher_background.png" || { echo "::error::La APK no trae el icono de MotoYa"; exit 1; }
           echo "$PERMS" | grep -q "android.permission.INTERNET" || { echo "::error::La APK no tiene permiso INTERNET"; exit 1; }
 
       - uses: actions/upload-artifact@v4

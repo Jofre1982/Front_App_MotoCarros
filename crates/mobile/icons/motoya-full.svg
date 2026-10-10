@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-165 -121 842 842" width="512" height="512">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E8641A"/>
+      <stop offset="0.55" stop-color="#F59A3B"/>
+      <stop offset="1" stop-color="#FBC86A"/>
+    </linearGradient>
+    <linearGradient id="river" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5A2A14"/>
+      <stop offset="1" stop-color="#2B140B"/>
+    </linearGradient>
+    <clipPath id="tile"><rect width="512" height="512" rx="112"/></clipPath>
+  </defs>
+
+  <g>
+    <!-- Cielo de atardecer -->
+    <rect x="-200" y="-200" width="912" height="520" fill="url(#sky)"/>
+    <!-- Sol -->
+    <circle cx="372" cy="150" r="46" fill="#FFE3A3"/>
+
+    <!-- Cerros de Mavecure: tres domos de granito -->
+    <path d="M -10 300
+             C 20 300, 40 150, 120 140
+             C 190 132, 205 260, 215 300 Z" fill="#7A3416"/>
+    <path d="M 185 300
+             C 200 230, 225 175, 275 172
+             C 325 170, 340 240, 350 300 Z" fill="#8E3F1A"/>
+    <path d="M 330 300
+             C 345 262, 365 238, 400 236
+             C 440 234, 458 270, 470 300 Z" fill="#A04A20"/>
+    <!-- Selva en la orilla -->
+    <path d="M -10 300 Q 30 286 70 296 Q 110 284 150 296 Q 190 286 230 297
+             Q 270 287 310 297 Q 350 287 390 297 Q 430 288 470 297 Q 500 290 522 296 L 522 316 L -10 316 Z"
+          fill="#3E1B0C"/>
+
+    <!-- Rio Inirida (aguas oscuras) con reflejos -->
+    <rect x="-200" y="312" width="912" height="500" fill="url(#river)"/>
+    <rect x="-200" y="296" width="912" height="20" fill="#3E1B0C"/>
+    <rect x="300" y="330" width="140" height="7" rx="3.5" fill="#F59A3B" opacity="0.55"/>
+    <rect x="330" y="350" width="90" height="6" rx="3" fill="#F59A3B" opacity="0.4"/>
+    <rect x="60" y="342" width="70" height="5" rx="2.5" fill="#F59A3B" opacity="0.3"/>
+
+    <!-- Motocarro (mototaxi de tres ruedas, vista lateral) -->
+    <g transform="translate(64 232)">
+      <!-- Sombra en el agua -->
+      <ellipse cx="200" cy="222" rx="176" ry="10" fill="#1A0B05" opacity="0.6"/>
+      <!-- Techo de lona: alto atras, cae en curva hacia el parabrisas -->
+      <path d="M 120 34 Q 132 2 186 2 L 334 2 Q 362 2 364 30 L 364 40 L 120 40 Z" fill="#FFFFFF"/>
+      <rect x="120" y="36" width="244" height="8" fill="#E8641A"/>
+      <!-- Parabrisas inclinado -->
+      <path d="M 122 40 L 140 40 L 112 112 L 90 112 Z" fill="#FFFFFF"/>
+      <path d="M 126 44 L 134 44 L 110 106 L 100 106 Z" fill="#FBC86A" opacity="0.7"/>
+      <!-- Cabina abierta (interior oscuro) entre parales -->
+      <path d="M 140 44 L 352 44 L 352 120 L 112 120 Z" fill="#3E1B0C"/>
+      <rect x="352" y="40" width="12" height="90" fill="#FFFFFF"/>
+      <rect x="226" y="44" width="10" height="76" fill="#FFFFFF"/>
+      <!-- Conductor adelante y pasajero en la banca trasera -->
+      <circle cx="180" cy="70" r="14" fill="#F59A3B"/>
+      <path d="M 160 120 Q 160 90 180 88 Q 200 90 202 120 Z" fill="#F59A3B"/>
+      <path d="M 132 96 L 156 92" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round"/>
+      <circle cx="294" cy="72" r="14" fill="#FFE3A3"/>
+      <path d="M 274 120 Q 274 92 294 90 Q 314 92 316 120 Z" fill="#FFE3A3"/>
+      <!-- Carroceria baja: trompa estrecha adelante, cajon ancho atras -->
+      <path d="M 90 112 L 112 112 L 112 120 L 364 120 L 364 168 Q 364 178 352 178
+               L 132 178 L 116 150 L 84 150 Q 76 132 90 112 Z" fill="#FFFFFF"/>
+      <rect x="132" y="150" width="232" height="9" fill="#E8641A"/>
+      <!-- Farol en la trompa -->
+      <circle cx="86" cy="128" r="8" fill="#FFE3A3"/>
+      <!-- Horquilla y guardabarros de la unica rueda delantera -->
+      <path d="M 96 148 L 92 196" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round"/>
+      <path d="M 64 186 Q 92 154 120 186" fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round"/>
+      <circle cx="92" cy="204" r="22" fill="#2B140B"/>
+      <circle cx="92" cy="204" r="8" fill="#FFFFFF"/>
+      <!-- Rueda trasera bajo el cajon -->
+      <circle cx="318" cy="198" r="26" fill="#2B140B"/>
+      <circle cx="318" cy="198" r="10" fill="#FFFFFF"/>
+    </g>
+  </g>
+</svg>

@@ -285,15 +285,28 @@ async fn unexpected_status<E>(
     unexpected: impl FnOnce(u16) -> E,
     network: impl FnOnce(String) -> E,
 ) -> E {
+    let server = response
+        .headers()
+        .get(reqwest::header::SERVER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("?")
+        .to_string();
     let body = response.text().await.unwrap_or_default();
     let body = body.trim();
-    if body.is_empty() || serde_json::from_str::<serde_json::Value>(body).is_ok() {
+    // Un 403/5xx de este backend trae JSON con `message`; uno de un firewall
+    // del hosting suele traer HTML o venir vacio. En todos los casos se
+    // muestra lo que llego: es lo unico que dice quien rechazo la request.
+    if status != 403 && !body.is_empty() && serde_json::from_str::<serde_json::Value>(body).is_ok()
+    {
         return unexpected(status);
     }
     let snippet: String = body.chars().take(200).collect();
-    network(format!(
-        "HTTP {status}, rechazado antes de llegar a la API: {snippet}"
-    ))
+    let snippet = if snippet.is_empty() {
+        "(sin contenido)".to_string()
+    } else {
+        snippet
+    };
+    network(format!("HTTP {status}, servidor {server}: {snippet}"))
 }
 
 fn is_valid_email(email: &str) -> bool {
