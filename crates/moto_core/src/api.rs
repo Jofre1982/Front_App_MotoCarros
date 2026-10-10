@@ -274,6 +274,28 @@ async fn decode_json<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// Error para un codigo HTTP que el endpoint no contempla. Si el cuerpo no es
+/// JSON (una pagina HTML de un firewall del hosting, del servidor web), el
+/// error lleva el codigo y el comienzo de esa pagina, que es lo unico que
+/// permite saber quien rechazo la request; si no, queda el `Unexpected` de
+/// siempre.
+async fn unexpected_status<E>(
+    response: reqwest::Response,
+    status: u16,
+    unexpected: impl FnOnce(u16) -> E,
+    network: impl FnOnce(String) -> E,
+) -> E {
+    let body = response.text().await.unwrap_or_default();
+    let body = body.trim();
+    if body.is_empty() || serde_json::from_str::<serde_json::Value>(body).is_ok() {
+        return unexpected(status);
+    }
+    let snippet: String = body.chars().take(200).collect();
+    network(format!(
+        "HTTP {status}, rechazado antes de llegar a la API: {snippet}"
+    ))
+}
+
 fn is_valid_email(email: &str) -> bool {
     let Some((local, domain)) = email.split_once('@') else {
         return false;
@@ -1844,7 +1866,12 @@ impl ApiClient {
                     decode_json(response).await.map_err(LoginError::Network)?;
                 Err(LoginError::Validation(body))
             }
-            other => Err(LoginError::Unexpected(other)),
+            other => {
+                Err(
+                    unexpected_status(response, other, LoginError::Unexpected, LoginError::Network)
+                        .await,
+                )
+            }
         }
     }
 
@@ -2008,7 +2035,13 @@ impl ApiClient {
                     .map_err(RegisterError::Network)?;
                 Err(RegisterError::Validation(body))
             }
-            other => Err(RegisterError::Unexpected(other)),
+            other => Err(unexpected_status(
+                response,
+                other,
+                RegisterError::Unexpected,
+                RegisterError::Network,
+            )
+            .await),
         }
     }
 
@@ -2083,7 +2116,13 @@ impl ApiClient {
                     .map_err(RegisterError::Network)?;
                 Err(RegisterError::Validation(body))
             }
-            other => Err(RegisterError::Unexpected(other)),
+            other => Err(unexpected_status(
+                response,
+                other,
+                RegisterError::Unexpected,
+                RegisterError::Network,
+            )
+            .await),
         }
     }
 
