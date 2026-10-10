@@ -1,0 +1,148 @@
+name: APK Android
+
+# Compila la app movil (crates/mobile) como APK instalable, en la nube, sin
+# necesitar Rust ni Android Studio en el PC de nadie.
+#
+# Como generarla: GitHub -> pestana "Actions" -> "APK Android" -> boton
+# "Run workflow". Al terminar, la APK queda para descargar en la seccion
+# "Artifacts" de esa ejecucion.
+#
+# La URL del backend se fija en build time con MOTOYA_API_BASE_URL (ver
+# crates/mobile/src/main.rs). Sin ella la app apunta a http://localhost:8000
+# y en el celular nunca llega al servidor.
+#
+# No es parte del CI por PR (ver .claude/CLAUDE.md): solo corre a mano, o en
+# un PR que cambie este mismo archivo, para poder probarlo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base_url:
+        description: "URL del backend que usara la app"
+        required: true
+        default: "https://motocarroya.com"
+  pull_request:
+    paths:
+      - ".github/workflows/android-apk.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  MOTOYA_API_BASE_URL: ${{ github.event.inputs.api_base_url || 'https://motocarroya.com' }}
+
+jobs:
+  apk:
+    name: Compilar APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - uses: cargo-bins/cargo-binstall@main
+
+      - name: Instalar Dioxus CLI (misma version que la libreria)
+        run: cargo binstall dioxus-cli@0.7.10 --no-confirm --force
+
+      - name: Probar el backend real por HTTPS
+        # Mismo cliente HTTP que usa la app. Si esto falla, la APK tampoco
+        # podria registrar ni iniciar sesion: mejor enterarse aca.
+        run: cargo test -p moto_core -- --ignored live_backend --nocapture
+
+      - name: Configurar Android SDK/NDK del runner
+        run: |
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+
+      - name: Compilar APK
+        working-directory: crates/mobile
+        run: |
+          echo "Backend: $MOTOYA_API_BASE_URL"
+          # Sin --target, dx compila para x86_64 (emulador) y la APK no se
+          # instala en un celular real, que es arm64.
+          dx bundle --platform android --release --target aarch64-linux-android
+
+      - name: Icono y nombre de la app
+        # dx 0.7 siempre escribe su icono por defecto en el proyecto Gradle que
+        # genera (no lee `bundle.icon` para Android). Se reemplaza aca por el
+        # de crates/mobile/icons y se vuelve a empaquetar con el mismo Gradle.
+        run: |
+          set -euo pipefail
+          trap 'echo "::error title=Paso icono::fallo en linea $LINENO: $BASH_COMMAND"' ERR
+          echo "::notice title=gradlew encontrados::$(find target/dx -name gradlew | tr '\n' ' ')"
+          PROJ=$(dirname "$(find target/dx -name gradlew -path '*android*' | head -n 1)")
+          echo "::notice title=res::$(ls "$PROJ/app/src/main/res" 2>&1 | tr '\n' ' ')"
+          RES="$PROJ/app/src/main/res"
+          ICONS=crates/mobile/icons
+          test -d "$RES"
+          rm -f "$RES"/mipmap-*/ic_launcher.webp "$RES"/drawable-v24/ic_launcher_foreground.xml \
+                "$RES"/drawable/ic_launcher_background.xml
+          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            mkdir -p "$RES/mipmap-$d"
+            cp "$ICONS/ic_launcher-$d.png" "$RES/mipmap-$d/ic_launcher.png"
+          done
+          mkdir -p "$RES/drawable-nodpi" "$RES/drawable" "$RES/mipmap-anydpi-v26"
+          cp "$ICONS/ic_launcher_background.png" "$RES/drawable-nodpi/ic_launcher_background.png"
+          # Icono adaptativo: la escena completa va como capa frontal (PNG
+          # opaco de 108dp) sobre un fondo de color; no hace falta otro drawable.
+          printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+            '<resources><color name="motoya_icon_bg">#E8641A</color></resources>' \
+            > "$RES/values/motoya_icon.xml"
+          printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+            '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
+            '    <background android:drawable="@color/motoya_icon_bg" />' \
+            '    <foreground android:drawable="@drawable/ic_launcher_background" />' \
+            '</adaptive-icon>' > "$RES/mipmap-anydpi-v26/ic_launcher.xml"
+          sed -i 's#<string name="app_name">[^<]*</string>#<string name="app_name">MotoYa</string>#' \
+            "$RES/values/strings.xml"
+          grep app_name "$RES/values/strings.xml"
+          chmod +x "$PROJ/gradlew"
+          set +e
+          (cd "$PROJ" && ./gradlew assembleDebug --no-daemon -q) > gradle.log 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "::error title=gradle::$(tail -n 30 gradle.log | tr '\n' ' ')"; exit 1; fi
+
+      - name: Firmar APK
+        run: |
+          set -euo pipefail
+          echo "APKs generadas:"
+          find target -name "*.apk" -not -path "*/intermediates/*" -print
+          APK=$(find target -name "*.apk" -not -path "*/intermediates/*" -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)
+          test -n "$APK"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+          keytool -genkeypair -keystore motoya.jks -alias motoya -storepass motoya123 -keypass motoya123 \
+            -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=MotoYa Pruebas"
+          "$BT/zipalign" -f -p 4 "$APK" aligned.apk
+          "$BT/apksigner" sign --ks motoya.jks --ks-pass pass:motoya123 --key-pass pass:motoya123 \
+            --out MotoYa.apk aligned.apk
+          "$BT/apksigner" verify MotoYa.apk
+          PERMS=$("$BT/aapt" dump permissions MotoYa.apk | grep -o "android.permission.[A-Z_]*" | sort -u | tr '\n' ' ')
+          URL_HITS=$(unzip -p MotoYa.apk 'lib/*' | strings -n 10 | grep -c "$MOTOYA_API_BASE_URL" || true)
+          ABIS=$(unzip -l MotoYa.apk 'lib/*' | awk '{print $4}' | grep '^lib/' | cut -d/ -f2 | sort -u | tr '\n' ' ')
+          echo "::notice title=APK lista::backend=$MOTOYA_API_BASE_URL (aparece $URL_HITS veces) | abis=$ABIS | permisos=$PERMS | $(du -h MotoYa.apk | cut -f1)"
+          # Sin la URL dentro del binario la app seguiria apuntando a localhost,
+          # y sin INTERNET Android le niega toda conexion: ambos casos son la
+          # misma "carga infinita" que motivo este workflow.
+          test "$URL_HITS" -gt 0
+          echo "$ABIS" | grep -q "arm64-v8a" || { echo "::error::La APK no incluye arm64-v8a (celulares reales)"; exit 1; }
+          unzip -l MotoYa.apk | grep -q "ic_launcher_background.png" || { echo "::error::La APK no trae el icono de MotoYa"; exit 1; }
+          echo "$PERMS" | grep -q "android.permission.INTERNET" || { echo "::error::La APK no tiene permiso INTERNET"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MotoYa-apk
+          path: MotoYa.apk
+          retention-days: 30
