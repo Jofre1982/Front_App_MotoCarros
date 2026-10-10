@@ -80,7 +80,10 @@ jobs:
         # de crates/mobile/icons y se vuelve a empaquetar con el mismo Gradle.
         run: |
           set -euo pipefail
+          trap 'echo "::error title=Paso icono::fallo en linea $LINENO: $BASH_COMMAND"' ERR
+          echo "::notice title=gradlew encontrados::$(find target/dx -name gradlew | tr '\n' ' ')"
           PROJ=$(dirname "$(find target/dx -name gradlew -path '*android*' | head -n 1)")
+          echo "::notice title=res::$(ls "$PROJ/app/src/main/res" 2>&1 | tr '\n' ' ')"
           RES="$PROJ/app/src/main/res"
           ICONS=crates/mobile/icons
           test -d "$RES"
@@ -104,7 +107,11 @@ jobs:
             "$RES/values/strings.xml"
           grep app_name "$RES/values/strings.xml"
           chmod +x "$PROJ/gradlew"
-          (cd "$PROJ" && ./gradlew assembleDebug --no-daemon -q)
+          set +e
+          (cd "$PROJ" && ./gradlew assembleDebug --no-daemon -q) > gradle.log 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "::error title=gradle::$(tail -n 30 gradle.log | tr '\n' ' ')"; exit 1; fi
 
       - name: Firmar APK
         run: |
