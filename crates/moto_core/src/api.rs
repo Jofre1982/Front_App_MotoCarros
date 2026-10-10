@@ -258,6 +258,22 @@ fn describe_error(err: &(dyn std::error::Error + 'static)) -> String {
     text
 }
 
+/// Decodifica el cuerpo JSON de una respuesta. Si no es JSON valido, el error
+/// dice el codigo HTTP y como empieza el cuerpo: cuando algo entre la app y
+/// Laravel (un firewall del hosting, una pagina de error del servidor web)
+/// responde HTML, "expected value at line 1 column 1" a secas no permite
+/// saber que paso.
+async fn decode_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, String> {
+    let status = response.status();
+    let body = response.text().await.map_err(|err| describe_error(&err))?;
+    serde_json::from_str(&body).map_err(|err| {
+        let snippet: String = body.trim().chars().take(160).collect();
+        format!("HTTP {status}, respuesta no JSON ({err}): {snippet}")
+    })
+}
+
 fn is_valid_email(email: &str) -> bool {
     let Some((local, domain)) = email.split_once('@') else {
         return false;
@@ -1734,7 +1750,17 @@ fn build_http_client_with_timeouts(
     connect: std::time::Duration,
     request: std::time::Duration,
 ) -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    // Sin `Accept: application/json`, Laravel puede responder errores como
+    // HTML; y sin User-Agent algunos firewalls de hosting compartido tratan
+    // la request como un bot y devuelven una pagina de desafio.
+    headers.insert(
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
     reqwest::Client::builder()
+        .user_agent(concat!("MotoYa-App/", env!("CARGO_PKG_VERSION")))
+        .default_headers(headers)
         .connect_timeout(connect)
         .timeout(request)
         .tls_certs_only(bundled_root_certificates())
@@ -1802,26 +1828,20 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<AuthenticatedUser> = response
-                .json()
-                .await
-                .map_err(|err| LoginError::Network(describe_error(&err)))?;
+            let envelope: DataEnvelope<AuthenticatedUser> =
+                decode_json(response).await.map_err(LoginError::Network)?;
             return Ok(envelope.data);
         }
 
         match status.as_u16() {
             401 => {
-                let body: ApiErrorBody = response
-                    .json()
-                    .await
-                    .map_err(|err| LoginError::Network(describe_error(&err)))?;
+                let body: ApiErrorBody =
+                    decode_json(response).await.map_err(LoginError::Network)?;
                 Err(LoginError::InvalidCredentials(body.message))
             }
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
-                    .await
-                    .map_err(|err| LoginError::Network(describe_error(&err)))?;
+                let body: ApiErrorBody =
+                    decode_json(response).await.map_err(LoginError::Network)?;
                 Err(LoginError::Validation(body))
             }
             other => Err(LoginError::Unexpected(other)),
@@ -1865,10 +1885,9 @@ impl ApiClient {
 
         match status.as_u16() {
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| RequestPasswordResetError::Network(describe_error(&err)))?;
+                    .map_err(RequestPasswordResetError::Network)?;
                 Err(RequestPasswordResetError::Validation(body))
             }
             429 => Err(RequestPasswordResetError::RateLimited),
@@ -1914,19 +1933,17 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<AuthenticatedUser> = response
-                .json()
+            let envelope: DataEnvelope<AuthenticatedUser> = decode_json(response)
                 .await
-                .map_err(|err| ConfirmPasswordResetError::Network(describe_error(&err)))?;
+                .map_err(ConfirmPasswordResetError::Network)?;
             return Ok(envelope.data);
         }
 
         match status.as_u16() {
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| ConfirmPasswordResetError::Network(describe_error(&err)))?;
+                    .map_err(ConfirmPasswordResetError::Network)?;
                 Err(ConfirmPasswordResetError::Validation(body))
             }
             other => Err(ConfirmPasswordResetError::Unexpected(other)),
@@ -1978,19 +1995,17 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<AuthenticatedUser> = response
-                .json()
+            let envelope: DataEnvelope<AuthenticatedUser> = decode_json(response)
                 .await
-                .map_err(|err| RegisterError::Network(describe_error(&err)))?;
+                .map_err(RegisterError::Network)?;
             return Ok(envelope.data);
         }
 
         match status.as_u16() {
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| RegisterError::Network(describe_error(&err)))?;
+                    .map_err(RegisterError::Network)?;
                 Err(RegisterError::Validation(body))
             }
             other => Err(RegisterError::Unexpected(other)),
@@ -2055,19 +2070,17 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<AuthenticatedUser> = response
-                .json()
+            let envelope: DataEnvelope<AuthenticatedUser> = decode_json(response)
                 .await
-                .map_err(|err| RegisterError::Network(describe_error(&err)))?;
+                .map_err(RegisterError::Network)?;
             return Ok(envelope.data);
         }
 
         match status.as_u16() {
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| RegisterError::Network(describe_error(&err)))?;
+                    .map_err(RegisterError::Network)?;
                 Err(RegisterError::Validation(body))
             }
             other => Err(RegisterError::Unexpected(other)),
@@ -2094,19 +2107,15 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<AuthToken> = response
-                .json()
-                .await
-                .map_err(|err| RefreshError::Network(describe_error(&err)))?;
+            let envelope: DataEnvelope<AuthToken> =
+                decode_json(response).await.map_err(RefreshError::Network)?;
             return Ok(envelope.data);
         }
 
         match status.as_u16() {
             401 => {
-                let body: ApiErrorBody = response
-                    .json()
-                    .await
-                    .map_err(|err| RefreshError::Network(describe_error(&err)))?;
+                let body: ApiErrorBody =
+                    decode_json(response).await.map_err(RefreshError::Network)?;
                 Err(RefreshError::Unauthorized(body.message))
             }
             429 => Err(RefreshError::RateLimited),
@@ -2198,10 +2207,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<T> = response
-                .json()
+            let envelope: DataEnvelope<T> = decode_json(response)
                 .await
-                .map_err(|err| AuthenticatedRequestError::Network(describe_error(&err)))?;
+                .map_err(AuthenticatedRequestError::Network)?;
             return Ok(GetOutcome::Success(envelope.data));
         }
 
@@ -2344,10 +2352,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<Errand> = response
-                .json()
+            let envelope: DataEnvelope<Errand> = decode_json(response)
                 .await
-                .map_err(|err| CreateErrandError::Network(describe_error(&err)))?;
+                .map_err(CreateErrandError::Network)?;
             return Ok(PostErrandOutcome::Success(envelope.data));
         }
 
@@ -2355,10 +2362,9 @@ impl ApiClient {
             401 => Ok(PostErrandOutcome::Unauthorized),
             403 => Ok(PostErrandOutcome::Forbidden),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| CreateErrandError::Network(describe_error(&err)))?;
+                    .map_err(CreateErrandError::Network)?;
                 Ok(PostErrandOutcome::Validation(body))
             }
             other => Err(CreateErrandError::Unexpected(other)),
@@ -2536,10 +2542,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<Errand> = response
-                .json()
+            let envelope: DataEnvelope<Errand> = decode_json(response)
                 .await
-                .map_err(|err| AcceptErrandError::Network(describe_error(&err)))?;
+                .map_err(AcceptErrandError::Network)?;
             return Ok(AcceptErrandOutcome::Success(envelope.data));
         }
 
@@ -2549,10 +2554,9 @@ impl ApiClient {
             404 => Ok(AcceptErrandOutcome::NotFound),
             409 => Ok(AcceptErrandOutcome::Conflict),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| AcceptErrandError::Network(describe_error(&err)))?;
+                    .map_err(AcceptErrandError::Network)?;
                 Ok(AcceptErrandOutcome::Validation(body))
             }
             other => Err(AcceptErrandError::Unexpected(other)),
@@ -2626,10 +2630,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<Errand> = response
-                .json()
+            let envelope: DataEnvelope<Errand> = decode_json(response)
                 .await
-                .map_err(|err| CompleteErrandError::Network(describe_error(&err)))?;
+                .map_err(CompleteErrandError::Network)?;
             return Ok(CompleteErrandOutcome::Success(envelope.data));
         }
 
@@ -2638,10 +2641,9 @@ impl ApiClient {
             403 => Ok(CompleteErrandOutcome::Forbidden),
             404 => Ok(CompleteErrandOutcome::NotFound),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| CompleteErrandError::Network(describe_error(&err)))?;
+                    .map_err(CompleteErrandError::Network)?;
                 Ok(CompleteErrandOutcome::Validation(body))
             }
             other => Err(CompleteErrandError::Unexpected(other)),
@@ -2717,10 +2719,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<DriverEarningsSummary> = response
-                .json()
+            let envelope: DataEnvelope<DriverEarningsSummary> = decode_json(response)
                 .await
-                .map_err(|err| GetDriverEarningsError::Network(describe_error(&err)))?;
+                .map_err(GetDriverEarningsError::Network)?;
             return Ok(GetEarningsOutcome::Success(envelope.data));
         }
 
@@ -2728,10 +2729,9 @@ impl ApiClient {
             401 => Ok(GetEarningsOutcome::Unauthorized),
             403 => Ok(GetEarningsOutcome::Forbidden),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| GetDriverEarningsError::Network(describe_error(&err)))?;
+                    .map_err(GetDriverEarningsError::Network)?;
                 Ok(GetEarningsOutcome::Validation(body))
             }
             other => Err(GetDriverEarningsError::Unexpected(other)),
@@ -2817,20 +2817,18 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<T> = response
-                .json()
+            let envelope: DataEnvelope<T> = decode_json(response)
                 .await
-                .map_err(|err| UpdateProfileError::Network(describe_error(&err)))?;
+                .map_err(UpdateProfileError::Network)?;
             return Ok(PatchOutcome::Success(envelope.data));
         }
 
         match status.as_u16() {
             401 => Ok(PatchOutcome::Unauthorized),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| UpdateProfileError::Network(describe_error(&err)))?;
+                    .map_err(UpdateProfileError::Network)?;
                 Ok(PatchOutcome::Validation(body))
             }
             other => Err(UpdateProfileError::Unexpected(other)),
@@ -2989,20 +2987,18 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<User> = response
-                .json()
+            let envelope: DataEnvelope<User> = decode_json(response)
                 .await
-                .map_err(|err| ConfirmPhoneVerificationError::Network(describe_error(&err)))?;
+                .map_err(ConfirmPhoneVerificationError::Network)?;
             return Ok(PostOutcome::Success(envelope.data));
         }
 
         match status.as_u16() {
             401 => Ok(PostOutcome::Unauthorized),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| ConfirmPhoneVerificationError::Network(describe_error(&err)))?;
+                    .map_err(ConfirmPhoneVerificationError::Network)?;
                 Ok(PostOutcome::Validation(body))
             }
             other => Err(ConfirmPhoneVerificationError::Unexpected(other)),
@@ -3121,10 +3117,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<UploadedDriverDocument> = response
-                .json()
+            let envelope: DataEnvelope<UploadedDriverDocument> = decode_json(response)
                 .await
-                .map_err(|err| UploadDriverDocumentError::Network(describe_error(&err)))?;
+                .map_err(UploadDriverDocumentError::Network)?;
             return Ok(PostVehicleOutcome::Success(envelope.data));
         }
 
@@ -3132,10 +3127,9 @@ impl ApiClient {
             401 => Ok(PostVehicleOutcome::Unauthorized),
             403 => Ok(PostVehicleOutcome::Forbidden),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| UploadDriverDocumentError::Network(describe_error(&err)))?;
+                    .map_err(UploadDriverDocumentError::Network)?;
                 Ok(PostVehicleOutcome::Validation(body))
             }
             other => Err(UploadDriverDocumentError::Unexpected(other)),
@@ -3233,10 +3227,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<Vehicle> = response
-                .json()
+            let envelope: DataEnvelope<Vehicle> = decode_json(response)
                 .await
-                .map_err(|err| RegisterVehicleError::Network(describe_error(&err)))?;
+                .map_err(RegisterVehicleError::Network)?;
             return Ok(PostVehicleOutcome::Success(envelope.data));
         }
 
@@ -3244,10 +3237,9 @@ impl ApiClient {
             401 => Ok(PostVehicleOutcome::Unauthorized),
             403 => Ok(PostVehicleOutcome::Forbidden),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| RegisterVehicleError::Network(describe_error(&err)))?;
+                    .map_err(RegisterVehicleError::Network)?;
                 Ok(PostVehicleOutcome::Validation(body))
             }
             other => Err(RegisterVehicleError::Unexpected(other)),
@@ -3309,10 +3301,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<Vehicle> = response
-                .json()
+            let envelope: DataEnvelope<Vehicle> = decode_json(response)
                 .await
-                .map_err(|err| GetVehicleError::Network(describe_error(&err)))?;
+                .map_err(GetVehicleError::Network)?;
             return Ok(GetVehicleOutcome::Success(envelope.data));
         }
 
@@ -3429,10 +3420,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<Vehicle> = response
-                .json()
+            let envelope: DataEnvelope<Vehicle> = decode_json(response)
                 .await
-                .map_err(|err| UpdateVehicleError::Network(describe_error(&err)))?;
+                .map_err(UpdateVehicleError::Network)?;
             return Ok(PatchVehicleOutcome::Success(envelope.data));
         }
 
@@ -3441,10 +3431,9 @@ impl ApiClient {
             403 => Ok(PatchVehicleOutcome::Forbidden),
             404 => Ok(PatchVehicleOutcome::NotFound),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| UpdateVehicleError::Network(describe_error(&err)))?;
+                    .map_err(UpdateVehicleError::Network)?;
                 Ok(PatchVehicleOutcome::Validation(body))
             }
             other => Err(UpdateVehicleError::Unexpected(other)),
@@ -3548,10 +3537,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<DriverProfile> = response
-                .json()
+            let envelope: DataEnvelope<DriverProfile> = decode_json(response)
                 .await
-                .map_err(|err| UpdateErrandAvailabilityError::Network(describe_error(&err)))?;
+                .map_err(UpdateErrandAvailabilityError::Network)?;
             return Ok(PatchErrandAvailabilityOutcome::Success(envelope.data));
         }
 
@@ -3560,10 +3548,9 @@ impl ApiClient {
             403 => Ok(PatchErrandAvailabilityOutcome::Forbidden),
             404 => Ok(PatchErrandAvailabilityOutcome::NotFound),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| UpdateErrandAvailabilityError::Network(describe_error(&err)))?;
+                    .map_err(UpdateErrandAvailabilityError::Network)?;
                 Ok(PatchErrandAvailabilityOutcome::Validation(body))
             }
             other => Err(UpdateErrandAvailabilityError::Unexpected(other)),
@@ -3642,20 +3629,18 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<RideEstimate> = response
-                .json()
+            let envelope: DataEnvelope<RideEstimate> = decode_json(response)
                 .await
-                .map_err(|err| EstimateRideError::Network(describe_error(&err)))?;
+                .map_err(EstimateRideError::Network)?;
             return Ok(PostOutcome::Success(envelope.data));
         }
 
         match status.as_u16() {
             401 => Ok(PostOutcome::Unauthorized),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| EstimateRideError::Network(describe_error(&err)))?;
+                    .map_err(EstimateRideError::Network)?;
                 Ok(PostOutcome::Validation(body))
             }
             other => Err(EstimateRideError::Unexpected(other)),
@@ -3735,10 +3720,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<Ride> = response
-                .json()
+            let envelope: DataEnvelope<Ride> = decode_json(response)
                 .await
-                .map_err(|err| RequestRideError::Network(describe_error(&err)))?;
+                .map_err(RequestRideError::Network)?;
             return Ok(PostRideOutcome::Success(envelope.data));
         }
 
@@ -3746,10 +3730,9 @@ impl ApiClient {
             401 => Ok(PostRideOutcome::Unauthorized),
             403 => Ok(PostRideOutcome::Forbidden),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| RequestRideError::Network(describe_error(&err)))?;
+                    .map_err(RequestRideError::Network)?;
                 Ok(PostRideOutcome::Validation(body))
             }
             other => Err(RequestRideError::Unexpected(other)),
@@ -3820,10 +3803,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<RideCancellation> = response
-                .json()
+            let envelope: DataEnvelope<RideCancellation> = decode_json(response)
                 .await
-                .map_err(|err| CancelRideError::Network(describe_error(&err)))?;
+                .map_err(CancelRideError::Network)?;
             return Ok(CancelRideOutcome::Success(envelope.data));
         }
 
@@ -3832,10 +3814,9 @@ impl ApiClient {
             403 => Ok(CancelRideOutcome::Forbidden),
             404 => Ok(CancelRideOutcome::NotFound),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| CancelRideError::Network(describe_error(&err)))?;
+                    .map_err(CancelRideError::Network)?;
                 Ok(CancelRideOutcome::Validation(body))
             }
             other => Err(CancelRideError::Unexpected(other)),
@@ -3909,10 +3890,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<Ride> = response
-                .json()
+            let envelope: DataEnvelope<Ride> = decode_json(response)
                 .await
-                .map_err(|err| AcceptRideError::Network(describe_error(&err)))?;
+                .map_err(AcceptRideError::Network)?;
             return Ok(AcceptRideOutcome::Success(envelope.data));
         }
 
@@ -3922,10 +3902,9 @@ impl ApiClient {
             404 => Ok(AcceptRideOutcome::NotFound),
             409 => Ok(AcceptRideOutcome::Conflict),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| AcceptRideError::Network(describe_error(&err)))?;
+                    .map_err(AcceptRideError::Network)?;
                 Ok(AcceptRideOutcome::Validation(body))
             }
             other => Err(AcceptRideError::Unexpected(other)),
@@ -3997,10 +3976,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<Ride> = response
-                .json()
+            let envelope: DataEnvelope<Ride> = decode_json(response)
                 .await
-                .map_err(|err| StartRideError::Network(describe_error(&err)))?;
+                .map_err(StartRideError::Network)?;
             return Ok(StartRideOutcome::Success(envelope.data));
         }
 
@@ -4009,10 +3987,9 @@ impl ApiClient {
             403 => Ok(StartRideOutcome::Forbidden),
             404 => Ok(StartRideOutcome::NotFound),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| StartRideError::Network(describe_error(&err)))?;
+                    .map_err(StartRideError::Network)?;
                 Ok(StartRideOutcome::Validation(body))
             }
             other => Err(StartRideError::Unexpected(other)),
@@ -4087,10 +4064,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<Ride> = response
-                .json()
+            let envelope: DataEnvelope<Ride> = decode_json(response)
                 .await
-                .map_err(|err| CompleteRideError::Network(describe_error(&err)))?;
+                .map_err(CompleteRideError::Network)?;
             return Ok(CompleteRideOutcome::Success(envelope.data));
         }
 
@@ -4099,10 +4075,9 @@ impl ApiClient {
             403 => Ok(CompleteRideOutcome::Forbidden),
             404 => Ok(CompleteRideOutcome::NotFound),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| CompleteRideError::Network(describe_error(&err)))?;
+                    .map_err(CompleteRideError::Network)?;
                 Ok(CompleteRideOutcome::Validation(body))
             }
             other => Err(CompleteRideError::Unexpected(other)),
@@ -4197,10 +4172,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<RideRating> = response
-                .json()
+            let envelope: DataEnvelope<RideRating> = decode_json(response)
                 .await
-                .map_err(|err| RateDriverError::Network(describe_error(&err)))?;
+                .map_err(RateDriverError::Network)?;
             return Ok(RateDriverOutcome::Success(envelope.data));
         }
 
@@ -4209,10 +4183,9 @@ impl ApiClient {
             403 => Ok(RateDriverOutcome::Forbidden),
             404 => Ok(RateDriverOutcome::NotFound),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| RateDriverError::Network(describe_error(&err)))?;
+                    .map_err(RateDriverError::Network)?;
                 Ok(RateDriverOutcome::Validation(body))
             }
             other => Err(RateDriverError::Unexpected(other)),
@@ -4301,10 +4274,9 @@ impl ApiClient {
             403 => Ok(ShareRideLocationOutcome::Forbidden),
             404 => Ok(ShareRideLocationOutcome::NotFound),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| ShareRideLocationError::Network(describe_error(&err)))?;
+                    .map_err(ShareRideLocationError::Network)?;
                 Ok(ShareRideLocationOutcome::Validation(body))
             }
             other => Err(ShareRideLocationError::Unexpected(other)),
@@ -4375,10 +4347,8 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<Ride> = response
-                .json()
-                .await
-                .map_err(|err| GetRideError::Network(describe_error(&err)))?;
+            let envelope: DataEnvelope<Ride> =
+                decode_json(response).await.map_err(GetRideError::Network)?;
             return Ok(GetRideOutcome::Success(envelope.data));
         }
 
@@ -4455,10 +4425,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            let envelope: DataEnvelope<RideReceipt> = response
-                .json()
+            let envelope: DataEnvelope<RideReceipt> = decode_json(response)
                 .await
-                .map_err(|err| GetReceiptError::Network(describe_error(&err)))?;
+                .map_err(GetReceiptError::Network)?;
             return Ok(GetReceiptOutcome::Success(envelope.data));
         }
 
@@ -4467,10 +4436,9 @@ impl ApiClient {
             403 => Ok(GetReceiptOutcome::Forbidden),
             404 => Ok(GetReceiptOutcome::NotFound),
             422 => {
-                let body: ApiErrorBody = response
-                    .json()
+                let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(|err| GetReceiptError::Network(describe_error(&err)))?;
+                    .map_err(GetReceiptError::Network)?;
                 Ok(GetReceiptOutcome::Validation(body))
             }
             other => Err(GetReceiptError::Unexpected(other)),
@@ -4506,10 +4474,9 @@ impl ApiClient {
         let status = response.status();
 
         if status.is_success() {
-            return response
-                .json()
+            return decode_json(response)
                 .await
-                .map_err(|err| BroadcastAuthError::Network(describe_error(&err)));
+                .map_err(BroadcastAuthError::Network);
         }
 
         match status.as_u16() {
