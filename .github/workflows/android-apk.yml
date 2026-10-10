@@ -96,7 +96,7 @@ jobs:
           mkdir -p "$RES/drawable-nodpi" "$RES/drawable" "$RES/mipmap-anydpi-v26"
           cp "$ICONS/ic_launcher_background.png" "$RES/drawable-nodpi/ic_launcher_background.png"
           printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
-            '<color xmlns:android="http://schemas.android.com/apk/res/android" android:color="#00000000" />' \
+            '<shape xmlns:android="http://schemas.android.com/apk/res/android"><solid android:color="#00000000" /></shape>' \
             > "$RES/drawable/ic_launcher_foreground.xml"
           printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
             '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
