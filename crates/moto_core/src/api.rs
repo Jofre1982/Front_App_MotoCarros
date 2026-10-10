@@ -1723,8 +1723,26 @@ fn build_http_client_with_timeouts(
     reqwest::Client::builder()
         .connect_timeout(connect)
         .timeout(request)
+        .tls_certs_only(bundled_root_certificates())
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+        .expect("el cliente HTTP con raices webpki siempre se puede construir")
+}
+
+/// Raices de confianza de Mozilla incluidas en el binario.
+///
+/// Se usan en vez del verificador del sistema operativo que reqwest 0.13
+/// trae por defecto (`rustls-platform-verifier`): en Android ese verificador
+/// exige inicializarse via JNI desde el lado Java, cosa que el shell de Dioxus
+/// no hace, y sin eso entra en panico en el primer handshake TLS. El panico
+/// mata la tarea de la request en silencio, asi que la pantalla se queda en
+/// "cargando" para siempre (el timeout no alcanza a disparar). Con raices
+/// propias el comportamiento es el mismo en todas las plataformas nativas.
+#[cfg(not(target_arch = "wasm32"))]
+fn bundled_root_certificates() -> Vec<reqwest::Certificate> {
+    webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .filter_map(|der| reqwest::Certificate::from_der(der.as_ref()).ok())
+        .collect()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -4499,6 +4517,36 @@ mod tests {
     fn new_stores_base_url() {
         let client = ApiClient::new("https://api.example.com");
         assert_eq!(client.base_url, "https://api.example.com");
+    }
+
+    #[test]
+    fn native_client_trusts_bundled_root_certificates() {
+        // Si la lista quedara vacia, toda request HTTPS fallaria la
+        // verificacion del certificado del backend.
+        assert!(bundled_root_certificates().len() > 100);
+        let _ = build_http_client();
+    }
+
+    /// Prueba contra el backend real: la corre el workflow de la APK
+    /// (`cargo test -p moto_core -- --ignored live_backend`), nunca el CI
+    /// por PR. Un 401 por credenciales falsas prueba de una vez el handshake
+    /// TLS con las raices incluidas, que el backend responde y que su base de
+    /// datos esta accesible (el login consulta la tabla `users`).
+    #[tokio::test]
+    #[ignore = "requiere red y el backend desplegado"]
+    async fn live_backend_answers_login_over_https() {
+        let base_url = std::env::var("MOTOYA_API_BASE_URL")
+            .unwrap_or_else(|_| "https://motocarroya.com".to_string());
+        let client = ApiClient::new(base_url);
+
+        let result = client
+            .login("no-existe@motoya.invalid", "clave-falsa-123")
+            .await;
+
+        assert!(
+            matches!(result, Err(LoginError::InvalidCredentials(_))),
+            "se esperaba 401 por credenciales invalidas, llego: {result:?}"
+        );
     }
 
     #[tokio::test]

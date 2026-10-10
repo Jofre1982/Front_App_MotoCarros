@@ -13,3 +13,10 @@ ewebsock = { version = "0.8", features = ["tls"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
+
+# Raices de confianza para el TLS del cliente HTTP nativo (ver
+# `build_http_client` en src/api.rs). Con el verificador por defecto de
+# reqwest 0.13 (rustls-platform-verifier), en Android toda request HTTPS
+# entra en panico porque exige una inicializacion JNI que la app no hace.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+webpki-root-certs = "1"

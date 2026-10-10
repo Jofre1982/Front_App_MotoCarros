@@ -55,6 +55,11 @@ jobs:
       - name: Instalar Dioxus CLI (misma version que la libreria)
         run: cargo binstall dioxus-cli@0.7.10 --no-confirm --force
 
+      - name: Probar el backend real por HTTPS
+        # Mismo cliente HTTP que usa la app. Si esto falla, la APK tampoco
+        # podria registrar ni iniciar sesion: mejor enterarse aca.
+        run: cargo test -p moto_core -- --ignored live_backend --nocapture
+
       - name: Configurar Android SDK/NDK del runner
         run: |
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
