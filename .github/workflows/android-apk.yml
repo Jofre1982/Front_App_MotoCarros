@@ -11,6 +11,12 @@ name: APK Android
 # crates/mobile/src/main.rs). Sin ella la app apunta a http://localhost:8000
 # y en el celular nunca llega al servidor.
 #
+# El tiempo real (solicitudes de viaje al conductor, seguimiento del viaje)
+# se fija igual, con MOTOYA_WS_URL. Produccion usa Pusher (el hosting
+# compartido no puede correr Reverb); la URL lleva la key publica de la app
+# de Pusher, nunca el secret. Sin ella la APK compila, pero los viajes no
+# funcionan: el conductor no recibe solicitudes.
+#
 # No es parte del CI por PR (ver .claude/CLAUDE.md): solo corre a mano, o en
 # un PR que cambie este mismo archivo, para poder probarlo.
 
@@ -21,6 +27,10 @@ on:
         description: "URL del backend que usara la app"
         required: true
         default: "https://motocarroya.com"
+      ws_url:
+        description: "URL de WebSockets para tiempo real (Pusher)"
+        required: true
+        default: "wss://ws-us2.pusher.com/app/2a4285b887f91cb887e0?protocol=7&client=rust&version=1.0"
   pull_request:
     paths:
       - ".github/workflows/android-apk.yml"
@@ -28,6 +38,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   MOTOYA_API_BASE_URL: ${{ github.event.inputs.api_base_url || 'https://motocarroya.com' }}
+  MOTOYA_WS_URL: ${{ github.event.inputs.ws_url || 'wss://ws-us2.pusher.com/app/2a4285b887f91cb887e0?protocol=7&client=rust&version=1.0' }}
 
 jobs:
   apk:
@@ -70,6 +81,7 @@ jobs:
         working-directory: crates/mobile
         run: |
           echo "Backend: $MOTOYA_API_BASE_URL"
+          echo "Tiempo real: $MOTOYA_WS_URL"
           # Sin --target, dx compila para x86_64 (emulador) y la APK no se
           # instala en un celular real, que es arm64.
           dx bundle --platform android --release --target aarch64-linux-android
@@ -131,12 +143,15 @@ jobs:
           "$BT/apksigner" verify MotoYa.apk
           PERMS=$("$BT/aapt" dump permissions MotoYa.apk | grep -o "android.permission.[A-Z_]*" | sort -u | tr '\n' ' ')
           URL_HITS=$(unzip -p MotoYa.apk 'lib/*' | strings -n 10 | grep -c "$MOTOYA_API_BASE_URL" || true)
+          WS_HITS=$(unzip -p MotoYa.apk 'lib/*' | strings -n 10 | grep -cF "$MOTOYA_WS_URL" || true)
           ABIS=$(unzip -l MotoYa.apk 'lib/*' | awk '{print $4}' | grep '^lib/' | cut -d/ -f2 | sort -u | tr '\n' ' ')
-          echo "::notice title=APK lista::backend=$MOTOYA_API_BASE_URL (aparece $URL_HITS veces) | abis=$ABIS | permisos=$PERMS | $(du -h MotoYa.apk | cut -f1)"
+          echo "::notice title=APK lista::backend=$MOTOYA_API_BASE_URL (aparece $URL_HITS veces) | ws=$WS_HITS | abis=$ABIS | permisos=$PERMS | $(du -h MotoYa.apk | cut -f1)"
           # Sin la URL dentro del binario la app seguiria apuntando a localhost,
           # y sin INTERNET Android le niega toda conexion: ambos casos son la
           # misma "carga infinita" que motivo este workflow.
           test "$URL_HITS" -gt 0
+          # Sin la URL de tiempo real el conductor nunca recibe solicitudes.
+          test "$WS_HITS" -gt 0 || { echo "::error::La APK no trae MOTOYA_WS_URL (tiempo real)"; exit 1; }
           echo "$ABIS" | grep -q "arm64-v8a" || { echo "::error::La APK no incluye arm64-v8a (celulares reales)"; exit 1; }
           unzip -l MotoYa.apk | grep -q "ic_launcher_background.png" || { echo "::error::La APK no trae el icono de MotoYa"; exit 1; }
           echo "$PERMS" | grep -q "android.permission.INTERNET" || { echo "::error::La APK no tiene permiso INTERNET"; exit 1; }
