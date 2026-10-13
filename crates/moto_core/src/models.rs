@@ -407,18 +407,90 @@ pub enum RideStatus {
     Cancelled,
 }
 
-/// Body de `POST /api/v1/rides`
-/// (`openapi.yaml#/components/schemas/RideRequest`).
+/// Modalidad de un viaje (`openapi.yaml#/components/schemas/Ride.mode`,
+/// historia #95 del backend, issue #92 de este repo).
 ///
-/// Misma forma que `RideEstimateRequestPayload` a proposito (el backend lo
-/// documenta asi para que la app mande el mismo cuerpo con el que estimo la
-/// tarifa), pero es un tipo aparte porque son la entrada de dos operaciones
-/// distintas que pueden divergir mas adelante (issue #14).
-#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+/// - `Catalog`: destino del catalogo de sitios con precio fijo (historia #87).
+/// - `PickupOnly`: solo punto de recogida; el destino es texto libre y el
+///   precio lo acuerdan pasajero y conductor, que lo registra al aceptar.
+///
+/// `Default` es `Catalog`: un backend anterior a la historia #95 no manda
+/// `mode`, y todos sus viajes son de catalogo.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RideMode {
+    #[default]
+    Catalog,
+    PickupOnly,
+}
+
+/// Body de `POST /api/v1/rides`
+/// (`openapi.yaml#/components/schemas/CreateRideRequest`).
+///
+/// Viaje de catalogo: misma forma que `RideEstimateRequestPayload` a
+/// proposito (el backend lo documenta asi para que la app mande el mismo
+/// cuerpo con el que estimo la tarifa), pero es un tipo aparte porque son la
+/// entrada de dos operaciones distintas (issue #14).
+///
+/// Viaje solo recogida (issue #92): `mode: pickup_only` con
+/// `destination_text` y sin `destination_site_id`. Los campos que no aplican
+/// se omiten del JSON en vez de mandarse en `null`, asi el cuerpo de un
+/// viaje de catalogo queda identico al de antes de la historia #95.
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RideRequestPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<RideMode>,
     pub origin: Coordinates,
-    pub destination_site_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_site_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_text: Option<String>,
     pub passenger_count: u8,
+}
+
+impl RideRequestPayload {
+    /// Viaje con destino del catalogo y precio fijo.
+    pub fn catalog(origin: Coordinates, destination_site_id: u64, passenger_count: u8) -> Self {
+        Self {
+            mode: None,
+            origin,
+            destination_site_id: Some(destination_site_id),
+            destination_text: None,
+            passenger_count,
+        }
+    }
+
+    /// Viaje solo recogida (issue #92). El texto se manda sin espacios
+    /// sobrantes, igual que lo guarda el backend.
+    pub fn pickup_only(origin: Coordinates, destination_text: &str, passenger_count: u8) -> Self {
+        Self {
+            mode: Some(RideMode::PickupOnly),
+            origin,
+            destination_site_id: None,
+            destination_text: Some(destination_text.trim().to_string()),
+            passenger_count,
+        }
+    }
+}
+
+/// Body de `POST /api/v1/rides/{id}/accept`
+/// (`openapi.yaml#/components/schemas/AcceptRideRequest`, historia #95 del
+/// backend). Solo se manda para un viaje solo recogida: el precio que el
+/// conductor acordo con el pasajero, mismo criterio que
+/// `AcceptErrandPayload` (entero >= 1 en la unidad minima de la moneda).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct AcceptRidePayload {
+    pub agreed_price: i64,
+}
+
+/// Texto de "a donde va" de un viaje para mostrar: el sitio del catalogo o
+/// lo que escribio el pasajero en un viaje solo recogida.
+fn ride_destination_label(site: Option<&DestinationSite>, text: Option<&str>) -> String {
+    match (site, text) {
+        (Some(site), _) => site.name.clone(),
+        (None, Some(text)) if !text.trim().is_empty() => text.to_string(),
+        _ => "Sin destino".to_string(),
+    }
 }
 
 /// `openapi.yaml#/components/schemas/RideDriver` — el conductor asignado a un
@@ -523,15 +595,27 @@ pub struct Payment {
 /// Desde la historia #87 del backend (issue #74 de este repo) ya no trae
 /// `distance_meters`/`duration_seconds`: el precio es fijo por sitio, no
 /// depende del trayecto recorrido. Agrega `passenger_count`.
+///
+/// Desde la historia #95 del backend (issue #92 de este repo) un viaje puede
+/// ser solo recogida: `destination` y `estimated_fare` llegan en `null`, el
+/// destino es `destination_text` y el precio es `agreed_price` una vez
+/// aceptado. `mode`, `destination_text` y `agreed_price` tienen
+/// `#[serde(default)]` para seguir leyendo un backend anterior a #95.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Ride {
     pub id: u64,
     pub status: RideStatus,
+    #[serde(default)]
+    pub mode: RideMode,
     pub origin: Coordinates,
-    pub destination: DestinationSite,
+    pub destination: Option<DestinationSite>,
+    #[serde(default)]
+    pub destination_text: Option<String>,
     pub passenger_count: u8,
     pub currency: String,
-    pub estimated_fare: i64,
+    pub estimated_fare: Option<i64>,
+    #[serde(default)]
+    pub agreed_price: Option<i64>,
     pub driver: Option<RideDriver>,
     pub requested_at: String,
     pub started_at: Option<String>,
@@ -547,6 +631,36 @@ pub struct Ride {
 /// conductor asignado (historia #22, fuera de alcance de #15): ese caso no
 /// cancela el viaje, solo lo devuelve al pool sin conductor. `#[serde(flatten)]`
 /// reutiliza `Ride` en vez de repetir sus campos.
+impl Ride {
+    pub fn is_pickup_only(&self) -> bool {
+        self.mode == RideMode::PickupOnly
+    }
+
+    /// A donde va: el sitio, o el texto del pasajero en un viaje solo
+    /// recogida.
+    pub fn destination_label(&self) -> String {
+        ride_destination_label(self.destination.as_ref(), self.destination_text.as_deref())
+    }
+
+    /// El monto que vale el viaje hasta donde se sabe: el cobrado si ya se
+    /// completo, si no el acordado (solo recogida) o el estimado (catalogo).
+    /// `None` en un viaje solo recogida que nadie acepto todavia.
+    pub fn fare(&self) -> Option<i64> {
+        self.final_fare
+            .or(self.agreed_price)
+            .or(self.estimated_fare)
+    }
+
+    /// El precio para mostrar, con su moneda, o el aviso de que se acuerda
+    /// con el conductor.
+    pub fn fare_label(&self) -> String {
+        match self.fare() {
+            Some(amount) => format!("{} {}", self.currency, amount),
+            None => "A acordar con el conductor".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RideCancellation {
     #[serde(flatten)]
@@ -640,14 +754,42 @@ pub struct DriverEarningsSummary {
 ///
 /// Desde la historia #87 del backend (issue #74 de este repo) `destination`
 /// es un sitio del catalogo, no coordenadas — el mismo cambio que `Ride`.
+///
+/// Desde la historia #95 del backend (issue #92) tambien llega un viaje solo
+/// recogida: `destination` y `estimated_fare` en `null`, con
+/// `destination_text`. Ambos `Option` a proposito: un `data` que no
+/// deserializa se descarta en silencio en `apply_nearby_ride_event`, asi que
+/// un modelo desalineado haria que el conductor deje de ver solicitudes sin
+/// ningun error visible.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct NearbyRideRequest {
     pub ride_id: u64,
+    #[serde(default)]
+    pub mode: RideMode,
     pub origin: Coordinates,
-    pub destination: DestinationSite,
+    pub destination: Option<DestinationSite>,
+    #[serde(default)]
+    pub destination_text: Option<String>,
     pub passenger_count: u8,
     pub currency: String,
-    pub estimated_fare: i64,
+    pub estimated_fare: Option<i64>,
+}
+
+impl NearbyRideRequest {
+    pub fn is_pickup_only(&self) -> bool {
+        self.mode == RideMode::PickupOnly
+    }
+
+    pub fn destination_label(&self) -> String {
+        ride_destination_label(self.destination.as_ref(), self.destination_text.as_deref())
+    }
+
+    pub fn fare_label(&self) -> String {
+        match self.estimated_fare {
+            Some(amount) if !self.is_pickup_only() => format!("{} {}", self.currency, amount),
+            _ => "Precio a acordar con el pasajero".to_string(),
+        }
+    }
 }
 
 /// Payload del evento `ride.unavailable` sobre el mismo canal `driver.{id}`:
@@ -724,6 +866,11 @@ impl RideTracking {
 struct RideStatusChangedEvent {
     status: RideStatus,
     driver_id: Option<u64>,
+    /// Historia #95 del backend: el precio acordado de un viaje solo
+    /// recogida, que llega en el mismo aviso de que lo aceptaron. Ausente en
+    /// un backend anterior; `null` en un viaje de catalogo.
+    #[serde(default)]
+    agreed_price: Option<i64>,
 }
 
 /// Payload del evento `location.updated` sobre el mismo canal: la posicion
@@ -765,6 +912,9 @@ pub fn apply_ride_tracking_event(tracking: &mut RideTracking, event_name: &str, 
         "status.changed" => {
             if let Ok(event) = serde_json::from_str::<RideStatusChangedEvent>(data) {
                 tracking.ride.status = event.status;
+                if event.agreed_price.is_some() {
+                    tracking.ride.agreed_price = event.agreed_price;
+                }
                 match event.driver_id {
                     None => tracking.ride.driver = None,
                     Some(id) => {
@@ -1062,14 +1212,14 @@ mod tests {
 
     #[test]
     fn ride_request_payload_serializes_origin_and_destination() {
-        let payload = RideRequestPayload {
-            origin: Coordinates {
+        let payload = RideRequestPayload::catalog(
+            Coordinates {
                 latitude: 4.710989,
                 longitude: -74.072092,
             },
-            destination_site_id: 1,
-            passenger_count: 2,
-        };
+            1,
+            2,
+        );
 
         let json = serde_json::to_value(payload).unwrap();
 
@@ -1107,7 +1257,12 @@ mod tests {
 
         assert_eq!(envelope.data.id, 1);
         assert_eq!(envelope.data.status, RideStatus::Requested);
-        assert_eq!(envelope.data.estimated_fare, 8850);
+        assert_eq!(envelope.data.estimated_fare, Some(8850));
+        // Sin `mode`/`destination_text`/`agreed_price` (backend anterior a la
+        // historia #95): es un viaje de catalogo.
+        assert_eq!(envelope.data.mode, RideMode::Catalog);
+        assert_eq!(envelope.data.destination_text, None);
+        assert_eq!(envelope.data.agreed_price, None);
         assert_eq!(envelope.data.driver, None);
         assert_eq!(envelope.data.started_at, None);
         assert_eq!(envelope.data.payment, None);
@@ -1354,14 +1509,15 @@ mod tests {
         assert_eq!(request.ride_id, 7);
         assert_eq!(
             request.destination,
-            DestinationSite {
+            Some(DestinationSite {
                 site_id: 1,
                 name: "Casco urbano".to_string(),
-            }
+            })
         );
+        assert_eq!(request.mode, RideMode::Catalog);
         assert_eq!(request.passenger_count, 2);
         assert_eq!(request.currency, "COP");
-        assert_eq!(request.estimated_fare, 8850);
+        assert_eq!(request.estimated_fare, Some(8850));
         assert_eq!(request.origin.latitude, 4.710989);
     }
 
@@ -1465,13 +1621,16 @@ mod tests {
                 latitude: 4.710989,
                 longitude: -74.072092,
             },
-            destination: DestinationSite {
+            mode: RideMode::Catalog,
+            destination: Some(DestinationSite {
                 site_id: 1,
                 name: "Casco urbano".to_string(),
-            },
+            }),
+            destination_text: None,
             passenger_count: 1,
             currency: "COP".to_string(),
-            estimated_fare: 8850,
+            estimated_fare: Some(8850),
+            agreed_price: None,
             driver: None,
             requested_at: "2026-07-31T14:03:21+00:00".to_string(),
             started_at: None,
@@ -1615,5 +1774,124 @@ mod tests {
         apply_ride_tracking_event(&mut tracking, "location.updated", "not json at all");
 
         assert_eq!(tracking, RideTracking::new(sample_tracked_ride()));
+    }
+
+    #[test]
+    fn pickup_only_payload_sends_mode_and_text_without_site() {
+        let payload = RideRequestPayload::pickup_only(
+            Coordinates {
+                latitude: 3.865,
+                longitude: -67.923,
+            },
+            "  al hospital  ",
+            1,
+        );
+
+        assert_eq!(
+            serde_json::to_value(payload).unwrap(),
+            serde_json::json!({
+                "mode": "pickup_only",
+                "origin": {"latitude": 3.865, "longitude": -67.923},
+                "destination_text": "al hospital",
+                "passenger_count": 1,
+            })
+        );
+    }
+
+    #[test]
+    fn deserializes_a_pickup_only_ride_with_its_agreed_price() {
+        let json = r#"{
+            "id": 9,
+            "status": "accepted",
+            "mode": "pickup_only",
+            "origin": {"latitude": 3.865, "longitude": -67.923},
+            "destination": null,
+            "destination_text": "Al hospital",
+            "passenger_count": 1,
+            "currency": "COP",
+            "estimated_fare": null,
+            "agreed_price": 6000,
+            "driver": {"id": 3, "name": "Carlos"},
+            "requested_at": "2026-10-13T14:03:21+00:00",
+            "started_at": null,
+            "completed_at": null,
+            "final_fare": null,
+            "payment": null
+        }"#;
+
+        let ride: Ride = serde_json::from_str(json).unwrap();
+
+        assert!(ride.is_pickup_only());
+        assert_eq!(ride.destination, None);
+        assert_eq!(ride.destination_label(), "Al hospital");
+        assert_eq!(ride.estimated_fare, None);
+        assert_eq!(ride.fare(), Some(6000));
+        assert_eq!(ride.fare_label(), "COP 6000");
+    }
+
+    #[test]
+    fn a_pickup_only_ride_without_driver_has_no_price_yet() {
+        let mut ride = sample_tracked_ride();
+        ride.mode = RideMode::PickupOnly;
+        ride.destination = None;
+        ride.destination_text = Some("Al puerto".to_string());
+        ride.estimated_fare = None;
+
+        assert_eq!(ride.fare(), None);
+        assert_eq!(ride.fare_label(), "A acordar con el conductor");
+        assert_eq!(ride.destination_label(), "Al puerto");
+    }
+
+    #[test]
+    fn a_catalog_ride_shows_the_site_and_the_fixed_fare() {
+        let ride = sample_tracked_ride();
+
+        assert!(!ride.is_pickup_only());
+        assert_eq!(ride.destination_label(), "Casco urbano");
+        assert_eq!(ride.fare_label(), "COP 8850");
+    }
+
+    #[test]
+    fn apply_nearby_ride_event_keeps_a_pickup_only_request() {
+        let mut requests = Vec::new();
+        let data = r#"{
+            "ride_id": 11,
+            "mode": "pickup_only",
+            "origin": {"latitude": 3.865, "longitude": -67.923},
+            "destination": null,
+            "destination_text": "Casa de mi mama, barrio La Esperanza",
+            "passenger_count": 2,
+            "currency": "COP",
+            "estimated_fare": null
+        }"#;
+
+        apply_nearby_ride_event(&mut requests, "ride.requested", data);
+
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].is_pickup_only());
+        assert_eq!(
+            requests[0].destination_label(),
+            "Casa de mi mama, barrio La Esperanza"
+        );
+        assert_eq!(requests[0].fare_label(), "Precio a acordar con el pasajero");
+    }
+
+    #[test]
+    fn apply_ride_tracking_event_records_the_agreed_price_of_a_pickup_only_ride() {
+        let mut ride = sample_tracked_ride();
+        ride.mode = RideMode::PickupOnly;
+        ride.destination = None;
+        ride.estimated_fare = None;
+        let mut tracking = RideTracking::new(ride);
+
+        apply_ride_tracking_event(
+            &mut tracking,
+            "status.changed",
+            r#"{"status": "accepted", "driver_id": 42, "agreed_price": 6500}"#,
+        );
+
+        assert_eq!(tracking.ride.status, RideStatus::Accepted);
+        assert_eq!(tracking.ride.agreed_price, Some(6500));
+        assert_eq!(tracking.ride.fare_label(), "COP 6500");
     }
 }

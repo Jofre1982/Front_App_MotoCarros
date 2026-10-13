@@ -359,7 +359,12 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
             if let Some(ride) = accepted_ride() {
                 div { class: "nearby-ride-accepted",
                     p { "Aceptaste el viaje." }
-                    p { "Tarifa estimada: {ride.currency} {ride.estimated_fare}" }
+                    p { "Destino: {ride.destination_label()}" }
+                    if ride.is_pickup_only() {
+                        p { "Precio acordado: {ride.fare_label()}" }
+                    } else {
+                        p { "Tarifa estimada: {ride.fare_label()}" }
+                    }
                     if ride.status == RideStatus::Accepted {
                         StartRideButton {
                             ride_id: ride.id,
@@ -460,14 +465,27 @@ fn NearbyRideRow(props: NearbyRideRowProps) -> Element {
 
     let mut is_accepting = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
+    // Viaje solo recogida (issue #92): el conductor registra el precio que
+    // acordo con el pasajero antes de aceptar, mismo criterio que
+    // `NearbyErrandRow` (`nearby_errands.rs`).
+    let mut agreed_price = use_signal(String::new);
 
     let ride_id = props.request.ride_id;
+    let is_pickup_only = props.request.is_pickup_only();
     let on_accepted = props.on_accepted;
     let on_unavailable = props.on_unavailable;
 
     let on_accept_click = move |_| {
         let Some(token) = session.token() else {
             return;
+        };
+        let price = if is_pickup_only {
+            match agreed_price().trim().parse::<i64>() {
+                Ok(price) if price >= 1 => Some(price),
+                _ => return,
+            }
+        } else {
+            None
         };
         let api_client = api_client.clone();
         let storage = storage.clone();
@@ -476,7 +494,7 @@ fn NearbyRideRow(props: NearbyRideRowProps) -> Element {
             is_accepting.set(true);
             error.set(None);
 
-            match api_client.accept_ride(&token, ride_id).await {
+            match api_client.accept_ride(&token, ride_id, price).await {
                 Ok(fetch) => {
                     if let Some(refreshed) = fetch.refreshed_token {
                         session.update_token(refreshed, storage.as_ref());
@@ -498,16 +516,38 @@ fn NearbyRideRow(props: NearbyRideRowProps) -> Element {
         });
     };
 
+    let price_is_valid = !is_pickup_only
+        || agreed_price()
+            .trim()
+            .parse::<i64>()
+            .is_ok_and(|price| price >= 1);
+
     rsx! {
-        li { class: "nearby-ride-request",
+        li {
+            class: if is_pickup_only { "nearby-ride-request nearby-ride-request-pickup-only" } else { "nearby-ride-request" },
+            if is_pickup_only {
+                p { class: "nearby-ride-mode-badge", "Solo recogida · precio a acordar" }
+            }
             p { "Origen: {props.request.origin.latitude}, {props.request.origin.longitude}" }
-            p { "Destino: {props.request.destination.name}" }
+            p { "Destino: {props.request.destination_label()}" }
             p { "Pasajeros: {props.request.passenger_count}" }
-            p { "Tarifa estimada: {props.request.currency} {props.request.estimated_fare}" }
+            if is_pickup_only {
+                label { r#for: "ride-{ride_id}-price", "Precio acordado ({props.request.currency})" }
+                input {
+                    id: "ride-{ride_id}-price",
+                    r#type: "number",
+                    min: "1",
+                    disabled: is_accepting(),
+                    value: "{agreed_price}",
+                    oninput: move |event| agreed_price.set(event.value()),
+                }
+            } else {
+                p { "Tarifa estimada: {props.request.fare_label()}" }
+            }
             button {
                 r#type: "button",
                 class: "nearby-ride-accept-button",
-                disabled: is_accepting(),
+                disabled: is_accepting() || !price_is_valid,
                 onclick: on_accept_click,
                 if is_accepting() {
                     "Aceptando..."

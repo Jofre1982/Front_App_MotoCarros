@@ -50,6 +50,14 @@
 //! (issue #74) el mapa de seguimiento ya no marca el destino: un sitio no
 //! tiene coordenadas, solo nombre — el nombre se muestra aparte como texto.
 //!
+//! Desde la historia #95 del backend (issue #92 de este repo) el pasajero
+//! elige ademas la modalidad: "Viaje con destino y precio fijo" (el flujo de
+//! arriba, sin cambios) o "Solo recogida", donde marca solo el punto de
+//! recogida y escribe a donde va (`ApiClient::request_pickup_only_ride`).
+//! Esa modalidad no tiene estimado: el boton pide el viaje directo, y el
+//! seguimiento muestra "A acordar con el conductor" hasta que lo aceptan y
+//! llega `agreed_price` (en `GET /rides/{id}` y en `status.changed`).
+//!
 //! Una vez `completed`, el pasajero ve el resultado del cobro leyendo
 //! `Ride::payment` (historia #24) -- el cobro mismo ya ocurrio de forma
 //! sincronica dentro de `POST /api/v1/rides/{ride}/complete` (issue #23), asi
@@ -67,8 +75,8 @@ use moto_core::api::{
     RequestRideError,
 };
 use moto_core::models::{
-    Coordinates, PaymentStatus, Ride, RideCancellation, RideEstimate, RideStatus, RideTracking,
-    Site, apply_ride_tracking_event,
+    Coordinates, PaymentStatus, Ride, RideCancellation, RideEstimate, RideMode, RideStatus,
+    RideTracking, Site, apply_ride_tracking_event,
 };
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
@@ -106,6 +114,8 @@ pub fn RideEstimateScreen() -> Element {
     let mut has_fetched_sites = use_signal(|| false);
 
     let mut origin = use_signal(|| None::<(f64, f64)>);
+    let mut ride_mode = use_signal(RideMode::default);
+    let mut destination_text = use_signal(String::new);
     let mut destination_site_id = use_signal(|| None::<u64>);
     let mut passenger_count = use_signal(|| 1u8);
     let mut estimate_error = use_signal(|| None::<EstimateRideError>);
@@ -261,6 +271,59 @@ pub fn RideEstimateScreen() -> Element {
         }
     };
 
+    // Viaje solo recogida (issue #92): sin estimado, se pide directo con el
+    // texto del destino. Un error (p.ej. un 422) se muestra sin borrar lo
+    // escrito: `destination_text` solo se limpia al volver al inicio.
+    let on_pickup_only_request_click = {
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+        move |_| {
+            let Some(token) = session.token() else {
+                return;
+            };
+            let Some((origin_lat, origin_lng)) = origin() else {
+                return;
+            };
+            let text = destination_text();
+            if text.trim().is_empty() {
+                return;
+            }
+            let count = passenger_count();
+            let api_client = api_client.clone();
+            let storage = storage.clone();
+
+            spawn(async move {
+                is_requesting.set(true);
+                ride_error.set(None);
+
+                let origin_coords = Coordinates {
+                    latitude: origin_lat,
+                    longitude: origin_lng,
+                };
+
+                match api_client
+                    .request_pickup_only_ride(&token, origin_coords, &text, count)
+                    .await
+                {
+                    Ok(fetch) => {
+                        if let Some(refreshed) = fetch.refreshed_token {
+                            session.update_token(refreshed, storage.as_ref());
+                        }
+                        requested_ride.set(Some(fetch.data));
+                    }
+                    Err(RequestRideError::SessionExpired) => {
+                        session.logout(storage.as_ref());
+                    }
+                    Err(err) => {
+                        ride_error.set(Some(err));
+                    }
+                }
+
+                is_requesting.set(false);
+            });
+        }
+    };
+
     let on_cancel_click = move |_| {
         let Some(token) = session.token() else {
             return;
@@ -306,6 +369,8 @@ pub fn RideEstimateScreen() -> Element {
         cancel_error.set(None);
         origin.set(None);
         destination_site_id.set(None);
+        destination_text.set(String::new());
+        ride_mode.set(RideMode::default());
         passenger_count.set(1);
     };
 
@@ -322,6 +387,8 @@ pub fn RideEstimateScreen() -> Element {
         .collect();
 
     let can_estimate = origin().is_some() && destination_site_id().is_some();
+    let is_pickup_only = ride_mode() == RideMode::PickupOnly;
+    let can_request_pickup_only = origin().is_some() && !destination_text().trim().is_empty();
 
     if let Some(cancellation) = cancellation_result() {
         // Confirmacion explicita de la penalizacion (issue #21) antes de
@@ -368,11 +435,16 @@ pub fn RideEstimateScreen() -> Element {
                 p { class: "ride-request-status", "{ride_status_label(ride.status)}" }
                 dl { class: "ride-request-result",
                     dt { "Destino" }
-                    dd { "{ride.destination.name}" }
+                    dd { "{ride.destination_label()}" }
                     dt { "Pasajeros" }
                     dd { "{ride.passenger_count}" }
-                    dt { "Tarifa estimada" }
-                    dd { "{ride.currency} {ride.estimated_fare}" }
+                    if ride.is_pickup_only() {
+                        dt { "Precio" }
+                        dd { class: "ride-request-agreed-price", "{ride.fare_label()}" }
+                    } else {
+                        dt { "Tarifa estimada" }
+                        dd { "{ride.fare_label()}" }
+                    }
                 }
                 if is_cancellable {
                     button {
@@ -421,9 +493,42 @@ pub fn RideEstimateScreen() -> Element {
 
     rsx! {
         div { class: "ride-estimate-screen",
-            h2 { "Ver tarifa estimada" }
+            h2 { if is_pickup_only { "Pedir motocarro" } else { "Ver tarifa estimada" } }
+            fieldset { class: "ride-mode-selector",
+                legend { "Tipo de viaje" }
+                label {
+                    input {
+                        r#type: "radio",
+                        name: "ride-mode",
+                        checked: !is_pickup_only,
+                        onchange: move |_| {
+                            ride_mode.set(RideMode::Catalog);
+                            ride_error.set(None);
+                        },
+                    }
+                    " Viaje con destino y precio fijo"
+                }
+                label {
+                    input {
+                        r#type: "radio",
+                        name: "ride-mode",
+                        checked: is_pickup_only,
+                        onchange: move |_| {
+                            ride_mode.set(RideMode::PickupOnly);
+                            estimate.set(None);
+                            estimate_error.set(None);
+                            ride_error.set(None);
+                        },
+                    }
+                    " Solo recogida (acuerdas el precio con el conductor)"
+                }
+            }
             p { class: "ride-estimate-instructions",
-                "Toca el mapa para elegir tu punto de origen."
+                if is_pickup_only {
+                    "Toca el mapa para marcar donde te recogen."
+                } else {
+                    "Toca el mapa para elegir tu punto de origen."
+                }
             }
             div { class: "ride-estimate-map", style: "height: 320px;",
                 MapView {
@@ -433,6 +538,17 @@ pub fn RideEstimateScreen() -> Element {
                     on_click: on_map_click,
                 }
             }
+            if is_pickup_only {
+                label { r#for: "ride-pickup-only-destination", "¿A donde vas?" }
+                input {
+                    id: "ride-pickup-only-destination",
+                    r#type: "text",
+                    maxlength: "255",
+                    placeholder: "Ej.: al hospital, casa de mi mama en La Esperanza",
+                    value: "{destination_text}",
+                    oninput: move |event| destination_text.set(event.value()),
+                }
+            } else {
             label { r#for: "ride-estimate-destination", "Destino" }
             if is_loading_sites() {
                 p { "Cargando sitios..." }
@@ -458,6 +574,7 @@ pub fn RideEstimateScreen() -> Element {
                     }
                 }
             }
+            }
             label { r#for: "ride-estimate-passenger-count", "Pasajeros" }
             select {
                 id: "ride-estimate-passenger-count",
@@ -471,6 +588,30 @@ pub fn RideEstimateScreen() -> Element {
                 option { value: "2", "2" }
                 option { value: "3", "3" }
             }
+            if is_pickup_only {
+                p { class: "ride-pickup-only-price-note",
+                    "Precio: a acordar con el conductor cuando acepte tu viaje."
+                }
+                button {
+                    r#type: "button",
+                    class: "ride-request-button",
+                    disabled: !can_request_pickup_only || is_requesting(),
+                    onclick: on_pickup_only_request_click,
+                    if is_requesting() {
+                        "Solicitando..."
+                    } else {
+                        "Pedir motocarro"
+                    }
+                }
+                if let Some(err) = ride_error() {
+                    p { class: "ride-request-error", role: "alert", "{err}" }
+                }
+                if !can_request_pickup_only {
+                    p { class: "ride-estimate-empty",
+                        "Marca donde te recogen en el mapa y escribe a donde vas."
+                    }
+                }
+            } else {
             button {
                 r#type: "button",
                 class: "ride-estimate-button",
@@ -511,6 +652,7 @@ pub fn RideEstimateScreen() -> Element {
                 p { class: "ride-estimate-empty",
                     "Elige un origen en el mapa y un destino de la lista para ver la tarifa."
                 }
+            }
             }
         }
     }
@@ -697,7 +839,7 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
         lng: current.ride.origin.longitude,
         label: Some("Origen".to_string()),
     }];
-    let destination_name = current.ride.destination.name.clone();
+    let destination_name = current.ride.destination_label();
     // El mapa sigue al conductor cuando ya se conoce su posicion: es lo que
     // el pasajero quiere ver para saber cuando va a llegar (criterio de
     // aceptacion del issue). Sin ubicacion todavia (viaje `requested`, o
