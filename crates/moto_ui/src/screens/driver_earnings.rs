@@ -119,15 +119,15 @@ struct DriverRideHistoryRowProps {
 #[component]
 fn DriverRideHistoryRow(props: DriverRideHistoryRowProps) -> Element {
     let ride = &props.ride;
-    let fare = ride.final_fare.unwrap_or(ride.estimated_fare);
+    let fare = ride.fare_label();
 
     rsx! {
         li { class: "driver-ride-history-row",
             p { class: "driver-ride-history-status", "{ride_status_label(ride.status)}" }
             p { "Fecha: {ride.requested_at}" }
             p { "Origen: {ride.origin.latitude}, {ride.origin.longitude}" }
-            p { "Destino: {ride.destination.name}" }
-            p { "Tarifa: {ride.currency} {fare}" }
+            p { "Destino: {ride.destination_label()}" }
+            p { "Tarifa: {fare}" }
         }
     }
 }

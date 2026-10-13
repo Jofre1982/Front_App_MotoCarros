@@ -5,11 +5,11 @@
 //! `Back_App_MotoCarros`).
 
 use crate::models::{
-    AcceptErrandPayload, ApiErrorBody, AuthToken, AuthenticatedUser, BroadcastAuthPayload,
-    BroadcastAuthResponse, ConfirmPasswordResetPayload, ConfirmPhoneVerificationPayload,
-    Coordinates, CreateErrandPayload, DataEnvelope, DocumentType, DriverEarningsSummary,
-    DriverProfile, DriverVerification, Errand, LoginPayload, RateDriverPayload,
-    RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload,
+    AcceptErrandPayload, AcceptRidePayload, ApiErrorBody, AuthToken, AuthenticatedUser,
+    BroadcastAuthPayload, BroadcastAuthResponse, ConfirmPasswordResetPayload,
+    ConfirmPhoneVerificationPayload, Coordinates, CreateErrandPayload, DataEnvelope, DocumentType,
+    DriverEarningsSummary, DriverProfile, DriverVerification, Errand, LoginPayload,
+    RateDriverPayload, RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload,
     RequestPasswordResetPayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
     RideRating, RideReceipt, RideRequestPayload, Site, UpdateErrandAvailabilityPayload,
     UpdateProfilePayload, UpdateVehiclePayload, UploadedDriverDocument, User, Vehicle, VehicleType,
@@ -1122,6 +1122,9 @@ pub enum RequestRideError {
     /// La cuenta no es de pasajero (`RidePolicy` en el backend). Solicitar un
     /// viaje es una operacion exclusiva del rol pasajero.
     Forbidden,
+    /// Viaje solo recogida (issue #92) sin texto de destino: se rechaza antes
+    /// de llamar al backend.
+    EmptyDestinationText,
     Validation(ApiErrorBody),
     SessionExpired,
     Network(String),
@@ -1131,6 +1134,9 @@ pub enum RequestRideError {
 impl std::fmt::Display for RequestRideError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            RequestRideError::EmptyDestinationText => {
+                write!(f, "Escribe a donde vas.")
+            }
             RequestRideError::Forbidden => {
                 write!(f, "Esta cuenta no puede solicitar viajes.")
             }
@@ -1219,6 +1225,9 @@ pub enum AcceptRideError {
     /// El viaje ya no esta disponible: otro conductor lo acepto primero, o
     /// cambio de estado por otro motivo.
     Conflict,
+    /// Viaje solo recogida (issue #92) con un precio acordado menor que 1:
+    /// se rechaza antes de llamar al backend, que exige `min:1`.
+    InvalidAgreedPrice,
     Validation(ApiErrorBody),
     SessionExpired,
     Network(String),
@@ -1228,6 +1237,9 @@ pub enum AcceptRideError {
 impl std::fmt::Display for AcceptRideError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AcceptRideError::InvalidAgreedPrice => {
+                write!(f, "Ingresa el precio acordado (mayor que cero).")
+            }
             AcceptRideError::Forbidden => {
                 write!(f, "Esta cuenta no puede aceptar viajes.")
             }
@@ -3713,11 +3725,36 @@ impl ApiClient {
         destination_site_id: u64,
         passenger_count: u8,
     ) -> Result<AuthenticatedFetch<Ride>, RequestRideError> {
-        let payload = RideRequestPayload {
-            origin,
-            destination_site_id,
-            passenger_count,
-        };
+        let payload = RideRequestPayload::catalog(origin, destination_site_id, passenger_count);
+        self.send_ride_request(token, &payload).await
+    }
+
+    /// `POST /api/v1/rides` con `mode: pickup_only` (historia #95 del
+    /// backend, issue #92): solo punto de recogida y destino en texto libre,
+    /// sin estimado — el precio lo registra el conductor al aceptar. El texto
+    /// vacio o solo espacios se rechaza sin llamar al backend, mismo criterio
+    /// que `accept_errand` con un precio invalido.
+    pub async fn request_pickup_only_ride(
+        &self,
+        token: &AuthToken,
+        origin: Coordinates,
+        destination_text: &str,
+        passenger_count: u8,
+    ) -> Result<AuthenticatedFetch<Ride>, RequestRideError> {
+        if destination_text.trim().is_empty() {
+            return Err(RequestRideError::EmptyDestinationText);
+        }
+
+        let payload = RideRequestPayload::pickup_only(origin, destination_text, passenger_count);
+        self.send_ride_request(token, &payload).await
+    }
+
+    async fn send_ride_request(
+        &self,
+        token: &AuthToken,
+        payload: &RideRequestPayload,
+    ) -> Result<AuthenticatedFetch<Ride>, RequestRideError> {
+        let payload = payload.clone();
 
         match self
             .post_ride_with_token(&token.access_token, &payload)
@@ -3881,13 +3918,23 @@ impl ApiClient {
     /// igual que `cancel_ride`; un 403 (cuenta no conductora), 404 (no
     /// existe), 409 (otro conductor lo acepto primero) o 422 (el conductor ya
     /// tiene un viaje propio activo) nunca se reintentan.
+    ///
+    /// `agreed_price` solo se manda para un viaje solo recogida (historia #95
+    /// del backend, issue #92): el precio que el conductor acordo con el
+    /// pasajero. `Some` con un valor menor que 1 se rechaza sin llamar al
+    /// backend.
     pub async fn accept_ride(
         &self,
         token: &AuthToken,
         ride_id: u64,
+        agreed_price: Option<i64>,
     ) -> Result<AuthenticatedFetch<Ride>, AcceptRideError> {
+        if agreed_price.is_some_and(|price| price < 1) {
+            return Err(AcceptRideError::InvalidAgreedPrice);
+        }
+
         match self
-            .post_accept_with_token(ride_id, &token.access_token)
+            .post_accept_with_token(ride_id, &token.access_token, agreed_price)
             .await?
         {
             AcceptRideOutcome::Success(data) => {
@@ -3909,7 +3956,7 @@ impl ApiClient {
             .map_err(|_| AcceptRideError::SessionExpired)?;
 
         match self
-            .post_accept_with_token(ride_id, &renewed.access_token)
+            .post_accept_with_token(ride_id, &renewed.access_token, agreed_price)
             .await?
         {
             AcceptRideOutcome::Success(data) => Ok(AuthenticatedFetch {
@@ -3928,13 +3975,16 @@ impl ApiClient {
         &self,
         ride_id: u64,
         access_token: &str,
+        agreed_price: Option<i64>,
     ) -> Result<AcceptRideOutcome, AcceptRideError> {
         let url = format!("{}/api/v1/rides/{}/accept", self.base_url, ride_id);
 
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(access_token)
+        let mut request = self.http.post(url).bearer_auth(access_token);
+        if let Some(agreed_price) = agreed_price {
+            request = request.json(&AcceptRidePayload { agreed_price });
+        }
+
+        let response = request
             .send()
             .await
             .map_err(|err| AcceptRideError::Network(describe_error(&err)))?;
@@ -8400,7 +8450,7 @@ mod tests {
 
         assert_eq!(fetch.data.id, 1);
         assert_eq!(fetch.data.status, crate::models::RideStatus::Requested);
-        assert_eq!(fetch.data.estimated_fare, 8850);
+        assert_eq!(fetch.data.estimated_fare, Some(8850));
         assert_eq!(fetch.refreshed_token, None);
     }
 
@@ -8748,6 +8798,119 @@ mod tests {
         ride
     }
 
+    fn sample_pickup_only_ride_json(agreed_price: Option<i64>) -> serde_json::Value {
+        serde_json::json!({
+            "id": 5,
+            "status": if agreed_price.is_some() { "accepted" } else { "requested" },
+            "mode": "pickup_only",
+            "origin": {"latitude": 4.710989, "longitude": -74.072092},
+            "destination": null,
+            "destination_text": "Al hospital",
+            "passenger_count": 1,
+            "currency": "COP",
+            "estimated_fare": null,
+            "agreed_price": agreed_price,
+            "driver": agreed_price.map(|_| serde_json::json!({"id": 42, "name": "Carlos Perez"})),
+            "requested_at": "2026-10-13T14:03:21+00:00",
+            "started_at": null,
+            "completed_at": null,
+            "final_fare": null,
+            "payment": null,
+        })
+    }
+
+    #[tokio::test]
+    async fn request_pickup_only_ride_sends_mode_and_text_and_no_site() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides"))
+            .and(body_json(serde_json::json!({
+                "mode": "pickup_only",
+                "origin": {"latitude": 4.710989, "longitude": -74.072092},
+                "destination_text": "Al hospital",
+                "passenger_count": 1,
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": sample_pickup_only_ride_json(None),
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .request_pickup_only_ride(&sample_token(), sample_origin(), "  Al hospital ", 1)
+            .await
+            .unwrap();
+
+        assert!(fetch.data.is_pickup_only());
+        assert_eq!(fetch.data.destination_label(), "Al hospital");
+        assert_eq!(fetch.data.fare(), None);
+    }
+
+    #[tokio::test]
+    async fn request_pickup_only_ride_rejects_an_empty_destination_without_calling_the_backend() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let error = client
+            .request_pickup_only_ride(&sample_token(), sample_origin(), "   ", 1)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, RequestRideError::EmptyDestinationText);
+    }
+
+    #[tokio::test]
+    async fn accept_ride_sends_the_agreed_price_for_a_pickup_only_ride() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/5/accept"))
+            .and(body_json(serde_json::json!({"agreed_price": 7000})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": sample_pickup_only_ride_json(Some(7000)),
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .accept_ride(&sample_token(), 5, Some(7000))
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.agreed_price, Some(7000));
+        assert_eq!(fetch.data.fare_label(), "COP 7000");
+    }
+
+    #[tokio::test]
+    async fn accept_ride_rejects_a_non_positive_agreed_price_without_calling_the_backend() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+
+        for price in [0, -100] {
+            let error = client
+                .accept_ride(&sample_token(), 5, Some(price))
+                .await
+                .unwrap_err();
+            assert_eq!(error, AcceptRideError::InvalidAgreedPrice);
+        }
+    }
+
     #[tokio::test]
     async fn accept_ride_returns_the_accepted_ride_with_the_assigned_driver() {
         let server = MockServer::start().await;
@@ -8765,7 +8928,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(server.uri());
-        let fetch = client.accept_ride(&sample_token(), 1).await.unwrap();
+        let fetch = client.accept_ride(&sample_token(), 1, None).await.unwrap();
 
         assert_eq!(fetch.data.id, 1);
         assert_eq!(fetch.data.status, crate::models::RideStatus::Accepted);
@@ -8792,7 +8955,10 @@ mod tests {
             .await;
 
         let client = ApiClient::new(server.uri());
-        let error = client.accept_ride(&sample_token(), 1).await.unwrap_err();
+        let error = client
+            .accept_ride(&sample_token(), 1, None)
+            .await
+            .unwrap_err();
 
         assert_eq!(error, AcceptRideError::Forbidden);
     }
@@ -8810,7 +8976,10 @@ mod tests {
             .await;
 
         let client = ApiClient::new(server.uri());
-        let error = client.accept_ride(&sample_token(), 999).await.unwrap_err();
+        let error = client
+            .accept_ride(&sample_token(), 999, None)
+            .await
+            .unwrap_err();
 
         assert_eq!(error, AcceptRideError::NotFound);
     }
@@ -8828,7 +8997,10 @@ mod tests {
             .await;
 
         let client = ApiClient::new(server.uri());
-        let error = client.accept_ride(&sample_token(), 1).await.unwrap_err();
+        let error = client
+            .accept_ride(&sample_token(), 1, None)
+            .await
+            .unwrap_err();
 
         assert_eq!(error, AcceptRideError::Conflict);
     }
@@ -8849,7 +9021,10 @@ mod tests {
             .await;
 
         let client = ApiClient::new(server.uri());
-        let error = client.accept_ride(&sample_token(), 1).await.unwrap_err();
+        let error = client
+            .accept_ride(&sample_token(), 1, None)
+            .await
+            .unwrap_err();
 
         assert_eq!(
             error,
@@ -8912,7 +9087,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(server.uri());
-        let fetch = client.accept_ride(&sample_token(), 1).await.unwrap();
+        let fetch = client.accept_ride(&sample_token(), 1, None).await.unwrap();
 
         assert_eq!(fetch.data.id, 1);
         assert_eq!(fetch.refreshed_token.unwrap().access_token, "new-jwt-token");
@@ -8939,7 +9114,10 @@ mod tests {
             .await;
 
         let client = ApiClient::new(server.uri());
-        let error = client.accept_ride(&sample_token(), 1).await.unwrap_err();
+        let error = client
+            .accept_ride(&sample_token(), 1, None)
+            .await
+            .unwrap_err();
 
         assert_eq!(error, AcceptRideError::SessionExpired);
     }
@@ -8948,7 +9126,10 @@ mod tests {
     async fn accept_ride_returns_network_error_when_server_is_unreachable() {
         let client = ApiClient::new("http://127.0.0.1:1");
 
-        let error = client.accept_ride(&sample_token(), 1).await.unwrap_err();
+        let error = client
+            .accept_ride(&sample_token(), 1, None)
+            .await
+            .unwrap_err();
 
         assert!(matches!(error, AcceptRideError::Network(_)));
     }
