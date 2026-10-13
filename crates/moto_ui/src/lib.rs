@@ -132,8 +132,17 @@ fn Home() -> Element {
     let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context::<SessionState>();
     let mut is_logging_out = use_signal(|| false);
-    let mut section = use_signal(|| HomeSection::Profile);
     let is_driver = session.user().is_some_and(|user| user.role == Role::Driver);
+    // El pasajero abre la app para pedir un motocarro: arranca directo en
+    // esa pantalla en vez de en su perfil. El conductor sigue arrancando en
+    // su perfil (ahi ve si le falta vehiculo o documentos).
+    let mut section = use_signal(move || {
+        if is_driver {
+            HomeSection::Profile
+        } else {
+            HomeSection::RideEstimate
+        }
+    });
 
     let on_logout = move |_| {
         let api_client = api_client.clone();
@@ -162,13 +171,13 @@ fn Home() -> Element {
         div {
             h1 { "MotoYa" }
             nav { class: "home-nav",
-                button {
-                    r#type: "button",
-                    disabled: section() == HomeSection::Profile,
-                    onclick: move |_| section.set(HomeSection::Profile),
-                    "Mi perfil"
-                }
                 if is_driver {
+                    button {
+                        r#type: "button",
+                        disabled: section() == HomeSection::Profile,
+                        onclick: move |_| section.set(HomeSection::Profile),
+                        "Mi perfil"
+                    }
                     button {
                         r#type: "button",
                         disabled: section() == HomeSection::Vehicle,
@@ -200,18 +209,24 @@ fn Home() -> Element {
                         "Historial y ganancias"
                     }
                 } else {
-                    // "Ver tarifa estimada" (estimar + solicitar un viaje) es
-                    // un flujo del pasajero: el conductor no pide viajes,
-                    // los recibe en "Solicitudes cercanas". El backend ya
+                    // "Pedir motocarro" (estimar + solicitar un viaje) es un
+                    // flujo del pasajero: el conductor no pide viajes, los
+                    // recibe en "Solicitudes cercanas". El backend ya
                     // rechaza la creacion del viaje si la intenta una cuenta
                     // de conductor (`RidePolicy::create()`), pero mostrarle
                     // la pestana igual invitaba a un 403 confuso en vez de
                     // que la opcion ni aparezca.
+                    //
+                    // Va primero y se llama por lo que el pasajero quiere
+                    // hacer ("pedir un motocarro"), no por el primer paso
+                    // del flujo ("ver tarifa estimada"): el estimado sigue
+                    // estando adentro de la pantalla.
                     button {
                         r#type: "button",
+                        class: "home-nav-primary",
                         disabled: section() == HomeSection::RideEstimate,
                         onclick: move |_| section.set(HomeSection::RideEstimate),
-                        "Ver tarifa estimada"
+                        "Pedir motocarro"
                     }
                     button {
                         r#type: "button",
@@ -223,7 +238,13 @@ fn Home() -> Element {
                         r#type: "button",
                         disabled: section() == HomeSection::RideHistory,
                         onclick: move |_| section.set(HomeSection::RideHistory),
-                        "Historial de viajes"
+                        "Mis viajes"
+                    }
+                    button {
+                        r#type: "button",
+                        disabled: section() == HomeSection::Profile,
+                        onclick: move |_| section.set(HomeSection::Profile),
+                        "Mi perfil"
                     }
                 }
             }
