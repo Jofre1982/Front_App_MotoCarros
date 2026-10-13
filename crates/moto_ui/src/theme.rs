@@ -343,4 +343,72 @@ button[class*="cancel"]:hover:not(:disabled) {
     padding: 22px 18px 26px;
     margin: -4px 0 0;
 }
+
+/* Pedir motocarro: el tipo de viaje se elige con dos tarjetas grandes en
+   vez de radios sueltos, y el formulario se lee como pasos numerados. */
+fieldset.ride-mode-selector {
+    border: none;
+    padding: 0;
+    margin: 0 0 18px;
+    display: grid;
+    gap: 10px;
+}
+fieldset.ride-mode-selector legend {
+    font-weight: 600;
+    margin-bottom: 8px;
+    padding: 0;
+}
+label.ride-mode-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px;
+    background: var(--color-surface);
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    cursor: pointer;
+    margin: 0;
+}
+label.ride-mode-option-selected {
+    border-color: var(--color-primary);
+    background: var(--color-primary-light);
+}
+label.ride-mode-option input[type="radio"] {
+    width: auto;
+    margin: 4px 0 0;
+    accent-color: var(--color-primary);
+}
+.ride-mode-option-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.ride-mode-option-text small {
+    color: var(--color-muted);
+    font-size: 0.9rem;
+}
+.ride-step-title {
+    display: block;
+    font-weight: 600;
+    margin: 18px 0 6px;
+}
+.ride-estimate-price {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--color-primary-dark);
+}
+.ride-pickup-only-price-note {
+    background: var(--color-primary-light);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    color: var(--color-primary-dark);
+}
+/* "Pedir motocarro" resalta en el menu aun cuando no es la pestana activa
+   (la activa ya se pinta naranja solida con `:disabled`). */
+nav.home-nav button.home-nav-primary:not(:disabled) {
+    background: var(--color-primary-light);
+    color: var(--color-primary-dark);
+    border-color: var(--color-primary);
+}
 "#;

@@ -36,8 +36,9 @@ use crate::map::{MapMarker, MapView};
 
 /// Centro inicial del mapa mientras no exista geolocalizacion del
 /// dispositivo — mismo punto y mismo motivo que `RideEstimateScreen`.
-const DEFAULT_CENTER_LAT: f64 = 4.710989;
-const DEFAULT_CENTER_LNG: f64 = -74.072092;
+// Casco urbano de Inirida, donde opera el servicio (ver `ride_estimate.rs`).
+const DEFAULT_CENTER_LAT: f64 = 3.8653;
+const DEFAULT_CENTER_LNG: f64 = -67.9239;
 
 #[component]
 pub fn RequestErrandScreen() -> Element {

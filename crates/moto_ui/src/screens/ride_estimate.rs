@@ -94,10 +94,12 @@ use crate::map::{MapMarker, MapView};
 const RIDE_TRACKING_POLL_INTERVAL: Duration = Duration::from_millis(700);
 
 /// Centro inicial del mapa mientras no exista geolocalizacion del
-/// dispositivo (fuera de alcance de este issue): Bogota, el mismo punto que
-/// ya usan los ejemplos de `openapi.yaml`.
-const DEFAULT_CENTER_LAT: f64 = 4.710989;
-const DEFAULT_CENTER_LNG: f64 = -74.072092;
+/// dispositivo (issue #90): el casco urbano de Inirida, donde opera el
+/// servicio. Antes era Bogota (el punto de los ejemplos de `openapi.yaml`),
+/// y el pasajero tenia que desplazar el mapa hasta el pais entero para
+/// encontrar su ubicacion.
+const DEFAULT_CENTER_LAT: f64 = 3.8653;
+const DEFAULT_CENTER_LNG: f64 = -67.9239;
 
 #[component]
 pub fn RideEstimateScreen() -> Element {
@@ -431,18 +433,18 @@ pub fn RideEstimateScreen() -> Element {
 
         return rsx! {
             div { class: "ride-estimate-screen",
-                h2 { "Viaje solicitado" }
+                h2 { "Tu motocarro" }
                 p { class: "ride-request-status", "{ride_status_label(ride.status)}" }
                 dl { class: "ride-request-result",
                     dt { "Destino" }
                     dd { "{ride.destination_label()}" }
-                    dt { "Pasajeros" }
+                    dt { "Personas" }
                     dd { "{ride.passenger_count}" }
                     if ride.is_pickup_only() {
                         dt { "Precio" }
                         dd { class: "ride-request-agreed-price", "{ride.fare_label()}" }
                     } else {
-                        dt { "Tarifa estimada" }
+                        dt { "Precio" }
                         dd { "{ride.fare_label()}" }
                     }
                 }
@@ -493,10 +495,11 @@ pub fn RideEstimateScreen() -> Element {
 
     rsx! {
         div { class: "ride-estimate-screen",
-            h2 { if is_pickup_only { "Pedir motocarro" } else { "Ver tarifa estimada" } }
+            h2 { "Pedir motocarro" }
             fieldset { class: "ride-mode-selector",
-                legend { "Tipo de viaje" }
+                legend { "¿Como quieres viajar?" }
                 label {
+                    class: if is_pickup_only { "ride-mode-option" } else { "ride-mode-option ride-mode-option-selected" },
                     input {
                         r#type: "radio",
                         name: "ride-mode",
@@ -506,9 +509,13 @@ pub fn RideEstimateScreen() -> Element {
                             ride_error.set(None);
                         },
                     }
-                    " Viaje con destino y precio fijo"
+                    span { class: "ride-mode-option-text",
+                        strong { "Con destino y precio fijo" }
+                        small { "Eliges a donde vas y ves el precio antes de pedir." }
+                    }
                 }
                 label {
+                    class: if is_pickup_only { "ride-mode-option ride-mode-option-selected" } else { "ride-mode-option" },
                     input {
                         r#type: "radio",
                         name: "ride-mode",
@@ -520,14 +527,18 @@ pub fn RideEstimateScreen() -> Element {
                             ride_error.set(None);
                         },
                     }
-                    " Solo recogida (acuerdas el precio con el conductor)"
+                    span { class: "ride-mode-option-text",
+                        strong { "Solo recogida" }
+                        small { "Escribes a donde vas y acuerdas el precio con el conductor." }
+                    }
                 }
             }
+            p { class: "ride-step-title", "1. ¿Donde te recogemos?" }
             p { class: "ride-estimate-instructions",
-                if is_pickup_only {
-                    "Toca el mapa para marcar donde te recogen."
+                if origin().is_some() {
+                    "Listo, marcamos tu punto de recogida. Puedes tocar otro lugar para cambiarlo."
                 } else {
-                    "Toca el mapa para elegir tu punto de origen."
+                    "Toca el mapa en el lugar donde estas."
                 }
             }
             div { class: "ride-estimate-map", style: "height: 320px;",
@@ -539,7 +550,7 @@ pub fn RideEstimateScreen() -> Element {
                 }
             }
             if is_pickup_only {
-                label { r#for: "ride-pickup-only-destination", "¿A donde vas?" }
+                label { r#for: "ride-pickup-only-destination", class: "ride-step-title", "2. ¿A donde vas?" }
                 input {
                     id: "ride-pickup-only-destination",
                     r#type: "text",
@@ -549,7 +560,7 @@ pub fn RideEstimateScreen() -> Element {
                     oninput: move |event| destination_text.set(event.value()),
                 }
             } else {
-            label { r#for: "ride-estimate-destination", "Destino" }
+            label { r#for: "ride-estimate-destination", class: "ride-step-title", "2. ¿A donde vas?" }
             if is_loading_sites() {
                 p { "Cargando sitios..." }
             } else if let Some(message) = sites_error() {
@@ -561,7 +572,7 @@ pub fn RideEstimateScreen() -> Element {
                     onchange: move |event| {
                         destination_site_id.set(event.value().parse::<u64>().ok());
                     },
-                    option { value: "", disabled: true, "Elige un sitio" }
+                    option { value: "", disabled: true, "Elige tu destino" }
                     for site in sites().iter().filter(|site| site.motocarro_fare().is_some()) {
                         {
                             let fare = site.motocarro_fare().expect("filtrado arriba");
@@ -575,7 +586,7 @@ pub fn RideEstimateScreen() -> Element {
                 }
             }
             }
-            label { r#for: "ride-estimate-passenger-count", "Pasajeros" }
+            label { r#for: "ride-estimate-passenger-count", class: "ride-step-title", "3. ¿Cuantas personas van?" }
             select {
                 id: "ride-estimate-passenger-count",
                 value: "{passenger_count}",
@@ -584,9 +595,9 @@ pub fn RideEstimateScreen() -> Element {
                         passenger_count.set(count);
                     }
                 },
-                option { value: "1", "1" }
-                option { value: "2", "2" }
-                option { value: "3", "3" }
+                option { value: "1", "1 persona" }
+                option { value: "2", "2 personas" }
+                option { value: "3", "3 personas" }
             }
             if is_pickup_only {
                 p { class: "ride-pickup-only-price-note",
@@ -598,7 +609,7 @@ pub fn RideEstimateScreen() -> Element {
                     disabled: !can_request_pickup_only || is_requesting(),
                     onclick: on_pickup_only_request_click,
                     if is_requesting() {
-                        "Solicitando..."
+                        "Pidiendo..."
                     } else {
                         "Pedir motocarro"
                     }
@@ -608,7 +619,7 @@ pub fn RideEstimateScreen() -> Element {
                 }
                 if !can_request_pickup_only {
                     p { class: "ride-estimate-empty",
-                        "Marca donde te recogen en el mapa y escribe a donde vas."
+                        "Marca donde te recogemos y escribe a donde vas."
                     }
                 }
             } else {
@@ -620,7 +631,7 @@ pub fn RideEstimateScreen() -> Element {
                 if is_loading() {
                     "Calculando..."
                 } else {
-                    "Ver tarifa estimada"
+                    "Ver precio"
                 }
             }
             if let Some(err) = estimate_error() {
@@ -629,10 +640,10 @@ pub fn RideEstimateScreen() -> Element {
                 dl { class: "ride-estimate-result",
                     dt { "Destino" }
                     dd { "{value.destination.name}" }
-                    dt { "Pasajeros" }
+                    dt { "Personas" }
                     dd { "{value.passenger_count}" }
-                    dt { "Tarifa estimada" }
-                    dd { "{value.currency} {value.estimated_fare}" }
+                    dt { "Precio" }
+                    dd { class: "ride-estimate-price", "{value.currency} {value.estimated_fare}" }
                 }
                 button {
                     r#type: "button",
@@ -640,9 +651,9 @@ pub fn RideEstimateScreen() -> Element {
                     disabled: is_requesting(),
                     onclick: on_request_click,
                     if is_requesting() {
-                        "Solicitando..."
+                        "Pidiendo..."
                     } else {
-                        "Confirmar y solicitar viaje"
+                        "Pedir motocarro"
                     }
                 }
                 if let Some(err) = ride_error() {
@@ -650,7 +661,7 @@ pub fn RideEstimateScreen() -> Element {
                 }
             } else if !can_estimate {
                 p { class: "ride-estimate-empty",
-                    "Elige un origen en el mapa y un destino de la lista para ver la tarifa."
+                    "Marca donde te recogemos y elige tu destino para ver el precio."
                 }
             }
             }
