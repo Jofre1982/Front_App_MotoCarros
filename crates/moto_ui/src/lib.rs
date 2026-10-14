@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use moto_core::api::ApiClient;
+use moto_core::api::{ApiClient, AuthenticatedRequestError};
 use moto_core::models::Role;
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
@@ -132,16 +132,57 @@ fn Home() -> Element {
     let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context::<SessionState>();
     let mut is_logging_out = use_signal(|| false);
-    let is_driver = session.user().is_some_and(|user| user.role == Role::Driver);
-    // El pasajero abre la app para pedir un motocarro: arranca directo en
-    // esa pantalla en vez de en su perfil. El conductor sigue arrancando en
-    // su perfil (ahi ve si le falta vehiculo o documentos).
-    let mut section = use_signal(move || {
-        if is_driver {
+    // Con que rol esta usando la app (issue #95): una cuenta con ambos roles
+    // lo elige al entrar y lo cambia desde el menu (`SessionState::set_mode`).
+    let mode = session.active_mode();
+    let is_driver = mode == Some(Role::Driver);
+    let has_both_modes = session.user().is_some_and(|user| user.has_both_modes());
+    // `None` = la seccion de inicio del modo actual. Se vuelve a `None` al
+    // cambiar de modo, para no quedar en una pantalla del otro rol. El
+    // pasajero arranca en "Pedir motocarro"; el conductor en su perfil (ahi
+    // ve si le falta vehiculo o documentos).
+    let mut chosen_section = use_signal(|| None::<HomeSection>);
+    let section = move || {
+        chosen_section().unwrap_or(if is_driver {
             HomeSection::Profile
         } else {
             HomeSection::RideEstimate
+        })
+    };
+    let mut go_to = move |target: HomeSection| chosen_section.set(Some(target));
+
+    // Al reabrir la app solo se recupera el token (`SessionState::hydrate`);
+    // sin la cuenta no se sabe que menu mostrar, asi que se pide aca en vez
+    // de depender de que la persona abra su perfil.
+    let mut has_fetched_user = use_signal(|| false);
+    let api_client_for_me = api_client.clone();
+    let storage_for_me = storage.clone();
+    use_effect(move || {
+        if has_fetched_user() || session.user().is_some() {
+            return;
         }
+        let Some(token) = session.token() else {
+            return;
+        };
+        has_fetched_user.set(true);
+        let api_client = api_client_for_me.clone();
+        let storage = storage_for_me.clone();
+        spawn(async move {
+            match api_client.me(&token).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    session.set_user(fetch.data);
+                }
+                Err(AuthenticatedRequestError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                // Cualquier otro error: el perfil lo vuelve a intentar y lo
+                // muestra; aca no hay donde mostrarlo.
+                Err(_) => {}
+            }
+        });
     });
 
     let on_logout = move |_| {
@@ -167,45 +208,111 @@ fn Home() -> Element {
         });
     };
 
+    let mut switch_mode = move |target: Role| {
+        session.set_mode(target);
+        chosen_section.set(None);
+    };
+
+    if session.user().is_none() {
+        return rsx! {
+            div {
+                h1 { "MotoYa" }
+                p { class: "home-loading", "Cargando tu cuenta..." }
+                button {
+                    r#type: "button",
+                    disabled: is_logging_out(),
+                    onclick: on_logout,
+                    "Cerrar sesion"
+                }
+            }
+        };
+    }
+
+    if session.needs_mode_choice() {
+        return rsx! {
+            div { class: "mode-chooser-screen",
+                h1 { "MotoYa" }
+                h2 { "¿Como quieres entrar?" }
+                p { class: "mode-chooser-hint",
+                    "Tu cuenta es de pasajero y de conductor. Puedes cambiar de modo cuando quieras desde el menu."
+                }
+                button {
+                    r#type: "button",
+                    class: "mode-chooser-option",
+                    onclick: move |_| switch_mode(Role::Passenger),
+                    strong { "Pasajero" }
+                    small { "Pedir un motocarro o un mandado." }
+                }
+                button {
+                    r#type: "button",
+                    class: "mode-chooser-option",
+                    onclick: move |_| switch_mode(Role::Driver),
+                    strong { "Conductor" }
+                    small { "Recibir solicitudes de viaje y mandados." }
+                }
+                button {
+                    r#type: "button",
+                    class: "mode-chooser-logout-link",
+                    disabled: is_logging_out(),
+                    onclick: on_logout,
+                    "Cerrar sesion"
+                }
+            }
+        };
+    }
+
     rsx! {
         div {
             h1 { "MotoYa" }
+            if has_both_modes {
+                p { class: "home-mode-banner",
+                    if is_driver { "Estas en modo conductor" } else { "Estas en modo pasajero" }
+                    button {
+                        r#type: "button",
+                        class: "home-mode-switch-link",
+                        onclick: move |_| {
+                            switch_mode(if is_driver { Role::Passenger } else { Role::Driver })
+                        },
+                        if is_driver { "Cambiar a modo pasajero" } else { "Cambiar a modo conductor" }
+                    }
+                }
+            }
             nav { class: "home-nav",
                 if is_driver {
                     button {
                         r#type: "button",
                         disabled: section() == HomeSection::Profile,
-                        onclick: move |_| section.set(HomeSection::Profile),
+                        onclick: move |_| go_to(HomeSection::Profile),
                         "Mi perfil"
                     }
                     button {
                         r#type: "button",
                         disabled: section() == HomeSection::Vehicle,
-                        onclick: move |_| section.set(HomeSection::Vehicle),
+                        onclick: move |_| go_to(HomeSection::Vehicle),
                         "Mi vehiculo"
                     }
                     button {
                         r#type: "button",
                         disabled: section() == HomeSection::Documents,
-                        onclick: move |_| section.set(HomeSection::Documents),
+                        onclick: move |_| go_to(HomeSection::Documents),
                         "Mis documentos"
                     }
                     button {
                         r#type: "button",
                         disabled: section() == HomeSection::NearbyRides,
-                        onclick: move |_| section.set(HomeSection::NearbyRides),
+                        onclick: move |_| go_to(HomeSection::NearbyRides),
                         "Solicitudes cercanas"
                     }
                     button {
                         r#type: "button",
                         disabled: section() == HomeSection::NearbyErrands,
-                        onclick: move |_| section.set(HomeSection::NearbyErrands),
+                        onclick: move |_| go_to(HomeSection::NearbyErrands),
                         "Mandados cercanos"
                     }
                     button {
                         r#type: "button",
                         disabled: section() == HomeSection::DriverEarnings,
-                        onclick: move |_| section.set(HomeSection::DriverEarnings),
+                        onclick: move |_| go_to(HomeSection::DriverEarnings),
                         "Historial y ganancias"
                     }
                 } else {
@@ -225,25 +332,25 @@ fn Home() -> Element {
                         r#type: "button",
                         class: "home-nav-primary",
                         disabled: section() == HomeSection::RideEstimate,
-                        onclick: move |_| section.set(HomeSection::RideEstimate),
+                        onclick: move |_| go_to(HomeSection::RideEstimate),
                         "Pedir motocarro"
                     }
                     button {
                         r#type: "button",
                         disabled: section() == HomeSection::RequestErrand,
-                        onclick: move |_| section.set(HomeSection::RequestErrand),
+                        onclick: move |_| go_to(HomeSection::RequestErrand),
                         "Pedir un mandado"
                     }
                     button {
                         r#type: "button",
                         disabled: section() == HomeSection::RideHistory,
-                        onclick: move |_| section.set(HomeSection::RideHistory),
+                        onclick: move |_| go_to(HomeSection::RideHistory),
                         "Mis viajes"
                     }
                     button {
                         r#type: "button",
                         disabled: section() == HomeSection::Profile,
-                        onclick: move |_| section.set(HomeSection::Profile),
+                        onclick: move |_| go_to(HomeSection::Profile),
                         "Mi perfil"
                     }
                 }

@@ -63,7 +63,10 @@ pub fn RideHistoryScreen() -> Element {
             is_loading.set(true);
             load_error.set(None);
 
-            match api_client.ride_history(&token).await {
+            match api_client
+                .ride_history(&token, Some(moto_core::models::Role::Passenger))
+                .await
+            {
                 Ok(fetch) => {
                     if let Some(refreshed) = fetch.refreshed_token {
                         session.update_token(refreshed, storage.as_ref());

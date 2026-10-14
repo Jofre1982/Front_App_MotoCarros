@@ -31,17 +31,19 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use moto_core::api::{
-    ApiClient, AuthenticatedRequestError, ConfirmPhoneVerificationError,
+    ApiClient, AuthenticatedRequestError, BecomeDriverError, ConfirmPhoneVerificationError,
     RequestPhoneVerificationError, UpdateErrandAvailabilityError, UpdateProfileError,
 };
 use moto_core::models::{Role, UpdateProfilePayload, User};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
-fn role_label(role: Role) -> &'static str {
-    match role {
-        Role::Passenger => "Pasajero",
-        Role::Driver => "Conductor",
+/// Como se describe la cuenta (issue #95): con los dos roles, ambos.
+fn roles_label(user: &User) -> &'static str {
+    match (user.can_ride(), user.can_drive()) {
+        (true, true) => "Pasajero y conductor",
+        (_, true) => "Conductor",
+        _ => "Pasajero",
     }
 }
 
@@ -130,13 +132,16 @@ pub fn ProfileScreen() -> Element {
                             }
                         }
                         dt { "Rol" }
-                        dd { "{role_label(user.role)}" }
+                        dd { "{roles_label(&user)}" }
                     }
                     if !user.phone_verified {
                         PhoneVerificationSection {}
                     }
-                    if user.role == Role::Driver {
+                    if session.active_mode() == Some(Role::Driver) {
                         ErrandAvailabilitySection {}
+                    }
+                    if !user.can_drive() {
+                        BecomeDriverSection {}
                     }
                     button {
                         r#type: "button",
@@ -144,6 +149,104 @@ pub fn ProfileScreen() -> Element {
                         onclick: move |_| is_editing.set(true),
                         "Editar perfil"
                     }
+                }
+            }
+        }
+    }
+}
+
+/// "Quiero ser conductor" (historia #99 del backend, issue #95): un pasajero
+/// activa el modo conductor en su misma cuenta con su licencia
+/// (`ApiClient::become_driver`). Al lograrlo, la cuenta queda con los dos
+/// roles y la app pasa a modo conductor, donde el menu ya ofrece registrar
+/// el vehiculo y subir los documentos.
+#[component]
+fn BecomeDriverSection() -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+
+    let mut is_open = use_signal(|| false);
+    let mut license_number = use_signal(String::new);
+    let mut error = use_signal(|| None::<BecomeDriverError>);
+    let mut is_saving = use_signal(|| false);
+
+    let on_submit = move |event: FormEvent| {
+        event.prevent_default();
+        let Some(token) = session.token() else {
+            return;
+        };
+        let license = license_number();
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+
+        spawn(async move {
+            is_saving.set(true);
+            error.set(None);
+
+            match api_client.become_driver(&token, &license).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    session.set_user(fetch.data);
+                    session.set_mode(Role::Driver);
+                }
+                Err(BecomeDriverError::SessionExpired) => {
+                    session.logout(storage.as_ref());
+                }
+                Err(err) => {
+                    error.set(Some(err));
+                }
+            }
+
+            is_saving.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "become-driver-section",
+            h3 { "¿Tienes un motocarro?" }
+            p { "Trabaja como conductor con esta misma cuenta, sin crear otra." }
+            if is_open() {
+                form { onsubmit: on_submit,
+                    label { r#for: "become-driver-license", "Numero de licencia de conduccion" }
+                    input {
+                        id: "become-driver-license",
+                        r#type: "text",
+                        autocomplete: "off",
+                        disabled: is_saving(),
+                        value: "{license_number}",
+                        oninput: move |event| license_number.set(event.value()),
+                    }
+                    p { class: "become-driver-hint",
+                        "Despues registras tu vehiculo y subes tus documentos para que te aprueben."
+                    }
+                    button {
+                        r#type: "submit",
+                        disabled: is_saving() || license_number().trim().is_empty(),
+                        if is_saving() { "Activando..." } else { "Activar modo conductor" }
+                    }
+                    button {
+                        r#type: "button",
+                        class: "become-driver-cancel-link",
+                        disabled: is_saving(),
+                        onclick: move |_| {
+                            is_open.set(false);
+                            error.set(None);
+                        },
+                        "Ahora no"
+                    }
+                    if let Some(err) = error() {
+                        p { class: "become-driver-error", role: "alert", "{err}" }
+                    }
+                }
+            } else {
+                button {
+                    r#type: "button",
+                    class: "become-driver-open-button",
+                    onclick: move |_| is_open.set(true),
+                    "Quiero ser conductor"
                 }
             }
         }
