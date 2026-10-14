@@ -27,6 +27,41 @@ pub struct User {
     /// `ApiClient::confirm_phone_verification`.
     pub phone_verified: bool,
     pub role: Role,
+    /// Con que roles puede actuar la cuenta (historia #99 del backend, issue
+    /// #95 de este repo): `["passenger"]` o `["passenger", "driver"]`. Como
+    /// texto y no como `Role` a proposito: el backend tambien puede mandar
+    /// `"admin"`, que esta app no modela, y un valor desconocido no debe
+    /// romper el login entero. `#[serde(default)]` para seguir leyendo un
+    /// backend anterior a #99, que no lo manda.
+    #[serde(default)]
+    pub roles: Vec<String>,
+}
+
+impl User {
+    /// Si la cuenta puede actuar como conductor: se registro como conductor
+    /// o activo el modo conductor (`roles` incluye `driver`).
+    pub fn can_drive(&self) -> bool {
+        self.role == Role::Driver || self.roles.iter().any(|role| role == "driver")
+    }
+
+    /// Si la cuenta puede pedir servicios como pasajero. Con un backend
+    /// anterior a #99 (sin `roles`), solo las cuentas de pasajero.
+    pub fn can_ride(&self) -> bool {
+        self.role == Role::Passenger || self.roles.iter().any(|role| role == "passenger")
+    }
+
+    /// Si la cuenta tiene los dos modos y por eso la app le pregunta con
+    /// cual entrar.
+    pub fn has_both_modes(&self) -> bool {
+        self.can_drive() && self.can_ride()
+    }
+}
+
+/// Body de `POST /api/v1/me/driver-profile` (historia #99 del backend):
+/// activar el modo conductor en la propia cuenta.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BecomeDriverPayload {
+    pub license_number: String,
 }
 
 /// `openapi.yaml#/components/schemas/AuthToken`.

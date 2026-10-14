@@ -411,4 +411,50 @@ nav.home-nav button.home-nav-primary:not(:disabled) {
     color: var(--color-primary-dark);
     border-color: var(--color-primary);
 }
+
+/* Elegir modo al entrar y cambiarlo desde el menu (issue #95). */
+.mode-chooser-screen h2 { margin-bottom: 6px; }
+.mode-chooser-hint { color: var(--color-muted); margin-top: 0; }
+button.mode-chooser-option {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    text-align: left;
+    background: var(--color-surface);
+    color: var(--color-text);
+    border: 2px solid var(--color-border);
+    box-shadow: var(--shadow);
+    padding: 16px;
+    margin-top: 12px;
+}
+button.mode-chooser-option:hover:not(:disabled) {
+    border-color: var(--color-primary);
+    background: var(--color-primary-light);
+}
+button.mode-chooser-option strong { font-size: 1.1rem; }
+button.mode-chooser-option small { color: var(--color-muted); font-weight: 400; font-size: 0.92rem; }
+.home-mode-banner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    background: var(--color-primary-light);
+    color: var(--color-primary-dark);
+    border-radius: var(--radius);
+    padding: 8px 12px;
+    margin: -6px 0 14px;
+    font-weight: 600;
+    font-size: 0.92rem;
+}
+.become-driver-section {
+    margin-top: 22px;
+    padding: 16px;
+    background: var(--color-primary-light);
+    border-radius: var(--radius);
+}
+.become-driver-section h3 { margin: 0 0 4px; }
+.become-driver-section p { margin: 0 0 10px; }
+.become-driver-hint { color: var(--color-muted); font-size: 0.9rem; }
 "#;

@@ -9,7 +9,7 @@
 
 use dioxus::prelude::*;
 
-use crate::models::{AuthToken, AuthenticatedUser, User};
+use crate::models::{AuthToken, AuthenticatedUser, Role, User};
 use crate::storage::TokenStorage;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -25,6 +25,11 @@ pub struct SessionState {
     /// fuente de verdad que tiene la app — `None` significa "todavia no lo
     /// sabemos en esta sesion", nunca se asume `false`.
     errand_availability: Signal<Option<bool>>,
+    /// El modo que eligio la persona en esta sesion (historia #99 del
+    /// backend, issue #95): pasajero o conductor. Solo importa en una cuenta
+    /// con ambos roles; `None` mientras no haya elegido (ver
+    /// `needs_mode_choice`).
+    mode: Signal<Option<Role>>,
 }
 
 impl SessionState {
@@ -33,6 +38,7 @@ impl SessionState {
             user: Signal::new(None),
             token: Signal::new(None),
             errand_availability: Signal::new(None),
+            mode: Signal::new(None),
         }
     }
 
@@ -54,6 +60,9 @@ impl SessionState {
         storage.save(&authenticated.token);
         self.user.set(Some(authenticated.user));
         self.token.set(Some(authenticated.token));
+        // Cada inicio de sesion vuelve a preguntar el modo si la cuenta tiene
+        // los dos: puede ser otra persona en el mismo celular.
+        self.mode.set(None);
     }
 
     /// Limpia la sesion, tanto en memoria como en `storage`. Se usa tanto
@@ -64,6 +73,7 @@ impl SessionState {
         self.user.set(None);
         self.token.set(None);
         self.errand_availability.set(None);
+        self.mode.set(None);
     }
 
     /// Restaura el token persistido (si hay uno) al arrancar la app.
@@ -106,6 +116,38 @@ impl SessionState {
     }
 }
 
+impl SessionState {
+    /// Con que rol esta usando la app la persona (issue #95). Una cuenta de
+    /// un solo rol esta siempre en ese rol; una con ambos, en el que eligio
+    /// (`None` hasta que elija). `None` tambien mientras no se conozca la
+    /// cuenta (p.ej. recien hidratado el token, antes de `GET /me`).
+    pub fn active_mode(&self) -> Option<Role> {
+        let user = self.user.read();
+        let user = user.as_ref()?;
+
+        if user.has_both_modes() {
+            return *self.mode.read();
+        }
+
+        Some(if user.can_drive() {
+            Role::Driver
+        } else {
+            Role::Passenger
+        })
+    }
+
+    /// Si la app tiene que preguntar "¿Como quieres entrar?": la cuenta tiene
+    /// ambos roles y todavia no eligio en esta sesion.
+    pub fn needs_mode_choice(&self) -> bool {
+        self.user.read().as_ref().is_some_and(User::has_both_modes) && self.mode.read().is_none()
+    }
+
+    /// Elige el modo (al entrar, o con "Cambiar a modo ..." del menu).
+    pub fn set_mode(&mut self, mode: Role) {
+        self.mode.set(Some(mode));
+    }
+}
+
 impl Default for SessionState {
     fn default() -> Self {
         Self::new()
@@ -115,7 +157,6 @@ impl Default for SessionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Role;
     use crate::storage::InMemoryTokenStorage;
     use std::any::Any;
     use std::cell::RefCell;
@@ -172,6 +213,7 @@ mod tests {
                 phone: "+573001234567".to_string(),
                 phone_verified: false,
                 role: Role::Passenger,
+                roles: vec!["passenger".to_string()],
             },
             token: AuthToken {
                 access_token: "jwt-token".to_string(),
@@ -329,5 +371,83 @@ mod tests {
 
         assert_eq!(before_logout, Some(true));
         assert_eq!(after_logout, None);
+    }
+
+    fn authenticated_with_roles(role: Role, roles: &[&str]) -> AuthenticatedUser {
+        let mut authenticated = sample_authenticated();
+        authenticated.user.role = role;
+        authenticated.user.roles = roles.iter().map(|r| r.to_string()).collect();
+        authenticated
+    }
+
+    #[test]
+    fn a_single_role_account_is_always_in_that_mode() {
+        let (passenger_mode, driver_mode, any_choice) = run_in_runtime(|| {
+            let storage = InMemoryTokenStorage::new();
+            let mut passenger = SessionState::new();
+            passenger.authenticate(
+                authenticated_with_roles(Role::Passenger, &["passenger"]),
+                &storage,
+            );
+            let mut driver = SessionState::new();
+            // Backend anterior a la historia #99: sin `roles`.
+            driver.authenticate(authenticated_with_roles(Role::Driver, &[]), &storage);
+
+            (
+                passenger.active_mode(),
+                driver.active_mode(),
+                passenger.needs_mode_choice() || driver.needs_mode_choice(),
+            )
+        });
+
+        assert_eq!(passenger_mode, Some(Role::Passenger));
+        assert_eq!(driver_mode, Some(Role::Driver));
+        assert!(!any_choice);
+    }
+
+    #[test]
+    fn a_dual_role_account_must_choose_and_can_switch() {
+        let (before, needs_before, chosen, switched, needs_after) = run_in_runtime(|| {
+            let storage = InMemoryTokenStorage::new();
+            let mut session = SessionState::new();
+            session.authenticate(
+                authenticated_with_roles(Role::Passenger, &["passenger", "driver"]),
+                &storage,
+            );
+            let before = session.active_mode();
+            let needs_before = session.needs_mode_choice();
+            session.set_mode(Role::Driver);
+            let chosen = session.active_mode();
+            session.set_mode(Role::Passenger);
+            (
+                before,
+                needs_before,
+                chosen,
+                session.active_mode(),
+                session.needs_mode_choice(),
+            )
+        });
+
+        assert_eq!(before, None);
+        assert!(needs_before);
+        assert_eq!(chosen, Some(Role::Driver));
+        assert_eq!(switched, Some(Role::Passenger));
+        assert!(!needs_after);
+    }
+
+    #[test]
+    fn logging_in_again_asks_for_the_mode_again() {
+        let needs = run_in_runtime(|| {
+            let storage = InMemoryTokenStorage::new();
+            let mut session = SessionState::new();
+            let dual = authenticated_with_roles(Role::Driver, &["passenger", "driver"]);
+            session.authenticate(dual.clone(), &storage);
+            session.set_mode(Role::Driver);
+            session.logout(&storage);
+            session.authenticate(dual, &storage);
+            session.needs_mode_choice()
+        });
+
+        assert!(needs);
     }
 }

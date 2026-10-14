@@ -6,17 +6,17 @@
 
 use crate::models::{
     AcceptErrandPayload, AcceptRidePayload, ApiErrorBody, AuthToken, AuthenticatedUser,
-    BroadcastAuthPayload, BroadcastAuthResponse, ConfirmPasswordResetPayload,
+    BecomeDriverPayload, BroadcastAuthPayload, BroadcastAuthResponse, ConfirmPasswordResetPayload,
     ConfirmPhoneVerificationPayload, Coordinates, CreateErrandPayload, DataEnvelope, DocumentType,
     DriverEarningsSummary, DriverProfile, DriverVerification, Errand, LoginPayload,
     RateDriverPayload, RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload,
     RequestPasswordResetPayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
-    RideRating, RideReceipt, RideRequestPayload, Site, UpdateErrandAvailabilityPayload,
+    RideRating, RideReceipt, RideRequestPayload, Role, Site, UpdateErrandAvailabilityPayload,
     UpdateProfilePayload, UpdateVehiclePayload, UploadedDriverDocument, User, Vehicle, VehicleType,
 };
 
 #[cfg(test)]
-use crate::models::{DocumentStatus, ErrandStatus, RideStatus, Role, VerificationStatus};
+use crate::models::{DocumentStatus, ErrandStatus, RideStatus, VerificationStatus};
 
 #[derive(Debug, Clone)]
 pub struct ApiClient {
@@ -471,6 +471,47 @@ impl std::fmt::Display for AuthenticatedRequestError {
 }
 
 impl std::error::Error for AuthenticatedRequestError {}
+
+/// Fallos posibles de `POST /api/v1/me/driver-profile` (historia #99 del
+/// backend, issue #95).
+#[derive(Debug, Clone, PartialEq)]
+pub enum BecomeDriverError {
+    /// La licencia no tiene el formato que exige el backend (5 a 50
+    /// caracteres: letras, digitos y guiones). Se rechaza sin llamarlo.
+    InvalidLicenseNumber,
+    /// La cuenta es de administrador.
+    Forbidden,
+    /// La licencia ya esta registrada, o la cuenta ya es conductor.
+    Validation(ApiErrorBody),
+    SessionExpired,
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for BecomeDriverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BecomeDriverError::InvalidLicenseNumber => write!(
+                f,
+                "Ingresa un numero de licencia valido (5 a 50 caracteres: letras, numeros y guiones)."
+            ),
+            BecomeDriverError::Forbidden => write!(f, "Esta cuenta no puede ser conductor."),
+            BecomeDriverError::Validation(body) => write!(f, "{}", body.message),
+            BecomeDriverError::SessionExpired => {
+                write!(f, "La sesion expiro. Inicia sesion de nuevo.")
+            }
+            BecomeDriverError::Network(_) => write!(
+                f,
+                "No se pudo conectar con el servidor. Revisa tu conexion."
+            ),
+            BecomeDriverError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BecomeDriverError {}
 
 /// Fallos posibles de `PATCH /api/v1/me`.
 ///
@@ -2315,12 +2356,109 @@ impl ApiClient {
     /// No manda `page` ni `per_page`: esta historia solo pide la primera
     /// pagina (ver `openapi.yaml`), paginar mas alla del default del backend
     /// queda para una historia aparte.
+    ///
+    /// `mode` elige que historial ver en una cuenta con ambos roles
+    /// (historia #99 del backend, issue #95): `as=passenger` o `as=driver`.
+    /// `None` no manda `as` y el backend usa el rol con el que se registro la
+    /// cuenta, igual que antes.
     pub async fn ride_history(
         &self,
         token: &AuthToken,
+        mode: Option<Role>,
     ) -> Result<AuthenticatedFetch<Vec<Ride>>, AuthenticatedRequestError> {
-        self.get_authenticated::<Vec<Ride>>("/api/v1/me/rides", token)
+        let path = match mode {
+            Some(Role::Passenger) => "/api/v1/me/rides?as=passenger",
+            Some(Role::Driver) => "/api/v1/me/rides?as=driver",
+            None => "/api/v1/me/rides",
+        };
+        self.get_authenticated::<Vec<Ride>>(path, token).await
+    }
+
+    /// `POST /api/v1/me/driver-profile` — historia #99 del backend (issue #95
+    /// de este repo): activa el modo conductor en la propia cuenta con su
+    /// licencia. Devuelve la cuenta actualizada, con `roles` incluyendo
+    /// `driver`. La licencia se normaliza (mayusculas, sin espacios al borde)
+    /// y se valida antes de llamar al backend, igual que en el registro de
+    /// conductor. Reintenta una vez con refresh de token ante un 401.
+    pub async fn become_driver(
+        &self,
+        token: &AuthToken,
+        license_number: &str,
+    ) -> Result<AuthenticatedFetch<User>, BecomeDriverError> {
+        let license_number = license_number.trim().to_uppercase();
+        if !is_valid_license_number(&license_number) {
+            return Err(BecomeDriverError::InvalidLicenseNumber);
+        }
+        let payload = BecomeDriverPayload { license_number };
+
+        match self
+            .post_become_driver_with_token(&token.access_token, &payload)
+            .await?
+        {
+            PostOutcome::Success(data) => {
+                return Ok(AuthenticatedFetch {
+                    data,
+                    refreshed_token: None,
+                });
+            }
+            PostOutcome::Validation(body) => return Err(BecomeDriverError::Validation(body)),
+            PostOutcome::Unauthorized => {}
+        }
+
+        let renewed = self
+            .refresh(&token.access_token)
             .await
+            .map_err(|_| BecomeDriverError::SessionExpired)?;
+
+        match self
+            .post_become_driver_with_token(&renewed.access_token, &payload)
+            .await?
+        {
+            PostOutcome::Success(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            PostOutcome::Validation(body) => Err(BecomeDriverError::Validation(body)),
+            PostOutcome::Unauthorized => Err(BecomeDriverError::SessionExpired),
+        }
+    }
+
+    async fn post_become_driver_with_token(
+        &self,
+        access_token: &str,
+        body: &BecomeDriverPayload,
+    ) -> Result<PostOutcome<User>, BecomeDriverError> {
+        let url = format!("{}/api/v1/me/driver-profile", self.base_url);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(access_token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| BecomeDriverError::Network(describe_error(&err)))?;
+
+        let status = response.status();
+
+        if status.is_success() {
+            let envelope: DataEnvelope<User> = decode_json(response)
+                .await
+                .map_err(BecomeDriverError::Network)?;
+            return Ok(PostOutcome::Success(envelope.data));
+        }
+
+        match status.as_u16() {
+            401 => Ok(PostOutcome::Unauthorized),
+            403 => Err(BecomeDriverError::Forbidden),
+            422 => {
+                let body: ApiErrorBody = decode_json(response)
+                    .await
+                    .map_err(BecomeDriverError::Network)?;
+                Ok(PostOutcome::Validation(body))
+            }
+            other => Err(BecomeDriverError::Unexpected(other)),
+        }
     }
 
     /// `POST /api/v1/errands` — historia #92 del backend (issue #76 de este
@@ -5720,7 +5858,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(server.uri());
-        let fetch = client.ride_history(&sample_token()).await.unwrap();
+        let fetch = client.ride_history(&sample_token(), None).await.unwrap();
 
         assert_eq!(fetch.data.len(), 2);
         assert_eq!(fetch.data[0].id, 2);
@@ -5744,7 +5882,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(server.uri());
-        let fetch = client.ride_history(&sample_token()).await.unwrap();
+        let fetch = client.ride_history(&sample_token(), None).await.unwrap();
 
         assert!(fetch.data.is_empty());
     }
@@ -5770,7 +5908,10 @@ mod tests {
             .await;
 
         let client = ApiClient::new(server.uri());
-        let error = client.ride_history(&sample_token()).await.unwrap_err();
+        let error = client
+            .ride_history(&sample_token(), None)
+            .await
+            .unwrap_err();
 
         assert_eq!(error, AuthenticatedRequestError::SessionExpired);
     }
@@ -8909,6 +9050,100 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error, AcceptRideError::InvalidAgreedPrice);
         }
+    }
+
+    #[tokio::test]
+    async fn become_driver_sends_the_normalized_license_and_returns_the_dual_role_user() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/driver-profile"))
+            .and(body_json(
+                serde_json::json!({"license_number": "ABC-12345"}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "id": 1,
+                    "name": "Ana Garcia",
+                    "email": "ana@example.com",
+                    "phone": "+573001234567",
+                    "phone_verified": true,
+                    "role": "passenger",
+                    "roles": ["passenger", "driver"],
+                    "driver_profile": {"license_number": "ABC-12345"}
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let fetch = client
+            .become_driver(&sample_token(), "  abc-12345 ")
+            .await
+            .unwrap();
+
+        assert!(fetch.data.can_drive());
+        assert!(fetch.data.has_both_modes());
+    }
+
+    #[tokio::test]
+    async fn become_driver_rejects_an_invalid_license_without_calling_the_backend() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let error = ApiClient::new(server.uri())
+            .become_driver(&sample_token(), "!!")
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, BecomeDriverError::InvalidLicenseNumber);
+    }
+
+    #[tokio::test]
+    async fn become_driver_returns_validation_when_already_a_driver() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/driver-profile"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "Tu cuenta ya tiene el modo conductor activo.",
+                "errors": {"driver_profile": ["Tu cuenta ya tiene el modo conductor activo."]}
+            })))
+            .mount(&server)
+            .await;
+
+        let error = ApiClient::new(server.uri())
+            .become_driver(&sample_token(), "ABC-12345")
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Tu cuenta ya tiene el modo conductor activo."
+        );
+    }
+
+    #[tokio::test]
+    async fn ride_history_asks_for_the_driver_history_in_driver_mode() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/rides"))
+            .and(wiremock::matchers::query_param("as", "driver"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let fetch = ApiClient::new(server.uri())
+            .ride_history(&sample_token(), Some(Role::Driver))
+            .await
+            .unwrap();
+
+        assert!(fetch.data.is_empty());
     }
 
     #[tokio::test]
