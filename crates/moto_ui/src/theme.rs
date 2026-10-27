@@ -457,4 +457,55 @@ button.mode-chooser-option small { color: var(--color-muted); font-weight: 400; 
 .become-driver-section h3 { margin: 0 0 4px; }
 .become-driver-section p { margin: 0 0 10px; }
 .become-driver-hint { color: var(--color-muted); font-size: 0.9rem; }
+
+/* Campo de contrasena con "ojito" para ver lo escrito. */
+.password-field { position: relative; }
+.password-field input { padding-right: 52px; }
+button.password-toggle {
+    position: absolute;
+    top: 50%;
+    right: 4px;
+    transform: translateY(-50%);
+    width: 44px;
+    height: 44px;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    color: var(--color-muted);
+}
+button.password-toggle:hover:not(:disabled) { background: none; color: var(--color-primary-dark); }
+button.password-toggle:disabled { background: none; }
+
+/* Registro unico (pasajero, y opcionalmente conductor). */
+.register-intro, .register-hint { color: var(--color-muted); font-size: 0.92rem; }
+label.register-drive-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 18px 0 4px;
+    padding: 12px 14px;
+    background: var(--color-primary-light);
+    border-radius: var(--radius);
+    font-weight: 600;
+    cursor: pointer;
+}
+label.register-drive-option input { width: 22px; height: 22px; margin: 0; flex: none; }
+.register-field-error, .register-error { color: var(--color-error); font-size: 0.9rem; margin: 6px 0 0; }
+
+/* Subida de documentos: dos botones grandes (camara / galeria). */
+.document-pick-buttons { display: flex; gap: 10px; }
+.document-pick-buttons button { margin-top: 8px; background: var(--color-surface); color: var(--color-primary-dark); border: 2px solid var(--color-primary); }
+.document-pick-buttons button:hover:not(:disabled) { background: var(--color-primary-light); }
+.document-selected-file { margin-top: 10px; font-weight: 600; word-break: break-all; }
+
+/* Pasajero: aun no hay destinos cargados. */
+.ride-estimate-no-sites {
+    padding: 12px 14px;
+    background: var(--color-primary-light);
+    border-radius: var(--radius);
+    font-size: 0.95rem;
+}
 "#;

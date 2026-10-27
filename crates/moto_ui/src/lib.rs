@@ -6,6 +6,8 @@ use moto_core::models::Role;
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+pub mod fields;
+pub mod file_picker;
 pub mod map;
 pub mod screens;
 mod theme;
@@ -18,8 +20,7 @@ pub use screens::login::LoginScreen;
 pub use screens::nearby_errands::NearbyErrandsScreen;
 pub use screens::nearby_rides::NearbyRidesScreen;
 pub use screens::profile::ProfileScreen;
-pub use screens::register_driver::RegisterDriverScreen;
-pub use screens::register_passenger::RegisterPassengerScreen;
+pub use screens::register::RegisterScreen;
 pub use screens::register_vehicle::RegisterVehicleScreen;
 pub use screens::request_errand::RequestErrandScreen;
 pub use screens::ride_estimate::RideEstimateScreen;
@@ -30,8 +31,7 @@ pub use screens::vehicle::VehicleScreen;
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum AuthScreen {
     Login,
-    RegisterPassenger,
-    RegisterDriver,
+    Register,
     ForgotPassword,
 }
 
@@ -64,18 +64,12 @@ pub fn App() -> Element {
             match auth_screen() {
                 AuthScreen::Login => rsx! {
                     LoginScreen {
-                        on_register_click: move |_| auth_screen.set(AuthScreen::RegisterPassenger),
-                        on_register_driver_click: move |_| auth_screen.set(AuthScreen::RegisterDriver),
+                        on_register_click: move |_| auth_screen.set(AuthScreen::Register),
                         on_forgot_password_click: move |_| auth_screen.set(AuthScreen::ForgotPassword),
                     }
                 },
-                AuthScreen::RegisterPassenger => rsx! {
-                    RegisterPassengerScreen {
-                        on_login_click: move |_| auth_screen.set(AuthScreen::Login),
-                    }
-                },
-                AuthScreen::RegisterDriver => rsx! {
-                    RegisterDriverScreen {
+                AuthScreen::Register => rsx! {
+                    RegisterScreen {
                         on_login_click: move |_| auth_screen.set(AuthScreen::Login),
                     }
                 },

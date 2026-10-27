@@ -16,6 +16,8 @@ use moto_core::api::{ApiClient, ConfirmPasswordResetError, RequestPasswordResetE
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+use crate::fields::{PasswordInput, password_confirmation_error};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Step {
     RequestCode,
@@ -39,6 +41,8 @@ pub fn ForgotPasswordScreen(props: ForgotPasswordScreenProps) -> Element {
     let mut phone = use_signal(String::new);
     let mut code = use_signal(String::new);
     let mut password = use_signal(String::new);
+    let mut password_confirmation = use_signal(String::new);
+    let mut confirmation_error = use_signal(|| None::<&'static str>);
     let mut is_loading = use_signal(|| false);
     let mut request_error = use_signal(|| None::<RequestPasswordResetError>);
     let mut confirm_error = use_signal(|| None::<ConfirmPasswordResetError>);
@@ -74,6 +78,16 @@ pub fn ForgotPasswordScreen(props: ForgotPasswordScreenProps) -> Element {
         let phone_value = phone();
         let code_value = code();
         let password_value = password();
+        let confirmation_value = password_confirmation();
+        if confirmation_value.is_empty() && !password_value.is_empty() {
+            confirmation_error.set(Some("Repite la contrasena para confirmarla."));
+            return;
+        }
+        if let Some(message) = password_confirmation_error(&password_value, &confirmation_value) {
+            confirmation_error.set(Some(message));
+            return;
+        }
+        confirmation_error.set(None);
         let api_client = api_client.clone();
         let storage = storage.clone();
 
@@ -159,6 +173,9 @@ pub fn ForgotPasswordScreen(props: ForgotPasswordScreenProps) -> Element {
             let password_error = current_error
                 .as_ref()
                 .and_then(|err| err.field_message("password"));
+            let confirmation_message =
+                password_confirmation_error(&password(), &password_confirmation())
+                    .or(confirmation_error());
             let general_message = if code_error.is_some() || password_error.is_some() {
                 None
             } else {
@@ -184,15 +201,28 @@ pub fn ForgotPasswordScreen(props: ForgotPasswordScreenProps) -> Element {
                             p { class: "forgot-password-field-error", role: "alert", "{message}" }
                         }
                         label { r#for: "forgot-password-new-password", "Contrasena nueva" }
-                        input {
+                        PasswordInput {
                             id: "forgot-password-new-password",
-                            r#type: "password",
+                            value: password(),
                             autocomplete: "new-password",
                             disabled: is_loading(),
-                            value: "{password}",
-                            oninput: move |event| password.set(event.value()),
+                            oninput: move |value| password.set(value),
                         }
                         if let Some(message) = &password_error {
+                            p { class: "forgot-password-field-error", role: "alert", "{message}" }
+                        }
+                        label { r#for: "forgot-password-new-password-confirmation", "Repite la contrasena nueva" }
+                        PasswordInput {
+                            id: "forgot-password-new-password-confirmation",
+                            value: password_confirmation(),
+                            autocomplete: "new-password",
+                            disabled: is_loading(),
+                            oninput: move |value| {
+                                password_confirmation.set(value);
+                                confirmation_error.set(None);
+                            },
+                        }
+                        if let Some(message) = confirmation_message {
                             p { class: "forgot-password-field-error", role: "alert", "{message}" }
                         }
                         button { r#type: "submit", disabled: is_loading(),

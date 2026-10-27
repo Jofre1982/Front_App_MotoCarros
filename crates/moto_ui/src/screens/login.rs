@@ -11,13 +11,13 @@ use moto_core::api::ApiClient;
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+use crate::fields::PasswordInput;
+
 #[derive(Props, Clone, PartialEq)]
 pub struct LoginScreenProps {
-    /// Se dispara cuando el usuario pide ir a crear una cuenta de pasajero.
+    /// Se dispara cuando el usuario pide crear una cuenta. Hay un solo
+    /// registro: la misma cuenta sirve para pasajero y conductor.
     pub on_register_click: EventHandler<()>,
-    /// Se dispara cuando el usuario pide ir a crear una cuenta de conductor
-    /// (issue #7).
-    pub on_register_driver_click: EventHandler<()>,
     /// Se dispara cuando el usuario pide recuperar su contrasena.
     pub on_forgot_password_click: EventHandler<()>,
 }
@@ -72,13 +72,12 @@ pub fn LoginScreen(props: LoginScreenProps) -> Element {
                     oninput: move |event| email.set(event.value()),
                 }
                 label { r#for: "login-password", "Contrasena" }
-                input {
+                PasswordInput {
                     id: "login-password",
-                    r#type: "password",
+                    value: password(),
                     autocomplete: "current-password",
                     disabled: is_loading(),
-                    value: "{password}",
-                    oninput: move |event| password.set(event.value()),
+                    oninput: move |value| password.set(value),
                 }
                 button { r#type: "submit", disabled: is_loading(),
                     if is_loading() {
@@ -101,13 +100,7 @@ pub fn LoginScreen(props: LoginScreenProps) -> Element {
                 r#type: "button",
                 class: "login-register-link",
                 onclick: move |_| props.on_register_click.call(()),
-                "Crear cuenta de pasajero"
-            }
-            button {
-                r#type: "button",
-                class: "login-register-driver-link",
-                onclick: move |_| props.on_register_driver_click.call(()),
-                "Crear cuenta de conductor"
+                "¿Usuario nuevo? Crear cuenta"
             }
         }
     }
