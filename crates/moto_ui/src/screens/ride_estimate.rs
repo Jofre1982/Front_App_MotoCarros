@@ -565,6 +565,23 @@ pub fn RideEstimateScreen() -> Element {
                 p { "Cargando sitios..." }
             } else if let Some(message) = sites_error() {
                 p { class: "ride-estimate-sites-error", role: "alert", "{message}" }
+            } else if !sites().iter().any(|site| site.motocarro_fare().is_some()) {
+                // Sin sitios con tarifa de motocarro cargados por el admin,
+                // el `select` quedaba vacio y parecia un error de la app.
+                div { class: "ride-estimate-no-sites", role: "status",
+                    p { "Todavia no hay destinos con precio fijo. Mientras tanto puedes pedir \"Solo recogida\": escribes a donde vas y acuerdas el precio con el conductor." }
+                    button {
+                        r#type: "button",
+                        class: "ride-estimate-use-pickup-only",
+                        onclick: move |_| {
+                            ride_mode.set(RideMode::PickupOnly);
+                            estimate.set(None);
+                            estimate_error.set(None);
+                            ride_error.set(None);
+                        },
+                        "Pedir solo recogida"
+                    }
+                }
             } else {
                 select {
                     id: "ride-estimate-destination",

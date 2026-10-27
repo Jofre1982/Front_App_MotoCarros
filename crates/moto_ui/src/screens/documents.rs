@@ -10,14 +10,14 @@
 //! un administrador desde fuera de esta app (ver historia tecnica #64 del
 //! backend) — acá solo se sube y se ve el estado.
 //!
-//! La lectura de los bytes del archivo (`FileData::read_bytes`, de
-//! `dioxus-html`) es la misma API en web y en movil nativo: es lo que evita
-//! que este archivo tenga que distinguir plataforma (ver
+//! El archivo se elige con [`crate::file_picker`] ("Tomar foto" o "Elegir
+//! de la galeria") y no con un `<input type="file">` de Dioxus: en Android
+//! ese input no abria nada (ver la doc del modulo). Es la misma API en web
+//! y en movil nativo, asi que esta pantalla no distingue plataforma (ver
 //! `.claude/STANDARDS.md`).
 
 use std::sync::Arc;
 
-use dioxus::html::FileData;
 use dioxus::prelude::*;
 use moto_core::api::{ApiClient, AuthenticatedRequestError, UploadDriverDocumentError};
 use moto_core::models::{
@@ -26,6 +26,8 @@ use moto_core::models::{
 };
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
+
+use crate::file_picker::{PickOutcome, PickSource, PickedFile, pick_file};
 
 fn document_type_label(document_type: DocumentType) -> &'static str {
     match document_type {
@@ -165,22 +167,26 @@ fn DocumentRow(props: DocumentRowProps) -> Element {
 
     let mut is_uploading = use_signal(|| false);
     let mut upload_error = use_signal(|| None::<UploadDriverDocumentError>);
-    let mut selected_file = use_signal(|| None::<FileData>);
+    let mut selected_file = use_signal(|| None::<PickedFile>);
+    let mut pick_error = use_signal(|| None::<String>);
 
     let document_type = props.document.document_type;
     let on_uploaded = props.on_uploaded;
-    let input_id = format!("document-file-{}", document_type_slug(document_type));
 
-    // Elegir el archivo ya no lo sube: solo lo deja listo para que el
-    // conductor confirme con el boton "Cargar" (issue pedido por el
-    // usuario, viendo la app: sin este paso no quedaba claro si la subida
-    // habia funcionado).
-    let on_file_selected = move |event: FormEvent| {
+    // Elegir el archivo no lo sube: solo lo deja listo para que el
+    // conductor confirme con el boton "Cargar" (pedido del usuario viendo
+    // la app: sin este paso no quedaba claro si la subida habia funcionado).
+    let mut start_pick = move |source: PickSource| {
         upload_error.set(None);
-        selected_file.set(event.files().into_iter().next());
+        pick_error.set(None);
+        spawn(async move {
+            match pick_file(source).await {
+                PickOutcome::Picked(file) => selected_file.set(Some(file)),
+                PickOutcome::Cancelled => {}
+                PickOutcome::Failed(message) => pick_error.set(Some(message)),
+            }
+        });
     };
-
-    let input_id_for_upload = input_id.clone();
 
     let on_upload_click = move |_| {
         let Some(token) = session.token() else {
@@ -191,25 +197,16 @@ fn DocumentRow(props: DocumentRowProps) -> Element {
         };
         let api_client = api_client.clone();
         let storage = storage.clone();
-        let input_id = input_id_for_upload.clone();
 
         spawn(async move {
             is_uploading.set(true);
             upload_error.set(None);
 
-            let file_name = file.name();
-            let mime_type = file.content_type();
-
-            let bytes = match file.read_bytes().await {
-                Ok(bytes) => bytes.to_vec(),
-                Err(_) => {
-                    upload_error.set(Some(UploadDriverDocumentError::Network(
-                        "No se pudo leer el archivo seleccionado.".to_string(),
-                    )));
-                    is_uploading.set(false);
-                    return;
-                }
-            };
+            let PickedFile {
+                name: file_name,
+                content_type: mime_type,
+                bytes,
+            } = file;
 
             match api_client
                 .upload_driver_document(
@@ -227,15 +224,6 @@ fn DocumentRow(props: DocumentRowProps) -> Element {
                     }
                     on_uploaded.call(fetch.data);
                     selected_file.set(None);
-                    // El navegador no deja limpiar `value` de un <input
-                    // type="file"> asignandolo desde Rust/JS salvo con la
-                    // cadena vacia exacta: sin este eval, el campo seguiria
-                    // mostrando el nombre del archivo ya subido aunque
-                    // `selected_file` (y por lo tanto el boton "Cargar") ya
-                    // se hayan reiniciado.
-                    let _ = document::eval(&format!(
-                        "document.getElementById('{input_id}').value = '';"
-                    ));
                 }
                 Err(UploadDriverDocumentError::SessionExpired) => {
                     session.logout(storage.as_ref());
@@ -270,16 +258,27 @@ fn DocumentRow(props: DocumentRowProps) -> Element {
                     "Motivo del rechazo: {reason}"
                 }
             }
-            label { r#for: "{input_id}", "Subir foto o PDF" }
-            input {
-                id: "{input_id}",
-                r#type: "file",
-                accept: "image/jpeg,image/png,application/pdf",
-                disabled: is_uploading(),
-                onchange: on_file_selected,
+            div { class: "document-pick-buttons",
+                button {
+                    r#type: "button",
+                    class: "document-pick-camera",
+                    disabled: is_uploading(),
+                    onclick: move |_| start_pick(PickSource::Camera),
+                    "📷 Tomar foto"
+                }
+                button {
+                    r#type: "button",
+                    class: "document-pick-files",
+                    disabled: is_uploading(),
+                    onclick: move |_| start_pick(PickSource::Files),
+                    "🖼️ Galeria o PDF"
+                }
             }
             if let Some(file) = selected_file() {
-                p { class: "document-selected-file", "Archivo elegido: {file.name()}" }
+                p { class: "document-selected-file", "Archivo elegido: {file.name}" }
+            }
+            if let Some(message) = pick_error() {
+                p { class: "document-error", role: "alert", "{message}" }
             }
             button {
                 r#type: "button",
