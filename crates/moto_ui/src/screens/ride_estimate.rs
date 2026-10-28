@@ -72,6 +72,7 @@ use dioxus::prelude::*;
 use futures_timer::Delay;
 use moto_core::api::{
     ApiClient, AuthenticatedRequestError, CancelRideError, GetRideError, RequestRideError,
+    RespondToPriceError,
 };
 use moto_core::models::{
     Coordinates, PaymentStatus, Ride, RideCancellation, RideStatus, RideTracking, Role,
@@ -85,6 +86,7 @@ use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
 use crate::map::{MapMarker, MapView};
+use crate::price_offer::PriceOfferCard;
 use crate::screens::request_errand::RequestErrandScreen;
 
 /// Intervalo entre sondeos de `RealtimeClient::poll_events` para el canal
@@ -218,6 +220,42 @@ pub fn RideEstimateScreen() -> Element {
         }
     };
 
+    // Respuesta a la oferta de precio del conductor (backend #107).
+    let mut is_responding_price = use_signal(|| false);
+    let mut price_error = use_signal(|| None::<String>);
+    let mut rejected_notice = use_signal(|| false);
+    let respond_api_client = api_client.clone();
+    let respond_storage = storage.clone();
+    let respond_to_price = use_callback(move |accept: bool| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let Some(ride_id) = requested_ride.peek().as_ref().map(|ride| ride.id) else {
+            return;
+        };
+        let api_client = respond_api_client.clone();
+        let storage = respond_storage.clone();
+        spawn(async move {
+            is_responding_price.set(true);
+            price_error.set(None);
+            match api_client
+                .respond_to_ride_price(&token, ride_id, accept)
+                .await
+            {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    rejected_notice.set(!accept);
+                    requested_ride.set(Some(fetch.data));
+                }
+                Err(RespondToPriceError::SessionExpired) => session.logout(storage.as_ref()),
+                Err(err) => price_error.set(Some(err.to_string())),
+            }
+            is_responding_price.set(false);
+        });
+    });
+
     let on_cancel_click = move |_| {
         let Some(token) = session.token() else {
             return;
@@ -334,6 +372,23 @@ pub fn RideEstimateScreen() -> Element {
             div { class: "ride-estimate-screen",
                 h2 { "Tu motocarro" }
                 p { class: "ride-request-status", "{ride_status_label(ride.status)}" }
+                if ride.awaiting_price_response() {
+                    if let (Some(driver), Some(price)) = (&ride.driver, ride.agreed_price) {
+                        PriceOfferCard {
+                            driver_name: driver.name.clone(),
+                            price,
+                            is_responding: is_responding_price(),
+                            error: price_error(),
+                            on_accept: move |_| respond_to_price.call(true),
+                            on_reject: move |_| respond_to_price.call(false),
+                        }
+                    }
+                }
+                if rejected_notice() && ride.status == RideStatus::Requested {
+                    p { class: "ride-request-status",
+                        "Rechazaste el precio. Tu viaje quedo libre para otro conductor."
+                    }
+                }
                 dl { class: "ride-request-result",
                     dt { "Destino" }
                     dd { "{ride.destination_label()}" }

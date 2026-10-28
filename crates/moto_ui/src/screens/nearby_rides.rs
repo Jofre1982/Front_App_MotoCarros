@@ -90,7 +90,7 @@ use dioxus::prelude::*;
 use futures_timer::Delay;
 use moto_core::api::{
     AcceptRideError, ApiClient, AuthenticatedRequestError, CancelRideError, CompleteRideError,
-    GetVehicleError, ShareRideLocationError, StartRideError,
+    GetRideError, GetVehicleError, ShareRideLocationError, StartRideError,
 };
 use moto_core::location::{LocationError, LocationProvider};
 use moto_core::models::{
@@ -263,6 +263,67 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
     // `GET /rides/available`: desde ahi se muestra aunque el tiempo real no
     // conecte.
     let mut list_loaded = use_signal(|| false);
+    // Aviso cuando el pasajero rechaza el precio que propuso este conductor.
+    let mut rejected_notice = use_signal(|| false);
+    let mut offer_watch_started = use_signal(|| false);
+
+    // Mientras el pasajero no responda el precio (backend #107), se vuelve a
+    // consultar el viaje: si lo acepta, se habilita "Iniciar viaje"; si lo
+    // rechaza, el viaje ya no es de este conductor (403, o vuelve sin
+    // conductor) y se regresa a la lista con un aviso.
+    {
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+        let driver_id = props.driver_id;
+        use_effect(move || {
+            if offer_watch_started() {
+                return;
+            }
+            offer_watch_started.set(true);
+            let api_client = api_client.clone();
+            let storage = storage.clone();
+            spawn(async move {
+                loop {
+                    Delay::new(AVAILABLE_RIDES_INTERVAL).await;
+                    let waiting = accepted_ride
+                        .peek()
+                        .as_ref()
+                        .filter(|ride| ride.awaiting_price_response())
+                        .map(|ride| ride.id);
+                    let (Some(ride_id), Some(token)) = (waiting, session.token()) else {
+                        continue;
+                    };
+                    match api_client.get_ride(&token, ride_id).await {
+                        Ok(fetch) => {
+                            if let Some(refreshed) = fetch.refreshed_token {
+                                session.update_token(refreshed, storage.as_ref());
+                            }
+                            let still_mine = fetch
+                                .data
+                                .driver
+                                .as_ref()
+                                .is_some_and(|d| d.id == driver_id);
+                            if still_mine {
+                                accepted_ride.set(Some(fetch.data));
+                            } else {
+                                accepted_ride.set(None);
+                                rejected_notice.set(true);
+                            }
+                        }
+                        Err(GetRideError::Forbidden | GetRideError::NotFound) => {
+                            accepted_ride.set(None);
+                            rejected_notice.set(true);
+                        }
+                        Err(GetRideError::SessionExpired) => {
+                            session.logout(storage.as_ref());
+                            break;
+                        }
+                        Err(_) => {}
+                    }
+                }
+            });
+        });
+    }
 
     // La lista sale del servidor (`GET /rides/available`) y se refresca
     // cada `AVAILABLE_RIDES_INTERVAL`: el aviso en tiempo real solo le llega
@@ -436,7 +497,23 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                     } else {
                         p { "Tarifa estimada: {ride.fare_label()}" }
                     }
-                    if ride.status == RideStatus::Accepted {
+                    if ride.awaiting_price_response() {
+                        p { class: "upload-status", role: "status",
+                            span { class: "upload-spinner" }
+                            "Esperando que el pasajero acepte tu precio..."
+                        }
+                        CancelAcceptedRideButton {
+                            ride_id: ride.id,
+                            on_cancelled: move |_| {
+                                accepted_ride.set(None);
+                            },
+                        }
+                    } else if ride.status == RideStatus::Accepted {
+                        if ride.is_pickup_only() {
+                            p { class: "upload-status upload-status-done", role: "status",
+                                "✓ El pasajero acepto el precio. Ve a recogerlo."
+                            }
+                        }
                         StartRideButton {
                             ride_id: ride.id,
                             on_started: move |started: Ride| {
@@ -479,6 +556,17 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                     }
                 }
             } else if list_loaded() || status() == RealtimeStatus::Connected {
+                if rejected_notice() {
+                    p { class: "nearby-rides-error", role: "alert",
+                        "El pasajero no acepto tu precio. El viaje volvio a la lista."
+                        button {
+                            r#type: "button",
+                            class: "nearby-rides-dismiss-link",
+                            onclick: move |_| rejected_notice.set(false),
+                            "Entendido"
+                        }
+                    }
+                }
                 if requests().is_empty() {
                     p { class: "nearby-rides-empty",
                         "No hay solicitudes esperando por ahora. La lista se actualiza sola."

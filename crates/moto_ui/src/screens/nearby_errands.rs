@@ -123,6 +123,42 @@ pub fn NearbyErrandsScreen() -> Element {
             }
 
             loop {
+                // Los aceptados se refrescan desde el servidor: asi se ve
+                // cuando el pasajero acepta el precio (y se habilita
+                // "Completar") o lo rechaza (el mandado deja de ser de este
+                // conductor y vuelve a la lista) — backend #107.
+                let waiting_ids: Vec<u64> = accepted_errands
+                    .peek()
+                    .iter()
+                    .filter(|errand| errand.awaiting_price_response())
+                    .map(|errand| errand.id)
+                    .collect();
+                if !waiting_ids.is_empty()
+                    && let Ok(fetch) = api_client.my_errands(&current_token, Role::Driver).await
+                {
+                    let mine = fetch.data;
+                    let rejected = waiting_ids
+                        .iter()
+                        .any(|id| !mine.iter().any(|errand| errand.id == *id));
+                    accepted_errands.with_mut(|list| {
+                        list.retain(|errand| {
+                            !waiting_ids.contains(&errand.id)
+                                || mine.iter().any(|m| m.id == errand.id)
+                        });
+                        for errand in list.iter_mut() {
+                            if let Some(fresh) = mine.iter().find(|m| m.id == errand.id) {
+                                *errand = fresh.clone();
+                            }
+                        }
+                    });
+                    if rejected {
+                        unavailable_notice.set(Some(
+                            "El pasajero no acepto tu precio. El mandado volvio a la lista."
+                                .to_string(),
+                        ));
+                    }
+                }
+
                 match api_client.list_errands(&current_token).await {
                     Ok(fetch) => {
                         if let Some(refreshed) = fetch.refreshed_token {
@@ -462,10 +498,20 @@ fn AcceptedErrandRow(props: AcceptedErrandRowProps) -> Element {
                 p { class: "accepted-errand-completed", "Completado." }
             } else {
                 PickupLocation { lat: props.errand.origin.latitude, lng: props.errand.origin.longitude }
+                if props.errand.awaiting_price_response() {
+                    p { class: "upload-status", role: "status",
+                        span { class: "upload-spinner" }
+                        "Esperando que el pasajero acepte tu precio..."
+                    }
+                } else {
+                    p { class: "upload-status upload-status-done", role: "status",
+                        "✓ El pasajero acepto el precio."
+                    }
+                }
                 button {
                     r#type: "button",
                     class: "accepted-errand-complete-button",
-                    disabled: is_completing(),
+                    disabled: is_completing() || props.errand.awaiting_price_response(),
                     onclick: on_complete_click,
                     if is_completing() {
                         "Completando..."
