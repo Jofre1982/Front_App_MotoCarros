@@ -284,10 +284,13 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
             let storage = storage.clone();
 
             spawn(async move {
-                if let Ok(fetch) = api_client.ride_history(&token, Some(Role::Driver)).await {
-                    if let Some(active) = latest_active_ride(&fetch.data) {
-                        accepted_ride.set(Some(active));
-                    }
+                let active = api_client
+                    .ride_history(&token, Some(Role::Driver))
+                    .await
+                    .ok()
+                    .and_then(|fetch| latest_active_ride(&fetch.data));
+                if active.is_some() {
+                    accepted_ride.set(active);
                 }
                 loop {
                     if accepted_ride().is_none() {
