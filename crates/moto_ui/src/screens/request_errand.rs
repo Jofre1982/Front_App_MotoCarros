@@ -11,10 +11,14 @@
 //! precio: se acuerda con el conductor, que lo registra al aceptar.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use dioxus::prelude::*;
-use moto_core::api::{ApiClient, CreateErrandError};
-use moto_core::models::{Coordinates, CreateErrandPayload, Errand, ErrandStatus, VehicleType};
+use futures_timer::Delay;
+use moto_core::api::{ApiClient, AuthenticatedRequestError, CreateErrandError};
+use moto_core::models::{
+    Coordinates, CreateErrandPayload, Errand, ErrandStatus, Role, VehicleType,
+};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
@@ -24,6 +28,9 @@ use crate::map::{MapMarker, MapView};
 /// Centro inicial del mapa: casco urbano de Inirida (ver `ride_estimate.rs`).
 const DEFAULT_CENTER_LAT: f64 = 3.8653;
 const DEFAULT_CENTER_LNG: f64 = -67.9239;
+
+/// Cada cuanto se vuelve a consultar el pedido mientras sigue abierto.
+const ERRAND_REFRESH_INTERVAL: Duration = Duration::from_secs(8);
 
 /// Textos que cambian entre mandado y motocarga. Separado para poder
 /// probarlo sin Dioxus.
@@ -81,6 +88,64 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
     let mut is_submitting = use_signal(|| false);
     let mut submit_error = use_signal(|| None::<CreateErrandError>);
     let mut created_errand = use_signal(|| None::<Errand>);
+    let mut tracking_started = use_signal(|| false);
+
+    // Seguimiento del pedido (backend #106, `GET /me/errands`): al abrir la
+    // pantalla se recupera el pedido que sigue abierto, y mientras no se
+    // complete se vuelve a consultar cada `ERRAND_REFRESH_INTERVAL` para
+    // mostrar si ya lo aceptaron, quien y a que precio. Antes el pasajero
+    // no se enteraba de nada despues de pedir (reportado probando el APK).
+    {
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+        use_effect(move || {
+            if tracking_started() {
+                return;
+            }
+            tracking_started.set(true);
+            let api_client = api_client.clone();
+            let storage = storage.clone();
+            spawn(async move {
+                let mut first = true;
+                while let Some(token) = session.token() {
+                    // Un pedido completado ya no cambia: se deja de consultar
+                    // hasta que el pasajero pida otro.
+                    let watching = created_errand
+                        .peek()
+                        .as_ref()
+                        .filter(|errand| errand.status != ErrandStatus::Completed)
+                        .map(|errand| errand.id);
+                    if first || watching.is_some() {
+                        match api_client.my_errands(&token, Role::Passenger).await {
+                            Ok(fetch) => {
+                                if let Some(refreshed) = fetch.refreshed_token {
+                                    session.update_token(refreshed, storage.as_ref());
+                                }
+                                let found = match watching {
+                                    Some(id) => {
+                                        fetch.data.into_iter().find(|errand| errand.id == id)
+                                    }
+                                    None => open_errand_of_kind(fetch.data, vehicle_type),
+                                };
+                                if let Some(errand) = found
+                                    .filter(|errand| created_errand.peek().as_ref() != Some(errand))
+                                {
+                                    created_errand.set(Some(errand));
+                                }
+                            }
+                            Err(AuthenticatedRequestError::SessionExpired) => {
+                                session.logout(storage.as_ref());
+                                break;
+                            }
+                            Err(_) => {}
+                        }
+                        first = false;
+                    }
+                    Delay::new(ERRAND_REFRESH_INTERVAL).await;
+                }
+            });
+        });
+    }
 
     let on_map_click = move |(lat, lng): (f64, f64)| {
         origin.set(Some((lat, lng)));
@@ -148,15 +213,31 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
     if let Some(errand) = created_errand() {
         return rsx! {
             div { class: "request-errand-screen",
-                div { class: "request-errand-done", role: "status",
-                    h2 { "✓ {copy.created_title}" }
-                    p { "{errand_status_label(errand.status)}" }
-                    p { class: "request-errand-done-detail", "{errand.description}" }
-                    if let Some(destination) = errand.destination_label() {
-                        p { class: "request-errand-done-detail", "Destino: {destination}" }
+                div {
+                    class: if errand.status == ErrandStatus::Requested { "request-errand-waiting" } else { "request-errand-done" },
+                    role: "status",
+                    h2 {
+                        if errand.status == ErrandStatus::Requested {
+                            "⏳ {copy.created_title}"
+                        } else {
+                            "✓ {copy.created_title}"
+                        }
                     }
-                    p { class: "request-errand-price-note",
-                        "El precio lo acuerdas con el conductor cuando acepte."
+                    p { class: "request-errand-status", "{errand_status_label(errand.status)}" }
+                    if let Some(driver) = &errand.driver {
+                        p { class: "request-errand-done-detail", "Conductor: {driver.name}" }
+                    }
+                    if let Some(price) = errand.agreed_price {
+                        p { class: "request-errand-done-detail", "Precio acordado: {format_cop(price)}" }
+                    }
+                    p { "{errand.description}" }
+                    if let Some(destination) = errand.destination_label() {
+                        p { "Destino: {destination}" }
+                    }
+                    if errand.status == ErrandStatus::Requested {
+                        p { class: "request-errand-price-note",
+                            "Esta pantalla se actualiza sola cuando un conductor lo acepte."
+                        }
                     }
                 }
                 button {
@@ -296,13 +377,36 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
     }
 }
 
+/// El pedido mas reciente que sigue abierto (`requested` o `accepted`) del
+/// tipo de esta pantalla (mandado o motocarga). `rides` viene del mas nuevo
+/// al mas viejo.
+fn open_errand_of_kind(errands: Vec<Errand>, vehicle_type: VehicleType) -> Option<Errand> {
+    errands.into_iter().find(|errand| {
+        errand.vehicle_type == vehicle_type && errand.status != ErrandStatus::Completed
+    })
+}
+
+/// `7000` → `"$7.000"`, como se escriben los precios en Colombia.
+fn format_cop(amount: i64) -> String {
+    let digits = amount.unsigned_abs().to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push('.');
+        }
+        grouped.push(digit);
+    }
+    let sign = if amount < 0 { "-" } else { "" };
+    format!("{sign}${grouped}")
+}
+
 /// Texto del estado de un pedido recien creado (`Errand::status`). Justo
 /// despues de `POST /api/v1/errands` siempre nace `requested`; los demas
 /// valores se cubren igual porque el tipo los admite.
 fn errand_status_label(status: ErrandStatus) -> &'static str {
     match status {
         ErrandStatus::Requested => "Esperando a que un conductor lo acepte.",
-        ErrandStatus::Accepted => "Un conductor lo acepto.",
+        ErrandStatus::Accepted => "¡Un conductor lo acepto y va en camino!",
         ErrandStatus::Completed => "Ya se completo.",
     }
 }
@@ -325,6 +429,14 @@ mod tests {
             errand_status_label(ErrandStatus::Completed),
             "Ya se completo."
         );
+    }
+
+    #[test]
+    fn format_cop_agrupa_miles_con_punto() {
+        assert_eq!(format_cop(7000), "$7.000");
+        assert_eq!(format_cop(150000), "$150.000");
+        assert_eq!(format_cop(500), "$500");
+        assert_eq!(format_cop(1234567), "$1.234.567");
     }
 
     #[test]

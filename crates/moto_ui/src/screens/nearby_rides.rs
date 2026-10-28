@@ -104,6 +104,7 @@ use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
 use super::register_vehicle::RegisterVehicleScreen;
+use crate::map::PickupLocation;
 
 /// Intervalo entre sondeos de `RealtimeClient::poll_events` — no hay forma de
 /// que el transporte avise por si solo cuando llega un frame nuevo (ver
@@ -426,6 +427,9 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
             if let Some(ride) = accepted_ride() {
                 div { class: "nearby-ride-accepted",
                     p { "Aceptaste el viaje." }
+                    if ride.status == RideStatus::Accepted {
+                        PickupLocation { lat: ride.origin.latitude, lng: ride.origin.longitude }
+                    }
                     p { "Destino: {ride.destination_label()}" }
                     if ride.is_pickup_only() {
                         p { "Precio acordado: {ride.fare_label()}" }
@@ -618,7 +622,7 @@ fn NearbyRideRow(props: NearbyRideRowProps) -> Element {
             if is_pickup_only {
                 p { class: "nearby-ride-mode-badge", "Solo recogida · precio a acordar" }
             }
-            p { "Origen: {props.request.origin.latitude}, {props.request.origin.longitude}" }
+            PickupLocation { lat: props.request.origin.latitude, lng: props.request.origin.longitude }
             p { "Destino: {props.request.destination_label()}" }
             p { "Pasajeros: {props.request.passenger_count}" }
             if is_pickup_only {
