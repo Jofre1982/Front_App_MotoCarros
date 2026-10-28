@@ -42,8 +42,10 @@ pub enum PickSource {
     /// Abre la camara trasera directamente (si el celular lo permite; si no,
     /// el WebView cae al selector normal).
     Camera,
-    /// Galeria o archivos del celular: fotos y PDF.
-    Files,
+    /// Galeria de fotos del celular. Con `image/*` Android abre su selector
+    /// de fotos; con varios tipos (fotos + PDF) abria el gestor de archivos,
+    /// que confundia (reportado probando el APK).
+    Gallery,
 }
 
 #[derive(Deserialize)]
@@ -108,7 +110,7 @@ const readAsBase64 = (blob) => new Promise((resolve, reject) => {
   reader.readAsDataURL(blob);
 });
 const shrink = (file) => new Promise((resolve) => {
-  if (!/^image\/(jpeg|png)$/.test(file.type)) { resolve(null); return; }
+  if (!/^image\//.test(file.type)) { resolve(null); return; }
   const url = URL.createObjectURL(file);
   const img = new Image();
   img.onload = () => {
@@ -149,7 +151,7 @@ input.click();
 pub async fn pick_file(source: PickSource) -> PickOutcome {
     let (accept, camera) = match source {
         PickSource::Camera => ("image/*", true),
-        PickSource::Files => ("image/jpeg,image/png,application/pdf", false),
+        PickSource::Gallery => ("image/*", false),
     };
     // Las opciones van dentro del script (y no por `send`) para que el
     // `click()` ocurra sin una ida y vuelta extra: el WebView solo abre el
@@ -159,6 +161,91 @@ pub async fn pick_file(source: PickSource) -> PickOutcome {
     match eval.recv::<serde_json::Value>().await {
         Ok(value) => parse_pick_message(value),
         Err(_) => PickOutcome::Failed("No se pudo abrir el selector de archivos.".to_string()),
+    }
+}
+
+/// `data:` URL para mostrar la miniatura de lo elegido, o `None` si no es
+/// una imagen (p. ej. un PDF): ahi la pantalla muestra solo el nombre.
+pub fn thumbnail_data_url(file: &PickedFile) -> Option<String> {
+    let kind = file.content_type.as_deref().unwrap_or("");
+    kind.starts_with("image/").then(|| {
+        format!(
+            "data:{kind};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&file.bytes)
+        )
+    })
+}
+
+#[derive(Props, Clone, PartialEq)]
+pub struct PhotoPickerProps {
+    /// Lo elegido; `None` mientras no haya nada. La pantalla lo lee para
+    /// subirlo y lo vuelve a `None` cuando termina.
+    pub selected: Signal<Option<PickedFile>>,
+    #[props(default = false)]
+    pub disabled: bool,
+}
+
+/// Los dos botones de foto ("Tomar foto" primero, porque es lo que mas se
+/// usa) y, una vez elegida, la miniatura con la opcion de quitarla. Lo usan
+/// los documentos del conductor y los mandados del pasajero.
+#[component]
+pub fn PhotoPicker(props: PhotoPickerProps) -> Element {
+    let mut selected = props.selected;
+    let mut pick_error = use_signal(|| None::<String>);
+
+    let mut start_pick = move |source: PickSource| {
+        pick_error.set(None);
+        spawn(async move {
+            match pick_file(source).await {
+                PickOutcome::Picked(file) => selected.set(Some(file)),
+                PickOutcome::Cancelled => {}
+                PickOutcome::Failed(message) => pick_error.set(Some(message)),
+            }
+        });
+    };
+
+    let current = selected();
+    let thumbnail = current.as_ref().and_then(thumbnail_data_url);
+
+    rsx! {
+        div { class: "photo-picker",
+            if let Some(file) = current {
+                div { class: "photo-picker-preview",
+                    if let Some(src) = thumbnail {
+                        img { src: "{src}", alt: "Foto elegida" }
+                    } else {
+                        p { class: "photo-picker-file", "📄 {file.name}" }
+                    }
+                    button {
+                        r#type: "button",
+                        class: "photo-picker-remove-link",
+                        disabled: props.disabled,
+                        onclick: move |_| selected.set(None),
+                        "Quitar y elegir otra"
+                    }
+                }
+            } else {
+                div { class: "photo-picker-buttons",
+                    button {
+                        r#type: "button",
+                        class: "photo-picker-camera",
+                        disabled: props.disabled,
+                        onclick: move |_| start_pick(PickSource::Camera),
+                        "📷 Tomar foto"
+                    }
+                    button {
+                        r#type: "button",
+                        class: "photo-picker-gallery",
+                        disabled: props.disabled,
+                        onclick: move |_| start_pick(PickSource::Gallery),
+                        "🖼️ Galeria"
+                    }
+                }
+            }
+            if let Some(message) = pick_error() {
+                p { class: "photo-picker-error", role: "alert", "{message}" }
+            }
+        }
     }
 }
 
@@ -220,6 +307,24 @@ mod tests {
             parse_pick_message(json!({ "name": "a.pdf", "data": "" })),
             PickOutcome::Failed(_)
         ));
+    }
+
+    #[test]
+    fn miniatura_solo_para_imagenes() {
+        let foto = PickedFile {
+            name: "a.jpg".to_string(),
+            content_type: Some("image/jpeg".to_string()),
+            bytes: b"hola".to_vec(),
+        };
+        assert_eq!(
+            thumbnail_data_url(&foto).as_deref(),
+            Some("data:image/jpeg;base64,aG9sYQ==")
+        );
+        let pdf = PickedFile {
+            content_type: Some("application/pdf".to_string()),
+            ..foto
+        };
+        assert_eq!(thumbnail_data_url(&pdf), None);
     }
 
     #[test]

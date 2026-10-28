@@ -1,112 +1,89 @@
-//! Pantalla de pedir un mandado (servicio a domicilio, pasajero) — historia
-//! #92 del backend, issue #76 de este repo.
+//! Formulario de mandado y de motocarga (pasajero) — `POST /api/v1/errands`.
 //!
-//! Consume `POST /api/v1/errands` (`ApiClient::create_errand`) directamente,
-//! sin paso de estimacion: a diferencia de un viaje (`RideEstimateScreen`),
-//! un mandado no tiene tarifa fija — el precio se negocia por fuera del
-//! sistema y el conductor lo registra al aceptar (`AcceptErrandPayload`,
-//! issue #79). El destino se elige del mismo catalogo de sitios
-//! (`GET /sites`, `ApiClient::list_sites`) que usa `RideEstimateScreen`; el
-//! origen (donde recoger el mandado) sigue siendo un punto libre en el mapa,
-//! igual que el origen de un viaje.
+//! Lo usan dos lugares, con el mismo formulario:
+//! - "Pedir motocarro" → "Mandado" (`vehicle_type: motocarro`).
+//! - "Pedir motocarga" del menu (`vehicle_type: motocarga`): solo lo ven y
+//!   aceptan conductores con motocarga.
 //!
-//! La foto es opcional y se sube junto con el resto de los campos en la
-//! misma llamada multipart (`photo`, jpg/jpeg/png hasta 5 MB segun
-//! `CreateErrandRequest::rules()` del backend): el campo de archivo no
-//! valida formato/tamano en el cliente antes de mandar, mismo criterio que
-//! `DocumentsScreen` (`accept` del input mas el desglose por campo de un 422
-//! son suficientes, ver `CreateErrandError::field_message`).
-//!
-//! Una vez creado, esta pantalla solo confirma el mandado (estado, sitio,
-//! descripcion): no ofrece seguimiento en tiempo real, cancelar, ni un
-//! enlace al historial — el backend no expone nada de eso para mandados
-//! todavia (fuera de alcance de esta historia, ver su seccion "Fuera de
-//! alcance").
+//! Pensado para gente que no esta acostumbrada a estas apps (pedido del
+//! dueno): marcar en el mapa donde se recoge, escribir que hay que hacer o
+//! llevar, y pedir. A donde llevarlo es opcional y la foto tambien. Sin
+//! precio: se acuerda con el conductor, que lo registra al aceptar.
 
 use std::sync::Arc;
 
-use dioxus::html::FileData;
 use dioxus::prelude::*;
-use moto_core::api::{ApiClient, AuthenticatedRequestError, CreateErrandError};
-use moto_core::models::{Coordinates, CreateErrandPayload, Errand, Site};
+use moto_core::api::{ApiClient, CreateErrandError};
+use moto_core::models::{Coordinates, CreateErrandPayload, Errand, ErrandStatus, VehicleType};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+use crate::file_picker::{PhotoPicker, PickedFile};
 use crate::map::{MapMarker, MapView};
 
-/// Centro inicial del mapa mientras no exista geolocalizacion del
-/// dispositivo — mismo punto y mismo motivo que `RideEstimateScreen`.
-// Casco urbano de Inirida, donde opera el servicio (ver `ride_estimate.rs`).
+/// Centro inicial del mapa: casco urbano de Inirida (ver `ride_estimate.rs`).
 const DEFAULT_CENTER_LAT: f64 = 3.8653;
 const DEFAULT_CENTER_LNG: f64 = -67.9239;
 
+/// Textos que cambian entre mandado y motocarga. Separado para poder
+/// probarlo sin Dioxus.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ErrandCopy {
+    pub title: &'static str,
+    pub pickup_step: &'static str,
+    pub description_step: &'static str,
+    pub description_placeholder: &'static str,
+    pub submit: &'static str,
+    pub created_title: &'static str,
+}
+
+pub fn errand_copy(vehicle_type: VehicleType) -> ErrandCopy {
+    match vehicle_type {
+        VehicleType::Motocarro => ErrandCopy {
+            title: "Pedir un mandado",
+            pickup_step: "1. ¿Donde se hace el mandado?",
+            description_step: "2. ¿Que necesitas?",
+            description_placeholder: "Ej.: comprar 2 panes y una leche en la tienda de la esquina",
+            submit: "Pedir mandado",
+            created_title: "Mandado pedido",
+        },
+        VehicleType::Motocarga => ErrandCopy {
+            title: "Pedir motocarga",
+            pickup_step: "1. ¿Donde recogemos la carga?",
+            description_step: "2. ¿Que hay que llevar?",
+            description_placeholder: "Ej.: una nevera y dos cajas medianas",
+            submit: "Pedir motocarga",
+            created_title: "Motocarga pedida",
+        },
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+pub struct RequestErrandScreenProps {
+    pub vehicle_type: VehicleType,
+    /// Dentro de "Pedir motocarro" el titulo ya esta arriba.
+    #[props(default = false)]
+    pub embedded: bool,
+}
+
 #[component]
-pub fn RequestErrandScreen() -> Element {
+pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
     let api_client = use_context::<ApiClient>();
     let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context::<SessionState>();
-
-    let mut sites = use_signal(Vec::<Site>::new);
-    let mut sites_error = use_signal(|| None::<String>);
-    let mut is_loading_sites = use_signal(|| false);
-    // Mismo criterio que `RideEstimateScreen`: evita reprogramar el efecto en
-    // un loop si `session.update_token`/`logout` (dentro del propio fetch)
-    // volviera a disparar la lectura de `session.token()`.
-    let mut has_fetched_sites = use_signal(|| false);
+    let copy = errand_copy(props.vehicle_type);
+    let vehicle_type = props.vehicle_type;
 
     let mut origin = use_signal(|| None::<(f64, f64)>);
-    let mut destination_site_id = use_signal(|| None::<u64>);
     let mut description = use_signal(String::new);
-    let mut selected_photo = use_signal(|| None::<FileData>);
+    let mut destination_text = use_signal(String::new);
+    let selected_photo = use_signal(|| None::<PickedFile>);
     let mut is_submitting = use_signal(|| false);
     let mut submit_error = use_signal(|| None::<CreateErrandError>);
     let mut created_errand = use_signal(|| None::<Errand>);
 
-    let api_client_for_sites = api_client.clone();
-    let storage_for_sites = storage.clone();
-
-    use_effect(move || {
-        if has_fetched_sites() {
-            return;
-        }
-
-        let Some(token) = session.token() else {
-            return;
-        };
-        has_fetched_sites.set(true);
-
-        let api_client = api_client_for_sites.clone();
-        let storage = storage_for_sites.clone();
-
-        spawn(async move {
-            is_loading_sites.set(true);
-            sites_error.set(None);
-
-            match api_client.list_sites(&token).await {
-                Ok(fetch) => {
-                    if let Some(refreshed) = fetch.refreshed_token {
-                        session.update_token(refreshed, storage.as_ref());
-                    }
-                    sites.set(fetch.data);
-                }
-                Err(AuthenticatedRequestError::SessionExpired) => {
-                    session.logout(storage.as_ref());
-                }
-                Err(err) => {
-                    sites_error.set(Some(err.to_string()));
-                }
-            }
-
-            is_loading_sites.set(false);
-        });
-    });
-
     let on_map_click = move |(lat, lng): (f64, f64)| {
         origin.set(Some((lat, lng)));
-    };
-
-    let on_photo_selected = move |event: FormEvent| {
-        selected_photo.set(event.files().into_iter().next());
     };
 
     let on_submit_click = move |_| {
@@ -116,14 +93,12 @@ pub fn RequestErrandScreen() -> Element {
         let Some((origin_lat, origin_lng)) = origin() else {
             return;
         };
-        let Some(site_id) = destination_site_id() else {
-            return;
-        };
         let description_value = description().trim().to_string();
         if description_value.is_empty() {
             return;
         }
-        let photo = selected_photo();
+        let destination_value = destination_text().trim().to_string();
+        let photo = selected_photo().map(|file| (file.name, file.content_type, file.bytes));
         let api_client = api_client.clone();
         let storage = storage.clone();
 
@@ -131,31 +106,14 @@ pub fn RequestErrandScreen() -> Element {
             is_submitting.set(true);
             submit_error.set(None);
 
-            let photo = match photo {
-                Some(file) => {
-                    let file_name = file.name();
-                    let mime_type = file.content_type();
-                    match file.read_bytes().await {
-                        Ok(bytes) => Some((file_name, mime_type, bytes.to_vec())),
-                        Err(_) => {
-                            submit_error.set(Some(CreateErrandError::Network(
-                                "No se pudo leer la foto seleccionada.".to_string(),
-                            )));
-                            is_submitting.set(false);
-                            return;
-                        }
-                    }
-                }
-                None => None,
-            };
-
             let payload = CreateErrandPayload {
                 description: description_value,
                 origin: Coordinates {
                     latitude: origin_lat,
                     longitude: origin_lng,
                 },
-                destination_site_id: site_id,
+                destination_text: Some(destination_value).filter(|text| !text.is_empty()),
+                vehicle_type,
             };
 
             match api_client.create_errand(&token, payload, photo).await {
@@ -177,17 +135,35 @@ pub fn RequestErrandScreen() -> Element {
         });
     };
 
+    let mut selected_photo_for_reset = selected_photo;
+    let on_new_click = move |_| {
+        created_errand.set(None);
+        origin.set(None);
+        description.set(String::new());
+        destination_text.set(String::new());
+        selected_photo_for_reset.set(None);
+        submit_error.set(None);
+    };
+
     if let Some(errand) = created_errand() {
         return rsx! {
             div { class: "request-errand-screen",
-                h2 { "Mandado solicitado" }
-                dl { class: "request-errand-result",
-                    dt { "Estado" }
-                    dd { "{errand_status_label(errand.status)}" }
-                    dt { "Descripcion" }
-                    dd { "{errand.description}" }
-                    dt { "Destino" }
-                    dd { "{errand.destination.name}" }
+                div { class: "request-errand-done", role: "status",
+                    h2 { "✓ {copy.created_title}" }
+                    p { "{errand_status_label(errand.status)}" }
+                    p { class: "request-errand-done-detail", "{errand.description}" }
+                    if let Some(destination) = errand.destination_label() {
+                        p { class: "request-errand-done-detail", "Destino: {destination}" }
+                    }
+                    p { class: "request-errand-price-note",
+                        "El precio lo acuerdas con el conductor cuando acepte."
+                    }
+                }
+                button {
+                    r#type: "button",
+                    class: "request-errand-new-link",
+                    onclick: on_new_click,
+                    "Pedir otro"
                 }
             }
         };
@@ -203,26 +179,17 @@ pub fn RequestErrandScreen() -> Element {
         .collect();
 
     let current_error = submit_error();
-    let description_field_error = current_error
-        .as_ref()
-        .and_then(|err| err.field_message("description"));
-    let origin_field_error = current_error
-        .as_ref()
-        .and_then(|err| err.field_message("origin.latitude"))
-        .or_else(|| {
-            current_error
-                .as_ref()
-                .and_then(|err| err.field_message("origin.longitude"))
-        });
-    let destination_field_error = current_error
-        .as_ref()
-        .and_then(|err| err.field_message("destination_site_id"));
-    let photo_field_error = current_error
-        .as_ref()
-        .and_then(|err| err.field_message("photo"));
-    // Mismo criterio que el resto de los formularios de esta app (issue #6):
-    // el mensaje generico solo se muestra cuando el error no trae ningun
-    // desglose por campo.
+    let field = |name: &str| {
+        current_error
+            .as_ref()
+            .and_then(|err| err.field_message(name))
+    };
+    let description_field_error = field("description");
+    let origin_field_error = field("origin.latitude").or_else(|| field("origin.longitude"));
+    let destination_field_error = field("destination_text");
+    let photo_field_error = field("photo");
+    // Mismo criterio que el resto de los formularios (issue #6): el mensaje
+    // generico solo cuando el error no trae desglose por campo.
     let general_message = if description_field_error.is_some()
         || origin_field_error.is_some()
         || destination_field_error.is_some()
@@ -233,18 +200,27 @@ pub fn RequestErrandScreen() -> Element {
         current_error.as_ref().map(|err| err.to_string())
     };
 
-    let can_submit = origin().is_some()
-        && destination_site_id().is_some()
-        && !description().trim().is_empty()
-        && !is_submitting();
+    let missing_hint = match (origin().is_some(), !description().trim().is_empty()) {
+        (false, _) => Some("Toca el mapa para marcar el punto de recogida."),
+        (true, false) => Some("Escribe que necesitas."),
+        (true, true) => None,
+    };
+    let can_submit = missing_hint.is_none() && !is_submitting();
 
     rsx! {
         div { class: "request-errand-screen",
-            h2 { "Pedir un mandado" }
-            p { class: "request-errand-instructions",
-                "Toca el mapa para elegir donde recoger el mandado."
+            if !props.embedded {
+                h2 { "{copy.title}" }
             }
-            div { class: "request-errand-map", style: "height: 320px;",
+            p { class: "ride-step-title", "{copy.pickup_step}" }
+            p { class: "ride-estimate-instructions",
+                if origin().is_some() {
+                    "Listo, ya marcamos el punto. Puedes tocar otro lugar para cambiarlo."
+                } else {
+                    "Toca el mapa en el lugar."
+                }
+            }
+            div { class: "request-errand-map", style: "height: 300px;",
                 MapView {
                     center_lat: DEFAULT_CENTER_LAT,
                     center_lng: DEFAULT_CENTER_LNG,
@@ -255,9 +231,12 @@ pub fn RequestErrandScreen() -> Element {
             if let Some(message) = &origin_field_error {
                 p { class: "request-errand-field-error", role: "alert", "{message}" }
             }
-            label { r#for: "request-errand-description", "Descripcion" }
+            label { r#for: "request-errand-description", class: "ride-step-title", "{copy.description_step}" }
             textarea {
                 id: "request-errand-description",
+                rows: "3",
+                maxlength: "500",
+                placeholder: "{copy.description_placeholder}",
                 disabled: is_submitting(),
                 value: "{description}",
                 oninput: move |event| description.set(event.value()),
@@ -265,41 +244,32 @@ pub fn RequestErrandScreen() -> Element {
             if let Some(message) = &description_field_error {
                 p { class: "request-errand-field-error", role: "alert", "{message}" }
             }
-            label { r#for: "request-errand-destination", "Destino" }
-            if is_loading_sites() {
-                p { "Cargando sitios..." }
-            } else if let Some(message) = sites_error() {
-                p { class: "request-errand-sites-error", role: "alert", "{message}" }
-            } else {
-                select {
-                    id: "request-errand-destination",
-                    disabled: is_submitting(),
-                    value: destination_site_id().map(|id| id.to_string()).unwrap_or_default(),
-                    onchange: move |event| {
-                        destination_site_id.set(event.value().parse::<u64>().ok());
-                    },
-                    option { value: "", disabled: true, "Elige un sitio" }
-                    for site in sites() {
-                        option { key: "{site.id}", value: "{site.id}", "{site.name}" }
-                    }
-                }
+            label { r#for: "request-errand-destination", class: "ride-step-title",
+                "3. ¿A donde lo llevamos? "
+                span { class: "optional-tag", "(opcional)" }
+            }
+            input {
+                id: "request-errand-destination",
+                r#type: "text",
+                maxlength: "255",
+                placeholder: "Ej.: mi casa, barrio La Esperanza",
+                disabled: is_submitting(),
+                value: "{destination_text}",
+                oninput: move |event| destination_text.set(event.value()),
             }
             if let Some(message) = &destination_field_error {
                 p { class: "request-errand-field-error", role: "alert", "{message}" }
             }
-            label { r#for: "request-errand-photo", "Foto (opcional)" }
-            input {
-                id: "request-errand-photo",
-                r#type: "file",
-                accept: "image/jpeg,image/png",
-                disabled: is_submitting(),
-                onchange: on_photo_selected,
+            p { class: "ride-step-title",
+                "4. Foto "
+                span { class: "optional-tag", "(opcional)" }
             }
-            if let Some(file) = selected_photo() {
-                p { class: "request-errand-selected-photo", "Archivo elegido: {file.name()}" }
-            }
+            PhotoPicker { selected: selected_photo, disabled: is_submitting() }
             if let Some(message) = &photo_field_error {
                 p { class: "request-errand-field-error", role: "alert", "{message}" }
+            }
+            p { class: "request-errand-price-note",
+                "Precio: lo acuerdas con el conductor cuando acepte."
             }
             button {
                 r#type: "button",
@@ -307,10 +277,17 @@ pub fn RequestErrandScreen() -> Element {
                 disabled: !can_submit,
                 onclick: on_submit_click,
                 if is_submitting() {
-                    "Solicitando..."
+                    if selected_photo().is_some() {
+                        "Enviando foto y pedido..."
+                    } else {
+                        "Pidiendo..."
+                    }
                 } else {
-                    "Pedir mandado"
+                    "{copy.submit}"
                 }
+            }
+            if let Some(hint) = missing_hint {
+                p { class: "ride-estimate-empty", "{hint}" }
             }
             if let Some(message) = general_message {
                 p { class: "request-errand-error", role: "alert", "{message}" }
@@ -319,24 +296,20 @@ pub fn RequestErrandScreen() -> Element {
     }
 }
 
-/// Texto del estado de un mandado recien solicitado (`Errand::status`). Justo
+/// Texto del estado de un pedido recien creado (`Errand::status`). Justo
 /// despues de `POST /api/v1/errands` siempre nace `requested`; los demas
-/// valores no ocurren en esta pantalla (no hay seguimiento aca, ver el
-/// comentario de modulo), pero se cubren igual porque el tipo los admite.
-fn errand_status_label(status: moto_core::models::ErrandStatus) -> &'static str {
-    use moto_core::models::ErrandStatus;
-
+/// valores se cubren igual porque el tipo los admite.
+fn errand_status_label(status: ErrandStatus) -> &'static str {
     match status {
         ErrandStatus::Requested => "Esperando a que un conductor lo acepte.",
-        ErrandStatus::Accepted => "Un conductor acepto tu mandado.",
-        ErrandStatus::Completed => "Tu mandado ya se completo.",
+        ErrandStatus::Accepted => "Un conductor lo acepto.",
+        ErrandStatus::Completed => "Ya se completo.",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moto_core::models::ErrandStatus;
 
     #[test]
     fn errand_status_label_describes_a_freshly_requested_errand() {
@@ -350,7 +323,17 @@ mod tests {
     fn errand_status_label_describes_a_completed_errand() {
         assert_eq!(
             errand_status_label(ErrandStatus::Completed),
-            "Tu mandado ya se completo."
+            "Ya se completo."
         );
+    }
+
+    #[test]
+    fn la_motocarga_habla_de_carga_y_el_mandado_de_lo_que_necesitas() {
+        let carga = errand_copy(VehicleType::Motocarga);
+        let mandado = errand_copy(VehicleType::Motocarro);
+        assert_eq!(carga.submit, "Pedir motocarga");
+        assert_eq!(mandado.submit, "Pedir mandado");
+        assert!(carga.description_step.contains("llevar"));
+        assert!(mandado.description_step.contains("necesitas"));
     }
 }

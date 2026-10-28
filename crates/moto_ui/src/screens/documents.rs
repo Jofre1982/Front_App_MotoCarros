@@ -10,8 +10,8 @@
 //! un administrador desde fuera de esta app (ver historia tecnica #64 del
 //! backend) — acá solo se sube y se ve el estado.
 //!
-//! El archivo se elige con [`crate::file_picker`] ("Tomar foto" o "Elegir
-//! de la galeria") y no con un `<input type="file">` de Dioxus: en Android
+//! La foto se elige con [`crate::file_picker::PhotoPicker`] ("Tomar foto" o
+//! "Galeria") y no con un `<input type="file">` de Dioxus: en Android
 //! ese input no abria nada (ver la doc del modulo). Es la misma API en web
 //! y en movil nativo, asi que esta pantalla no distingue plataforma (ver
 //! `.claude/STANDARDS.md`).
@@ -27,7 +27,7 @@ use moto_core::models::{
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
-use crate::file_picker::{PickOutcome, PickSource, PickedFile, pick_file};
+use crate::file_picker::{PhotoPicker, PickedFile};
 
 fn document_type_label(document_type: DocumentType) -> &'static str {
     match document_type {
@@ -168,26 +168,15 @@ fn DocumentRow(props: DocumentRowProps) -> Element {
     let mut is_uploading = use_signal(|| false);
     let mut upload_error = use_signal(|| None::<UploadDriverDocumentError>);
     let mut selected_file = use_signal(|| None::<PickedFile>);
-    let mut pick_error = use_signal(|| None::<String>);
+    // Para avisar "Foto enviada" despues de subir: sin un mensaje claro el
+    // conductor no sabia si la foto habia llegado (pedido probando el APK).
+    let mut just_uploaded = use_signal(|| false);
 
     let document_type = props.document.document_type;
     let on_uploaded = props.on_uploaded;
 
-    // Elegir el archivo no lo sube: solo lo deja listo para que el
-    // conductor confirme con el boton "Cargar" (pedido del usuario viendo
-    // la app: sin este paso no quedaba claro si la subida habia funcionado).
-    let mut start_pick = move |source: PickSource| {
-        upload_error.set(None);
-        pick_error.set(None);
-        spawn(async move {
-            match pick_file(source).await {
-                PickOutcome::Picked(file) => selected_file.set(Some(file)),
-                PickOutcome::Cancelled => {}
-                PickOutcome::Failed(message) => pick_error.set(Some(message)),
-            }
-        });
-    };
-
+    // Elegir la foto no la sube: queda la miniatura y el conductor confirma
+    // con "Enviar foto", asi ve que eligio la correcta.
     let on_upload_click = move |_| {
         let Some(token) = session.token() else {
             return;
@@ -201,6 +190,7 @@ fn DocumentRow(props: DocumentRowProps) -> Element {
         spawn(async move {
             is_uploading.set(true);
             upload_error.set(None);
+            just_uploaded.set(false);
 
             let PickedFile {
                 name: file_name,
@@ -224,6 +214,7 @@ fn DocumentRow(props: DocumentRowProps) -> Element {
                     }
                     on_uploaded.call(fetch.data);
                     selected_file.set(None);
+                    just_uploaded.set(true);
                 }
                 Err(UploadDriverDocumentError::SessionExpired) => {
                     session.logout(storage.as_ref());
@@ -258,36 +249,32 @@ fn DocumentRow(props: DocumentRowProps) -> Element {
                     "Motivo del rechazo: {reason}"
                 }
             }
-            div { class: "document-pick-buttons",
+            PhotoPicker { selected: selected_file, disabled: is_uploading() }
+            if is_uploading() {
+                p { class: "upload-status upload-status-progress", role: "status",
+                    span { class: "upload-spinner" }
+                    "Subiendo foto... no cierres la app."
+                }
+            } else if selected_file().is_some() {
+                p { class: "upload-status", role: "status",
+                    "Foto lista. Toca \"Enviar foto\" para subirla."
+                }
+            } else if just_uploaded() {
+                p { class: "upload-status upload-status-done", role: "status",
+                    "✓ Foto enviada. Queda pendiente de revision."
+                }
+            }
+            if selected_file().is_some() {
                 button {
                     r#type: "button",
-                    class: "document-pick-camera",
+                    class: "document-upload-button",
                     disabled: is_uploading(),
-                    onclick: move |_| start_pick(PickSource::Camera),
-                    "📷 Tomar foto"
-                }
-                button {
-                    r#type: "button",
-                    class: "document-pick-files",
-                    disabled: is_uploading(),
-                    onclick: move |_| start_pick(PickSource::Files),
-                    "🖼️ Galeria o PDF"
-                }
-            }
-            if let Some(file) = selected_file() {
-                p { class: "document-selected-file", "Archivo elegido: {file.name}" }
-            }
-            if let Some(message) = pick_error() {
-                p { class: "document-error", role: "alert", "{message}" }
-            }
-            button {
-                r#type: "button",
-                disabled: is_uploading() || selected_file().is_none(),
-                onclick: on_upload_click,
-                if is_uploading() {
-                    "Cargando..."
-                } else {
-                    "Cargar"
+                    onclick: on_upload_click,
+                    if is_uploading() {
+                        "Subiendo..."
+                    } else {
+                        "Enviar foto"
+                    }
                 }
             }
             if let Some(message) = &file_error {

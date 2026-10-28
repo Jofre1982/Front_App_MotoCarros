@@ -1163,9 +1163,6 @@ pub enum RequestRideError {
     /// La cuenta no es de pasajero (`RidePolicy` en el backend). Solicitar un
     /// viaje es una operacion exclusiva del rol pasajero.
     Forbidden,
-    /// Viaje solo recogida (issue #92) sin texto de destino: se rechaza antes
-    /// de llamar al backend.
-    EmptyDestinationText,
     Validation(ApiErrorBody),
     SessionExpired,
     Network(String),
@@ -1175,9 +1172,6 @@ pub enum RequestRideError {
 impl std::fmt::Display for RequestRideError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RequestRideError::EmptyDestinationText => {
-                write!(f, "Escribe a donde vas.")
-            }
             RequestRideError::Forbidden => {
                 write!(f, "Esta cuenta no puede solicitar viajes.")
             }
@@ -2528,9 +2522,20 @@ impl ApiClient {
             .text("origin[latitude]", payload.origin.latitude.to_string())
             .text("origin[longitude]", payload.origin.longitude.to_string())
             .text(
-                "destination_site_id",
-                payload.destination_site_id.to_string(),
+                "vehicle_type",
+                match payload.vehicle_type {
+                    VehicleType::Motocarro => "motocarro",
+                    VehicleType::Motocarga => "motocarga",
+                },
             );
+        if let Some(text) = payload
+            .destination_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            form = form.text("destination_text", text.to_string());
+        }
 
         if let Some((file_name, mime_type, bytes)) = photo {
             let mut file_part = reqwest::multipart::Part::bytes(bytes).file_name(file_name);
@@ -3879,10 +3884,6 @@ impl ApiClient {
         destination_text: &str,
         passenger_count: u8,
     ) -> Result<AuthenticatedFetch<Ride>, RequestRideError> {
-        if destination_text.trim().is_empty() {
-            return Err(RequestRideError::EmptyDestinationText);
-        }
-
         let payload = RideRequestPayload::pickup_only(origin, destination_text, passenger_count);
         self.send_ride_request(token, &payload).await
     }
@@ -6202,8 +6203,49 @@ mod tests {
                 latitude: 4.710989,
                 longitude: -74.072092,
             },
-            destination_site_id: 1,
+            destination_text: Some("  Barrio Las Palmas ".to_string()),
+            vehicle_type: VehicleType::Motocarga,
         }
+    }
+
+    #[tokio::test]
+    async fn create_errand_sends_vehicle_type_and_trimmed_destination_text() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands"))
+            .and(wiremock::matchers::body_string_contains(
+                "name=\"vehicle_type\"\r\n\r\nmotocarga",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "name=\"destination_text\"\r\n\r\nBarrio Las Palmas\r\n",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "id": 3,
+                    "status": "requested",
+                    "description": "Una nevera",
+                    "has_photo": false,
+                    "photo_url": null,
+                    "origin": {"latitude": 4.710989, "longitude": -74.072092},
+                    "vehicle_type": "motocarga",
+                    "destination": null,
+                    "destination_text": "Barrio Las Palmas",
+                    "driver": null,
+                    "agreed_price": null,
+                    "requested_at": "2026-10-28T10:00:00+00:00",
+                    "completed_at": null
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let fetch = ApiClient::new(server.uri())
+            .create_errand(&sample_token(), sample_create_errand_payload(), None)
+            .await
+            .unwrap();
+
+        assert!(fetch.data.is_motocarga());
     }
 
     #[tokio::test]
@@ -8991,11 +9033,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_pickup_only_ride_rejects_an_empty_destination_without_calling_the_backend() {
+    async fn request_pickup_only_ride_omits_an_empty_destination() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(201))
-            .expect(0)
+            .and(path("/api/v1/rides"))
+            .and(body_json(serde_json::json!({
+                "mode": "pickup_only",
+                "origin": {"latitude": 4.710989, "longitude": -74.072092},
+                "passenger_count": 1,
+            })))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "match"
+            })))
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -9005,7 +9055,9 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error, RequestRideError::EmptyDestinationText);
+        // El 422 de mentira solo confirma que el cuerpo coincidio (sin
+        // `destination_text`): el destino es opcional desde el backend #102.
+        assert!(matches!(error, RequestRideError::Validation(_)));
     }
 
     #[tokio::test]

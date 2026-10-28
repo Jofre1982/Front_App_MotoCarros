@@ -120,6 +120,35 @@ jobs:
           sed -i 's#<string name="app_name">[^<]*</string>#<string name="app_name">MotoYa</string>#' \
             "$RES/values/strings.xml"
           grep app_name "$RES/values/strings.xml"
+          # Camara para "Tomar foto" (documentos y mandados). El WebView de
+          # wry abre la camara con ACTION_IMAGE_CAPTURE y guarda la foto via
+          # un FileProvider con autoridad <paquete>.fileprovider; sin eso, y
+          # sin <queries> (Android 11+ oculta la app de camara), cae a la
+          # galeria. Se agrega solo lo que la plantilla de dx no trae.
+          MANIFEST="$PROJ/app/src/main/AndroidManifest.xml"
+          test -f "$MANIFEST"
+          mkdir -p "$RES/xml"
+          printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+            '<paths><external-files-path name="pictures" path="Pictures/" /><cache-path name="cache" path="." /></paths>' \
+            > "$RES/xml/motoya_file_paths.xml"
+          python3 - "$MANIFEST" <<'PY'
+          import re, sys
+          path = sys.argv[1]
+          xml = open(path, encoding="utf-8").read()
+          if "android.permission.CAMERA" not in xml:
+              xml = re.sub(r"(<manifest[^>]*>)", r'\1\n    <uses-permission android:name="android.permission.CAMERA" />', xml, count=1)
+          if "android.media.action.IMAGE_CAPTURE" not in xml:
+              xml = xml.replace("<application", '<queries><intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent></queries>\n    <application', 1)
+          if "FileProvider" not in xml:
+              provider = ('<provider android:name="androidx.core.content.FileProvider" '
+                          'android:authorities="${applicationId}.fileprovider" android:exported="false" '
+                          'android:grantUriPermissions="true"><meta-data '
+                          'android:name="android.support.FILE_PROVIDER_PATHS" '
+                          'android:resource="@xml/motoya_file_paths" /></provider>\n    </application>')
+              xml = xml.replace("</application>", provider, 1)
+          open(path, "w", encoding="utf-8").write(xml)
+          PY
+          echo "::notice title=Manifest::$(grep -o 'android.permission.CAMERA\|IMAGE_CAPTURE\|FileProvider[^ ]*\|android:authorities="[^"]*"' "$MANIFEST" | tr '\n' ' ')"
           chmod +x "$PROJ/gradlew"
           set +e
           (cd "$PROJ" && ./gradlew assembleDebug --no-daemon -q) > gradle.log 2>&1
@@ -155,6 +184,8 @@ jobs:
           echo "$ABIS" | grep -q "arm64-v8a" || { echo "::error::La APK no incluye arm64-v8a (celulares reales)"; exit 1; }
           unzip -l MotoYa.apk | grep -q "ic_launcher_background.png" || { echo "::error::La APK no trae el icono de MotoYa"; exit 1; }
           echo "$PERMS" | grep -q "android.permission.INTERNET" || { echo "::error::La APK no tiene permiso INTERNET"; exit 1; }
+          echo "$PERMS" | grep -q "android.permission.CAMERA" || { echo "::error::La APK no tiene permiso CAMERA (Tomar foto)"; exit 1; }
+          "$BT/aapt" dump xmltree MotoYa.apk AndroidManifest.xml | grep -q "FileProvider" || { echo "::error::La APK no declara el FileProvider de la camara"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:

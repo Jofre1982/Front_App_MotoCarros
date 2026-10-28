@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use moto_core::api::{ApiClient, AuthenticatedRequestError};
-use moto_core::models::Role;
+use moto_core::models::{Role, VehicleType};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
@@ -333,7 +333,10 @@ fn Home() -> Element {
                         r#type: "button",
                         disabled: section() == HomeSection::RequestErrand,
                         onclick: move |_| go_to(HomeSection::RequestErrand),
-                        "Pedir un mandado"
+                        // El mandado quedo adentro de "Pedir motocarro"
+                        // (Viaje / Mandado); aca va la motocarga, para que el
+                        // sistema sepa que vehiculo hace falta.
+                        "Pedir motocarga"
                     }
                     button {
                         r#type: "button",
@@ -357,7 +360,7 @@ fn Home() -> Element {
                     RideEstimateScreen {}
                 },
                 HomeSection::RequestErrand => rsx! {
-                    RequestErrandScreen {}
+                    RequestErrandScreen { vehicle_type: VehicleType::Motocarga }
                 },
                 HomeSection::Vehicle => rsx! {
                     VehicleScreen {}

@@ -502,7 +502,8 @@ impl RideRequestPayload {
             mode: Some(RideMode::PickupOnly),
             origin,
             destination_site_id: None,
-            destination_text: Some(destination_text.trim().to_string()),
+            destination_text: Some(destination_text.trim().to_string())
+                .filter(|text| !text.is_empty()),
             passenger_count,
         }
     }
@@ -524,7 +525,7 @@ fn ride_destination_label(site: Option<&DestinationSite>, text: Option<&str>) ->
     match (site, text) {
         (Some(site), _) => site.name.clone(),
         (None, Some(text)) if !text.trim().is_empty() => text.to_string(),
-        _ => "Sin destino".to_string(),
+        _ => "Se lo dices al conductor".to_string(),
     }
 }
 
@@ -576,11 +577,42 @@ pub struct Errand {
     pub has_photo: bool,
     pub photo_url: Option<String>,
     pub origin: Coordinates,
-    pub destination: ErrandDestination,
+    /// Que vehiculo se pidio: `motocarga` es "Pedir motocarga". Default
+    /// `motocarro` para servidores anteriores a ese campo.
+    #[serde(default = "default_errand_vehicle_type")]
+    pub vehicle_type: VehicleType,
+    /// Sitio del catalogo, o `None`: desde que el destino es opcional lo
+    /// normal es que no venga.
+    #[serde(default)]
+    pub destination: Option<ErrandDestination>,
+    /// A donde llevarlo, en texto libre, si el pasajero lo escribio.
+    #[serde(default)]
+    pub destination_text: Option<String>,
     pub driver: Option<RideDriver>,
     pub agreed_price: Option<i64>,
     pub requested_at: String,
     pub completed_at: Option<String>,
+}
+
+fn default_errand_vehicle_type() -> VehicleType {
+    VehicleType::Motocarro
+}
+
+impl Errand {
+    /// Texto para "Destino: ..." en las tarjetas, o `None` si el pasajero no
+    /// dijo a donde (entonces la tarjeta no muestra la linea).
+    pub fn destination_label(&self) -> Option<String> {
+        self.destination_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.destination.as_ref().map(|site| site.name.clone()))
+    }
+
+    pub fn is_motocarga(&self) -> bool {
+        self.vehicle_type == VehicleType::Motocarga
+    }
 }
 
 /// Campos no-archivo de `POST /api/v1/errands` (historia #92 del backend,
@@ -592,7 +624,10 @@ pub struct Errand {
 pub struct CreateErrandPayload {
     pub description: String,
     pub origin: Coordinates,
-    pub destination_site_id: u64,
+    /// Opcional: a donde llevarlo, en texto libre. Vacio = no se manda.
+    pub destination_text: Option<String>,
+    /// `Motocarro` para "Mandado", `Motocarga` para "Pedir motocarga".
+    pub vehicle_type: VehicleType,
 }
 
 /// Body de `POST /api/v1/errands/{id}/accept` (historia #92 del backend,
@@ -1380,11 +1415,13 @@ mod tests {
         assert!(envelope.data[0].has_photo);
         assert_eq!(
             envelope.data[0].destination,
-            ErrandDestination {
+            Some(ErrandDestination {
                 site_id: 1,
                 name: "Casco urbano".to_string(),
-            }
+            })
         );
+        // Sin `vehicle_type` en el JSON (servidor viejo): motocarro.
+        assert_eq!(envelope.data[0].vehicle_type, VehicleType::Motocarro);
         assert_eq!(
             envelope.data[0].driver,
             Some(RideDriver {
@@ -1928,5 +1965,50 @@ mod tests {
         assert_eq!(tracking.ride.status, RideStatus::Accepted);
         assert_eq!(tracking.ride.agreed_price, Some(6500));
         assert_eq!(tracking.ride.fare_label(), "COP 6500");
+    }
+
+    #[test]
+    fn errand_without_destination_and_motocarga_deserializes() {
+        let json = r#"{
+            "id": 7,
+            "status": "requested",
+            "description": "Una nevera y dos cajas",
+            "has_photo": false,
+            "photo_url": null,
+            "origin": {"latitude": 3.8653, "longitude": -67.9239},
+            "vehicle_type": "motocarga",
+            "destination": null,
+            "destination_text": "Barrio Las Palmas",
+            "driver": null,
+            "agreed_price": null,
+            "requested_at": "2026-10-28T13:00:00+00:00",
+            "completed_at": null
+        }"#;
+
+        let errand: Errand = serde_json::from_str(json).unwrap();
+
+        assert!(errand.is_motocarga());
+        assert_eq!(errand.destination, None);
+        assert_eq!(
+            errand.destination_label().as_deref(),
+            Some("Barrio Las Palmas")
+        );
+    }
+
+    #[test]
+    fn errand_destination_label_is_none_when_nothing_was_given() {
+        let json = r#"{
+            "id": 8, "status": "requested", "description": "Pan",
+            "has_photo": false, "photo_url": null,
+            "origin": {"latitude": 3.8653, "longitude": -67.9239},
+            "vehicle_type": "motocarro", "destination": null,
+            "destination_text": "   ", "driver": null, "agreed_price": null,
+            "requested_at": "2026-10-28T13:00:00+00:00", "completed_at": null
+        }"#;
+
+        let errand: Errand = serde_json::from_str(json).unwrap();
+
+        assert!(!errand.is_motocarga());
+        assert_eq!(errand.destination_label(), None);
     }
 }
