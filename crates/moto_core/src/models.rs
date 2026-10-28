@@ -156,13 +156,13 @@ pub struct ConfirmPhoneVerificationPayload {
 /// Body de `POST /api/v1/auth/password/forgot`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RequestPasswordResetPayload {
-    pub phone: String,
+    pub email: String,
 }
 
 /// Body de `POST /api/v1/auth/password/reset`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ConfirmPasswordResetPayload {
-    pub phone: String,
+    pub email: String,
     pub code: String,
     pub password: String,
 }

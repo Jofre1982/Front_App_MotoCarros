@@ -394,7 +394,8 @@ fn EditProfileForm(props: EditProfileFormProps) -> Element {
     }
 }
 
-/// Flujo de verificacion de celular por SMS (issue #69 del backend). Sin
+/// Flujo de verificacion de la cuenta (issue #69 del backend; el codigo llega
+/// al correo desde el backend #104, no por SMS). Sin
 /// props: lee la cuenta y el token del mismo `SessionState` del contexto, y
 /// al confirmar deja el `User` actualizado ahi mismo, mismo criterio que
 /// `EditProfileForm`.
@@ -492,7 +493,7 @@ fn PhoneVerificationSection() -> Element {
 
         return rsx! {
             div { class: "phone-verification-section",
-                p { "Tu celular todavia no esta verificado." }
+                p { "Tu cuenta todavia no esta verificada." }
                 button {
                     r#type: "button",
                     disabled: is_requesting(),
@@ -500,7 +501,7 @@ fn PhoneVerificationSection() -> Element {
                     if is_requesting() {
                         "Enviando codigo..."
                     } else {
-                        "Verificar mi celular"
+                        "Verificar mi cuenta"
                     }
                 }
                 if let Some(message) = request_message {
@@ -524,7 +525,7 @@ fn PhoneVerificationSection() -> Element {
 
     rsx! {
         div { class: "phone-verification-section",
-            p { "Te enviamos un codigo por SMS. Ingresalo para confirmar tu celular." }
+            p { "Te enviamos un codigo a tu correo (mira tambien en Spam). Ingresalo para verificar tu cuenta." }
             form { onsubmit: on_confirm,
                 label { r#for: "phone-verification-code", "Codigo" }
                 input {
