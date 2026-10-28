@@ -440,6 +440,40 @@ pub struct ErrandPhoto {
 }
 
 /// Fallos posibles de una request autenticada con reintento automatico.
+/// Fallos de `POST /rides/{id}/price-response` y
+/// `POST /errands/{id}/price-response` (backend #107): el pasajero acepta o
+/// rechaza el precio que propuso el conductor.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RespondToPriceError {
+    SessionExpired,
+    /// 422: ya no hay oferta que responder (otro estado, ya respondida...).
+    Validation(ApiErrorBody),
+    Network(String),
+    Unexpected(u16),
+}
+
+impl std::fmt::Display for RespondToPriceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RespondToPriceError::SessionExpired => {
+                write!(f, "Tu sesion vencio. Inicia sesion de nuevo.")
+            }
+            RespondToPriceError::Validation(body) => write!(f, "{}", body.message),
+            RespondToPriceError::Network(_) => {
+                write!(
+                    f,
+                    "No se pudo conectar con el servidor. Revisa tu conexion."
+                )
+            }
+            RespondToPriceError::Unexpected(status) => {
+                write!(f, "Ocurrio un error inesperado (codigo {status}).")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RespondToPriceError {}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthenticatedRequestError {
     /// El token vencio y el intento de renovarlo tambien fallo (ventana de
@@ -2316,6 +2350,108 @@ impl ApiClient {
         }
 
         Err(AuthenticatedRequestError::Unexpected(status.as_u16()))
+    }
+
+    /// `POST /api/v1/rides/{id}/price-response` (backend #107).
+    pub async fn respond_to_ride_price(
+        &self,
+        token: &AuthToken,
+        ride_id: u64,
+        accept: bool,
+    ) -> Result<AuthenticatedFetch<Ride>, RespondToPriceError> {
+        self.respond_to_price(
+            &format!("/api/v1/rides/{ride_id}/price-response"),
+            token,
+            accept,
+        )
+        .await
+    }
+
+    /// `POST /api/v1/errands/{id}/price-response` (backend #107).
+    pub async fn respond_to_errand_price(
+        &self,
+        token: &AuthToken,
+        errand_id: u64,
+        accept: bool,
+    ) -> Result<AuthenticatedFetch<Errand>, RespondToPriceError> {
+        self.respond_to_price(
+            &format!("/api/v1/errands/{errand_id}/price-response"),
+            token,
+            accept,
+        )
+        .await
+    }
+
+    async fn respond_to_price<T>(
+        &self,
+        path: &str,
+        token: &AuthToken,
+        accept: bool,
+    ) -> Result<AuthenticatedFetch<T>, RespondToPriceError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let body = serde_json::json!({ "decision": if accept { "accept" } else { "reject" } });
+        if let Some(data) = self
+            .post_price_response(path, &token.access_token, &body)
+            .await?
+        {
+            return Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: None,
+            });
+        }
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| RespondToPriceError::SessionExpired)?;
+        match self
+            .post_price_response(path, &renewed.access_token, &body)
+            .await?
+        {
+            Some(data) => Ok(AuthenticatedFetch {
+                data,
+                refreshed_token: Some(renewed),
+            }),
+            None => Err(RespondToPriceError::SessionExpired),
+        }
+    }
+
+    /// `Ok(None)` = 401 (hay que renovar el token y reintentar).
+    async fn post_price_response<T>(
+        &self,
+        path: &str,
+        access_token: &str,
+        body: &serde_json::Value,
+    ) -> Result<Option<T>, RespondToPriceError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let response = self
+            .http
+            .post(format!("{}{}", self.base_url, path))
+            .bearer_auth(access_token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| RespondToPriceError::Network(describe_error(&err)))?;
+        let status = response.status().as_u16();
+        match status {
+            200..=299 => {
+                let envelope: DataEnvelope<T> = decode_json(response)
+                    .await
+                    .map_err(RespondToPriceError::Network)?;
+                Ok(Some(envelope.data))
+            }
+            401 => Ok(None),
+            422 => {
+                let body: ApiErrorBody = decode_json(response)
+                    .await
+                    .map_err(RespondToPriceError::Network)?;
+                Err(RespondToPriceError::Validation(body))
+            }
+            other => Err(RespondToPriceError::Unexpected(other)),
+        }
     }
 
     /// `GET /api/v1/me` — issue #9. Reintenta una vez con refresh de token
@@ -6235,6 +6371,61 @@ mod tests {
             destination_text: Some("  Barrio Las Palmas ".to_string()),
             vehicle_type: VehicleType::Motocarga,
         }
+    }
+
+    #[tokio::test]
+    async fn respond_to_errand_price_sends_the_decision() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/5/price-response"))
+            .and(body_json(serde_json::json!({ "decision": "reject" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": 5, "status": "requested", "description": "Pan",
+                    "has_photo": false, "photo_url": null,
+                    "origin": {"latitude": 3.8653, "longitude": -67.9239},
+                    "vehicle_type": "motocarro", "destination": null,
+                    "destination_text": null, "driver": null, "agreed_price": null,
+                    "price_confirmed": false,
+                    "requested_at": "2026-10-28T10:00:00+00:00", "completed_at": null
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let fetch = ApiClient::new(server.uri())
+            .respond_to_errand_price(&sample_token(), 5, false)
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.status, ErrandStatus::Requested);
+        assert!(fetch.data.driver.is_none());
+    }
+
+    #[tokio::test]
+    async fn respond_to_ride_price_returns_validation_on_422() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/rides/9/price-response"))
+            .and(body_json(serde_json::json!({ "decision": "accept" })))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "Este viaje no está esperando que respondas un precio.",
+                "errors": {"ride": ["Este viaje no está esperando que respondas un precio."]}
+            })))
+            .mount(&server)
+            .await;
+
+        let error = ApiClient::new(server.uri())
+            .respond_to_ride_price(&sample_token(), 9, true)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Este viaje no está esperando que respondas un precio."
+        );
     }
 
     #[tokio::test]

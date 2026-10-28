@@ -15,15 +15,18 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use futures_timer::Delay;
-use moto_core::api::{ApiClient, AuthenticatedRequestError, CreateErrandError};
+use moto_core::api::{
+    ApiClient, AuthenticatedRequestError, CreateErrandError, RespondToPriceError,
+};
 use moto_core::models::{
-    Coordinates, CreateErrandPayload, Errand, ErrandStatus, Role, VehicleType,
+    Coordinates, CreateErrandPayload, Errand, ErrandStatus, Role, VehicleType, format_cop,
 };
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
 use crate::file_picker::{PhotoPicker, PickedFile};
 use crate::map::{MapMarker, MapView};
+use crate::price_offer::PriceOfferCard;
 
 /// Centro inicial del mapa: casco urbano de Inirida (ver `ride_estimate.rs`).
 const DEFAULT_CENTER_LAT: f64 = 3.8653;
@@ -201,6 +204,42 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
     };
 
     let mut selected_photo_for_reset = selected_photo;
+    // Respuesta a la oferta de precio del conductor (backend #107).
+    let mut is_responding_price = use_signal(|| false);
+    let mut price_error = use_signal(|| None::<String>);
+    let mut rejected_notice = use_signal(|| false);
+    let respond_api_client = use_context::<ApiClient>();
+    let respond_storage = use_context::<Arc<dyn TokenStorage>>();
+    let respond_to_price = use_callback(move |accept: bool| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let Some(errand_id) = created_errand.peek().as_ref().map(|errand| errand.id) else {
+            return;
+        };
+        let api_client = respond_api_client.clone();
+        let storage = respond_storage.clone();
+        spawn(async move {
+            is_responding_price.set(true);
+            price_error.set(None);
+            match api_client
+                .respond_to_errand_price(&token, errand_id, accept)
+                .await
+            {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    rejected_notice.set(!accept);
+                    created_errand.set(Some(fetch.data));
+                }
+                Err(RespondToPriceError::SessionExpired) => session.logout(storage.as_ref()),
+                Err(err) => price_error.set(Some(err.to_string())),
+            }
+            is_responding_price.set(false);
+        });
+    });
+
     let on_new_click = move |_| {
         created_errand.set(None);
         origin.set(None);
@@ -227,8 +266,24 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
                     if let Some(driver) = &errand.driver {
                         p { class: "request-errand-done-detail", "Conductor: {driver.name}" }
                     }
-                    if let Some(price) = errand.agreed_price {
+                    if errand.awaiting_price_response() {
+                        if let (Some(driver), Some(price)) = (&errand.driver, errand.agreed_price) {
+                            PriceOfferCard {
+                                driver_name: driver.name.clone(),
+                                price,
+                                is_responding: is_responding_price(),
+                                error: price_error(),
+                                on_accept: move |_| respond_to_price.call(true),
+                                on_reject: move |_| respond_to_price.call(false),
+                            }
+                        }
+                    } else if let Some(price) = errand.agreed_price {
                         p { class: "request-errand-done-detail", "Precio acordado: {format_cop(price)}" }
+                    }
+                    if rejected_notice() && errand.status == ErrandStatus::Requested {
+                        p { class: "request-errand-done-detail",
+                            "Rechazaste el precio. Tu pedido quedo libre para otro conductor."
+                        }
                     }
                     p { "{errand.description}" }
                     if let Some(destination) = errand.destination_label() {
@@ -386,27 +441,13 @@ fn open_errand_of_kind(errands: Vec<Errand>, vehicle_type: VehicleType) -> Optio
     })
 }
 
-/// `7000` → `"$7.000"`, como se escriben los precios en Colombia.
-fn format_cop(amount: i64) -> String {
-    let digits = amount.unsigned_abs().to_string();
-    let mut grouped = String::new();
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push('.');
-        }
-        grouped.push(digit);
-    }
-    let sign = if amount < 0 { "-" } else { "" };
-    format!("{sign}${grouped}")
-}
-
 /// Texto del estado de un pedido recien creado (`Errand::status`). Justo
 /// despues de `POST /api/v1/errands` siempre nace `requested`; los demas
 /// valores se cubren igual porque el tipo los admite.
 fn errand_status_label(status: ErrandStatus) -> &'static str {
     match status {
         ErrandStatus::Requested => "Esperando a que un conductor lo acepte.",
-        ErrandStatus::Accepted => "¡Un conductor lo acepto y va en camino!",
+        ErrandStatus::Accepted => "Un conductor tomo tu pedido.",
         ErrandStatus::Completed => "Ya se completo.",
     }
 }
@@ -429,14 +470,6 @@ mod tests {
             errand_status_label(ErrandStatus::Completed),
             "Ya se completo."
         );
-    }
-
-    #[test]
-    fn format_cop_agrupa_miles_con_punto() {
-        assert_eq!(format_cop(7000), "$7.000");
-        assert_eq!(format_cop(150000), "$150.000");
-        assert_eq!(format_cop(500), "$500");
-        assert_eq!(format_cop(1234567), "$1.234.567");
     }
 
     #[test]

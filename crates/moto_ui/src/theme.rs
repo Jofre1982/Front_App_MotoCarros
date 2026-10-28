@@ -600,4 +600,26 @@ a.pickup-directions-link {
     background: var(--color-primary-light);
 }
 .request-errand-status { font-weight: 700; font-size: 1.05rem; }
+
+/* Oferta de precio del conductor, del lado del pasajero. */
+.price-offer {
+    margin: 14px 0;
+    padding: 16px;
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    border: 2px solid var(--color-primary);
+    text-align: center;
+}
+.price-offer-title { font-weight: 600; margin: 0; }
+.price-offer-amount { font-size: 2rem; font-weight: 800; color: var(--color-primary-dark); margin: 4px 0 8px; }
+.price-offer-hint { color: var(--color-muted); font-size: 0.9rem; }
+button.price-offer-accept { background: var(--color-success); }
+button.price-offer-accept:hover:not(:disabled) { background: #237032; }
+button.price-offer-reject {
+    background: var(--color-surface);
+    color: var(--color-error);
+    border: 2px solid var(--color-error);
+}
+button.price-offer-reject:hover:not(:disabled) { background: var(--color-error-bg); }
+.price-offer-error { color: var(--color-error); margin-top: 8px; }
 "#;

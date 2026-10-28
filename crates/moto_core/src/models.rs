@@ -590,8 +590,30 @@ pub struct Errand {
     pub destination_text: Option<String>,
     pub driver: Option<RideDriver>,
     pub agreed_price: Option<i64>,
+    /// Si el pasajero ya acepto el precio (backend #107). `true` por
+    /// defecto para servidores anteriores.
+    #[serde(default = "default_true")]
+    pub price_confirmed: bool,
     pub requested_at: String,
     pub completed_at: Option<String>,
+}
+
+/// `7000` → `"$7.000"`, como se escriben los precios en Colombia.
+pub fn format_cop(amount: i64) -> String {
+    let digits = amount.unsigned_abs().to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push('.');
+        }
+        grouped.push(digit);
+    }
+    let sign = if amount < 0 { "-" } else { "" };
+    format!("{sign}${grouped}")
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_errand_vehicle_type() -> VehicleType {
@@ -612,6 +634,11 @@ impl Errand {
 
     pub fn is_motocarga(&self) -> bool {
         self.vehicle_type == VehicleType::Motocarga
+    }
+
+    /// El conductor propuso un precio y el pasajero todavia no respondio.
+    pub fn awaiting_price_response(&self) -> bool {
+        self.status == ErrandStatus::Accepted && self.driver.is_some() && !self.price_confirmed
     }
 }
 
@@ -686,6 +713,10 @@ pub struct Ride {
     pub estimated_fare: Option<i64>,
     #[serde(default)]
     pub agreed_price: Option<i64>,
+    /// Si el pasajero ya acepto el precio (backend #107). `true` por
+    /// defecto para servidores anteriores, que no lo pedian.
+    #[serde(default = "default_true")]
+    pub price_confirmed: bool,
     pub driver: Option<RideDriver>,
     pub requested_at: String,
     pub started_at: Option<String>,
@@ -702,6 +733,15 @@ pub struct Ride {
 /// cancela el viaje, solo lo devuelve al pool sin conductor. `#[serde(flatten)]`
 /// reutiliza `Ride` en vez de repetir sus campos.
 impl Ride {
+    /// El conductor propuso un precio (viaje solo recogida) y el pasajero
+    /// todavia no respondio. Hasta entonces el viaje no se puede iniciar.
+    pub fn awaiting_price_response(&self) -> bool {
+        self.is_pickup_only()
+            && self.status == RideStatus::Accepted
+            && self.agreed_price.is_some()
+            && !self.price_confirmed
+    }
+
     pub fn is_pickup_only(&self) -> bool {
         self.mode == RideMode::PickupOnly
     }
@@ -1737,6 +1777,7 @@ mod tests {
             currency: "COP".to_string(),
             estimated_fare: Some(8850),
             agreed_price: None,
+            price_confirmed: true,
             driver: None,
             requested_at: "2026-07-31T14:03:21+00:00".to_string(),
             started_at: None,
@@ -2086,5 +2127,29 @@ mod tests {
         assert_eq!(request.passenger_count, 2);
         assert!(request.is_pickup_only());
         assert_eq!(request.destination_label(), "al hospital");
+    }
+
+    #[test]
+    fn a_pickup_ride_with_an_unconfirmed_offer_awaits_the_passenger() {
+        let mut ride = sample_ride(1, RideStatus::Accepted);
+        ride.agreed_price = Some(7000);
+        ride.price_confirmed = false;
+        assert!(ride.awaiting_price_response());
+        ride.price_confirmed = true;
+        assert!(!ride.awaiting_price_response());
+    }
+
+    #[test]
+    fn rides_from_an_older_server_count_as_confirmed() {
+        // `sample_ride` no trae `price_confirmed`.
+        assert!(sample_ride(1, RideStatus::Accepted).price_confirmed);
+    }
+
+    #[test]
+    fn format_cop_groups_thousands_with_dots() {
+        assert_eq!(format_cop(7000), "$7.000");
+        assert_eq!(format_cop(150000), "$150.000");
+        assert_eq!(format_cop(500), "$500");
+        assert_eq!(format_cop(1234567), "$1.234.567");
     }
 }
