@@ -3650,6 +3650,18 @@ impl ApiClient {
     /// repo). Catalogo de sitios con sus precios fijos, para que el pasajero
     /// elija destino al pedir un viaje en vez de tocar el mapa libremente.
     /// De solo lectura: cualquier cuenta autenticada puede consultarlo.
+    /// `GET /api/v1/rides/available` — viajes esperando conductor (backend
+    /// #105). Es lo que permite que un conductor que entro despues del pedido
+    /// lo vea igual: el aviso en tiempo real solo llega a quien estaba en
+    /// linea en ese momento.
+    pub async fn available_rides(
+        &self,
+        token: &AuthToken,
+    ) -> Result<AuthenticatedFetch<Vec<Ride>>, AuthenticatedRequestError> {
+        self.get_authenticated::<Vec<Ride>>("/api/v1/rides/available", token)
+            .await
+    }
+
     pub async fn list_sites(
         &self,
         token: &AuthToken,
@@ -6208,6 +6220,48 @@ mod tests {
             destination_text: Some("  Barrio Las Palmas ".to_string()),
             vehicle_type: VehicleType::Motocarga,
         }
+    }
+
+    #[tokio::test]
+    async fn available_rides_lists_the_rides_waiting_for_a_driver() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/rides/available"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": 4,
+                    "status": "requested",
+                    "mode": "pickup_only",
+                    "origin": {"latitude": 3.8653, "longitude": -67.9239},
+                    "destination": null,
+                    "destination_text": null,
+                    "passenger_count": 1,
+                    "currency": "COP",
+                    "estimated_fare": null,
+                    "agreed_price": null,
+                    "driver": null,
+                    "requested_at": "2026-10-28T10:00:00+00:00",
+                    "started_at": null,
+                    "completed_at": null,
+                    "final_fare": null,
+                    "payment": null
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let fetch = ApiClient::new(server.uri())
+            .available_rides(&sample_token())
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.len(), 1);
+        assert_eq!(fetch.data[0].id, 4);
     }
 
     #[tokio::test]

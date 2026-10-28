@@ -70,10 +70,12 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use futures_timer::Delay;
-use moto_core::api::{ApiClient, CancelRideError, GetRideError, RequestRideError};
+use moto_core::api::{
+    ApiClient, AuthenticatedRequestError, CancelRideError, GetRideError, RequestRideError,
+};
 use moto_core::models::{
-    Coordinates, PaymentStatus, Ride, RideCancellation, RideStatus, RideTracking, VehicleType,
-    apply_ride_tracking_event,
+    Coordinates, PaymentStatus, Ride, RideCancellation, RideStatus, RideTracking, Role,
+    VehicleType, apply_ride_tracking_event, latest_active_ride,
 };
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
@@ -90,6 +92,10 @@ use crate::screens::request_errand::RequestErrandScreen;
 /// `POLL_INTERVAL` de `NearbyRidesList` (`nearby_rides.rs`): el transporte
 /// no avisa solo cuando llega un frame nuevo.
 const RIDE_TRACKING_POLL_INTERVAL: Duration = Duration::from_millis(700);
+
+/// Cada cuanto se vuelve a pedir el viaje por HTTP, por si el tiempo real
+/// no llega.
+const RIDE_REFRESH_INTERVAL: Duration = Duration::from_secs(8);
 
 /// Centro inicial del mapa mientras no exista geolocalizacion del
 /// dispositivo (issue #90): el casco urbano de Inirida, donde opera el
@@ -115,6 +121,47 @@ pub fn RideEstimateScreen() -> Element {
     let mut cancel_error = use_signal(|| None::<CancelRideError>);
     let mut is_cancelling = use_signal(|| false);
     let mut cancellation_result = use_signal(|| None::<RideCancellation>);
+    // `true` mientras se busca si el pasajero ya tenia un viaje activo.
+    let mut is_restoring = use_signal(|| true);
+    let mut restore_started = use_signal(|| false);
+
+    // Al abrir la pantalla se busca el viaje activo en el historial: el
+    // servidor no deja pedir un segundo viaje mientras haya uno activo, y si
+    // la app se cerro (o se cambio de pantalla) el pasajero quedaba trabado
+    // sin poder verlo ni cancelarlo (reportado probando el APK).
+    {
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+        use_effect(move || {
+            if restore_started() {
+                return;
+            }
+            let Some(token) = session.token() else {
+                is_restoring.set(false);
+                return;
+            };
+            restore_started.set(true);
+            let api_client = api_client.clone();
+            let storage = storage.clone();
+            spawn(async move {
+                match api_client.ride_history(&token, Some(Role::Passenger)).await {
+                    Ok(fetch) => {
+                        if let Some(refreshed) = fetch.refreshed_token {
+                            session.update_token(refreshed, storage.as_ref());
+                        }
+                        if let Some(active) = latest_active_ride(&fetch.data) {
+                            requested_ride.set(Some(active));
+                        }
+                    }
+                    Err(AuthenticatedRequestError::SessionExpired) => {
+                        session.logout(storage.as_ref());
+                    }
+                    Err(_) => {}
+                }
+                is_restoring.set(false);
+            });
+        });
+    }
 
     let on_map_click = move |(lat, lng): (f64, f64)| {
         origin.set(Some((lat, lng)));
@@ -231,6 +278,18 @@ pub fn RideEstimateScreen() -> Element {
 
     let can_request = origin().is_some();
     let is_errand = service() == Service::Errand;
+
+    if is_restoring() && requested_ride().is_none() {
+        return rsx! {
+            div { class: "ride-estimate-screen",
+                h2 { "Pedir motocarro" }
+                p { class: "upload-status", role: "status",
+                    span { class: "upload-spinner" }
+                    "Cargando..."
+                }
+            }
+        };
+    }
 
     if let Some(cancellation) = cancellation_result() {
         // Confirmacion explicita de la penalizacion (issue #21) antes de
@@ -494,6 +553,52 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
     // levantar un segundo loop si el efecto se vuelve a disparar (p.ej.
     // porque `initial_ride` cambio de valor en un re-render).
     let mut started = use_signal(|| false);
+    let mut refresh_started = use_signal(|| false);
+
+    // Ademas del tiempo real, se vuelve a pedir el viaje cada
+    // `RIDE_REFRESH_INTERVAL`: si el socket no conecta (o el celular perdio
+    // la senal un rato), el pasajero igual se entera de que lo aceptaron o
+    // de que el viaje termino.
+    {
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+        use_effect(move || {
+            if refresh_started() {
+                return;
+            }
+            refresh_started.set(true);
+            let api_client = api_client.clone();
+            let storage = storage.clone();
+            spawn(async move {
+                loop {
+                    Delay::new(RIDE_REFRESH_INTERVAL).await;
+                    let Some(token) = session.token() else {
+                        break;
+                    };
+                    match api_client.get_ride(&token, ride_id).await {
+                        Ok(fetch) => {
+                            if let Some(refreshed) = fetch.refreshed_token {
+                                session.update_token(refreshed, storage.as_ref());
+                            }
+                            let still_active = fetch.data.status.is_active();
+                            if tracking.peek().ride != fetch.data {
+                                tracking.with_mut(|t| t.ride = fetch.data.clone());
+                                on_ride_updated.call(fetch.data);
+                            }
+                            if !still_active {
+                                break;
+                            }
+                        }
+                        Err(GetRideError::SessionExpired) => {
+                            session.logout(storage.as_ref());
+                            break;
+                        }
+                        Err(_) => {}
+                    }
+                }
+            });
+        });
+    }
 
     use_effect(move || {
         if started() {

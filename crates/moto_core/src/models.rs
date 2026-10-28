@@ -845,6 +845,40 @@ pub struct NearbyRideRequest {
     pub estimated_fare: Option<i64>,
 }
 
+impl From<&Ride> for NearbyRideRequest {
+    /// Un viaje de `GET /rides/available` mostrado igual que uno llegado por
+    /// `ride.requested`, para que la lista del conductor tenga una sola forma.
+    fn from(ride: &Ride) -> Self {
+        Self {
+            ride_id: ride.id,
+            mode: ride.mode,
+            origin: ride.origin,
+            destination: ride.destination.clone(),
+            destination_text: ride.destination_text.clone(),
+            passenger_count: ride.passenger_count,
+            currency: ride.currency.clone(),
+            estimated_fare: ride.estimated_fare,
+        }
+    }
+}
+
+impl RideStatus {
+    /// `requested`, `accepted` o `in_progress`: el viaje sigue vivo y la
+    /// pantalla tiene que mostrarlo (y dejar cancelarlo) al volver a abrirla.
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            RideStatus::Requested | RideStatus::Accepted | RideStatus::InProgress
+        )
+    }
+}
+
+/// El viaje activo mas reciente de un historial (`GET /me/rides`, que viene
+/// del mas nuevo al mas viejo), si hay uno.
+pub fn latest_active_ride(rides: &[Ride]) -> Option<Ride> {
+    rides.iter().find(|ride| ride.status.is_active()).cloned()
+}
+
 impl NearbyRideRequest {
     pub fn is_pickup_only(&self) -> bool {
         self.mode == RideMode::PickupOnly
@@ -2010,5 +2044,47 @@ mod tests {
 
         assert!(!errand.is_motocarga());
         assert_eq!(errand.destination_label(), None);
+    }
+
+    fn sample_ride(id: u64, status: RideStatus) -> Ride {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "status": status,
+            "mode": "pickup_only",
+            "origin": {"latitude": 3.8653, "longitude": -67.9239},
+            "destination": null,
+            "destination_text": "al hospital",
+            "passenger_count": 2,
+            "currency": "COP",
+            "estimated_fare": null,
+            "agreed_price": null,
+            "driver": null,
+            "requested_at": "2026-10-28T10:00:00+00:00",
+            "started_at": null,
+            "completed_at": null,
+            "final_fare": null,
+            "payment": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn latest_active_ride_skips_finished_rides() {
+        let rides = vec![
+            sample_ride(3, RideStatus::Cancelled),
+            sample_ride(2, RideStatus::Requested),
+            sample_ride(1, RideStatus::Completed),
+        ];
+        assert_eq!(latest_active_ride(&rides).map(|ride| ride.id), Some(2));
+        assert_eq!(latest_active_ride(&rides[2..]), None);
+    }
+
+    #[test]
+    fn an_available_ride_becomes_a_nearby_request() {
+        let request = NearbyRideRequest::from(&sample_ride(9, RideStatus::Requested));
+        assert_eq!(request.ride_id, 9);
+        assert_eq!(request.passenger_count, 2);
+        assert!(request.is_pickup_only());
+        assert_eq!(request.destination_label(), "al hospital");
     }
 }

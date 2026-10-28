@@ -93,7 +93,9 @@ use moto_core::api::{
     GetVehicleError, ShareRideLocationError, StartRideError,
 };
 use moto_core::location::{LocationError, LocationProvider};
-use moto_core::models::{NearbyRideRequest, Ride, RideStatus, apply_nearby_ride_event};
+use moto_core::models::{
+    NearbyRideRequest, Ride, RideStatus, Role, apply_nearby_ride_event, latest_active_ride,
+};
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
     decide_poll_action, decide_subscribe_failure,
@@ -108,6 +110,11 @@ use super::register_vehicle::RegisterVehicleScreen;
 /// `.claude/STANDARDS.md`, el crate no tiene runtime propio), asi que la
 /// pantalla lo consulta activamente a este ritmo.
 const POLL_INTERVAL: Duration = Duration::from_millis(700);
+
+/// Cada cuanto se vuelve a pedir `GET /rides/available` (backend #105).
+/// Suficiente para que el pasajero no espere de mas, sin gastar datos del
+/// celular del conductor.
+const AVAILABLE_RIDES_INTERVAL: Duration = Duration::from_secs(8);
 
 /// Intervalo entre publicaciones de ubicacion de `ShareLocationPanel` (issue
 /// #19). Mas espaciado que `POLL_INTERVAL`: a diferencia del sondeo de
@@ -250,6 +257,66 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
     // `Home` en `moto_ui/src/lib.rs`) — esta bandera solo evita levantar un
     // segundo loop si el efecto se vuelve a disparar.
     let mut started = use_signal(|| false);
+    let mut list_started = use_signal(|| false);
+    // `true` cuando la lista ya se cargo al menos una vez por
+    // `GET /rides/available`: desde ahi se muestra aunque el tiempo real no
+    // conecte.
+    let mut list_loaded = use_signal(|| false);
+
+    // La lista sale del servidor (`GET /rides/available`) y se refresca
+    // cada `AVAILABLE_RIDES_INTERVAL`: el aviso en tiempo real solo le llega
+    // a quien estaba conectado en el instante del pedido, y un conductor que
+    // entraba despues nunca veia el viaje (reportado probando el APK). Al
+    // entrar tambien se recupera el viaje que este conductor ya tenia
+    // aceptado, para no perderlo si cerro la app.
+    {
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+        use_effect(move || {
+            if list_started() {
+                return;
+            }
+            let Some(token) = session.token() else {
+                return;
+            };
+            list_started.set(true);
+            let api_client = api_client.clone();
+            let storage = storage.clone();
+
+            spawn(async move {
+                let active = api_client
+                    .ride_history(&token, Some(Role::Driver))
+                    .await
+                    .ok()
+                    .and_then(|fetch| latest_active_ride(&fetch.data));
+                if active.is_some() {
+                    accepted_ride.set(active);
+                }
+                loop {
+                    if accepted_ride().is_none() {
+                        let current = session.token().unwrap_or_else(|| token.clone());
+                        match api_client.available_rides(&current).await {
+                            Ok(fetch) => {
+                                if let Some(refreshed) = fetch.refreshed_token {
+                                    session.update_token(refreshed, storage.as_ref());
+                                }
+                                requests
+                                    .set(fetch.data.iter().map(NearbyRideRequest::from).collect());
+                                list_loaded.set(true);
+                            }
+                            Err(AuthenticatedRequestError::SessionExpired) => {
+                                session.logout(storage.as_ref());
+                                break;
+                            }
+                            // Un fallo de red se reintenta en la siguiente vuelta.
+                            Err(_) => {}
+                        }
+                    }
+                    Delay::new(AVAILABLE_RIDES_INTERVAL).await;
+                }
+            });
+        });
+    }
 
     use_effect(move || {
         if started() {
@@ -403,6 +470,29 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            } else if list_loaded() || status() == RealtimeStatus::Connected {
+                if requests().is_empty() {
+                    p { class: "nearby-rides-empty",
+                        "No hay solicitudes esperando por ahora. La lista se actualiza sola."
+                    }
+                } else {
+                    ul { class: "nearby-rides-list",
+                        for request in requests() {
+                            NearbyRideRow {
+                                key: "{request.ride_id}",
+                                request: request.clone(),
+                                on_accepted: move |ride: Ride| {
+                                    let ride_id = ride.id;
+                                    requests.with_mut(|list| list.retain(|r| r.ride_id != ride_id));
+                                    accepted_ride.set(Some(ride));
+                                },
+                                on_unavailable: move |ride_id: u64| {
+                                    requests.with_mut(|list| list.retain(|r| r.ride_id != ride_id));
+                                },
                             }
                         }
                     }
