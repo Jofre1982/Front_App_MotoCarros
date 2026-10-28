@@ -328,7 +328,12 @@ fn NearbyErrandRow(props: NearbyErrandRowProps) -> Element {
             p {
                 "Origen: {props.errand.origin.latitude}, {props.errand.origin.longitude}"
             }
-            p { "Destino: {props.errand.destination.name}" }
+            if props.errand.is_motocarga() {
+                p { class: "errand-kind-badge", "📦 Motocarga" }
+            }
+            if let Some(destination) = props.errand.destination_label() {
+                p { "Destino: {destination}" }
+            }
             if props.errand.has_photo {
                 if let Some(data_uri) = photo_data_uri() {
                     img { class: "nearby-errand-photo", src: "{data_uri}" }
@@ -430,7 +435,12 @@ fn AcceptedErrandRow(props: AcceptedErrandRowProps) -> Element {
     rsx! {
         li { class: "accepted-errand-row",
             p { "{props.errand.description}" }
-            p { "Destino: {props.errand.destination.name}" }
+            if props.errand.is_motocarga() {
+                p { class: "errand-kind-badge", "📦 Motocarga" }
+            }
+            if let Some(destination) = props.errand.destination_label() {
+                p { "Destino: {destination}" }
+            }
             if let Some(price) = props.errand.agreed_price {
                 p { "Precio acordado: {price}" }
             }

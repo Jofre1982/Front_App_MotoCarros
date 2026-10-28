@@ -495,17 +495,66 @@ label.register-drive-option {
 label.register-drive-option input { width: 22px; height: 22px; margin: 0; flex: none; }
 .register-field-error, .register-error { color: var(--color-error); font-size: 0.9rem; margin: 6px 0 0; }
 
-/* Subida de documentos: dos botones grandes (camara / galeria). */
-.document-pick-buttons { display: flex; gap: 10px; }
-.document-pick-buttons button { margin-top: 8px; background: var(--color-surface); color: var(--color-primary-dark); border: 2px solid var(--color-primary); }
-.document-pick-buttons button:hover:not(:disabled) { background: var(--color-primary-light); }
-.document-selected-file { margin-top: 10px; font-weight: 600; word-break: break-all; }
-
-/* Pasajero: aun no hay destinos cargados. */
-.ride-estimate-no-sites {
-    padding: 12px 14px;
-    background: var(--color-primary-light);
-    border-radius: var(--radius);
-    font-size: 0.95rem;
+/* Fotos (documentos y mandados): "Tomar foto" grande y primero, galeria
+   como segunda opcion; despues de elegir, la miniatura. */
+.photo-picker-buttons { display: flex; flex-direction: column; gap: 8px; }
+.photo-picker-buttons button { margin-top: 6px; }
+button.photo-picker-gallery {
+    background: var(--color-surface);
+    color: var(--color-primary-dark);
+    border: 2px solid var(--color-primary);
 }
+button.photo-picker-gallery:hover:not(:disabled) { background: var(--color-primary-light); }
+.photo-picker-preview { text-align: center; margin-top: 8px; }
+.photo-picker-preview img {
+    max-width: 100%;
+    max-height: 220px;
+    border-radius: var(--radius);
+    border: 1px solid var(--color-border);
+    display: block;
+    margin: 0 auto;
+}
+.photo-picker-error { color: var(--color-error); font-size: 0.9rem; margin-top: 6px; }
+
+/* Estado de la subida: que el usuario vea que algo pasa. */
+.upload-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 12px 0 0;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    background: var(--color-primary-light);
+    font-weight: 600;
+}
+.upload-status-done { background: var(--color-success-bg); color: var(--color-success); }
+.upload-spinner {
+    width: 18px;
+    height: 18px;
+    flex: none;
+    border: 3px solid var(--color-primary-light);
+    border-top-color: var(--color-primary);
+    border-radius: 50%;
+    animation: motoya-spin 0.8s linear infinite;
+}
+@keyframes motoya-spin { to { transform: rotate(360deg); } }
+
+.optional-tag { color: var(--color-muted); font-weight: 400; }
+.errand-kind-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    background: var(--color-primary-light);
+    color: var(--color-primary-dark);
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+.request-errand-price-note, .ride-pickup-only-price-note { color: var(--color-muted); font-size: 0.92rem; margin-top: 14px; }
+.request-errand-done {
+    padding: 16px;
+    border-radius: var(--radius);
+    background: var(--color-success-bg);
+}
+.request-errand-done h2 { color: var(--color-success); }
+.request-errand-done-detail { font-weight: 600; }
 "#;

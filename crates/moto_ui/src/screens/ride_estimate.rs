@@ -70,13 +70,10 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use futures_timer::Delay;
-use moto_core::api::{
-    ApiClient, AuthenticatedRequestError, CancelRideError, EstimateRideError, GetRideError,
-    RequestRideError,
-};
+use moto_core::api::{ApiClient, CancelRideError, GetRideError, RequestRideError};
 use moto_core::models::{
-    Coordinates, PaymentStatus, Ride, RideCancellation, RideEstimate, RideMode, RideStatus,
-    RideTracking, Site, apply_ride_tracking_event,
+    Coordinates, PaymentStatus, Ride, RideCancellation, RideStatus, RideTracking, VehicleType,
+    apply_ride_tracking_event,
 };
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
@@ -86,6 +83,7 @@ use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
 use crate::map::{MapMarker, MapView};
+use crate::screens::request_errand::RequestErrandScreen;
 
 /// Intervalo entre sondeos de `RealtimeClient::poll_events` para el canal
 /// `ride.{id}` (issue #20) — mismo valor y mismo motivo que el
@@ -107,22 +105,10 @@ pub fn RideEstimateScreen() -> Element {
     let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context::<SessionState>();
 
-    let mut sites = use_signal(Vec::<Site>::new);
-    let mut sites_error = use_signal(|| None::<String>);
-    let mut is_loading_sites = use_signal(|| false);
-    // Mismo criterio que `ProfileScreen`/`VehicleScreen`: evita reprogramar
-    // el efecto en un loop si `session.update_token`/`logout` (dentro del
-    // propio fetch) volviera a disparar la lectura de `session.token()`.
-    let mut has_fetched_sites = use_signal(|| false);
-
+    let mut service = use_signal(|| Service::Ride);
     let mut origin = use_signal(|| None::<(f64, f64)>);
-    let mut ride_mode = use_signal(RideMode::default);
     let mut destination_text = use_signal(String::new);
-    let mut destination_site_id = use_signal(|| None::<u64>);
     let mut passenger_count = use_signal(|| 1u8);
-    let mut estimate_error = use_signal(|| None::<EstimateRideError>);
-    let mut estimate = use_signal(|| None::<RideEstimate>);
-    let mut is_loading = use_signal(|| false);
     let mut ride_error = use_signal(|| None::<RequestRideError>);
     let mut requested_ride = use_signal(|| None::<Ride>);
     let mut is_requesting = use_signal(|| false);
@@ -130,152 +116,14 @@ pub fn RideEstimateScreen() -> Element {
     let mut is_cancelling = use_signal(|| false);
     let mut cancellation_result = use_signal(|| None::<RideCancellation>);
 
-    let api_client_for_sites = api_client.clone();
-    let storage_for_sites = storage.clone();
-
-    use_effect(move || {
-        if has_fetched_sites() {
-            return;
-        }
-
-        let Some(token) = session.token() else {
-            return;
-        };
-        has_fetched_sites.set(true);
-
-        let api_client = api_client_for_sites.clone();
-        let storage = storage_for_sites.clone();
-
-        spawn(async move {
-            is_loading_sites.set(true);
-            sites_error.set(None);
-
-            match api_client.list_sites(&token).await {
-                Ok(fetch) => {
-                    if let Some(refreshed) = fetch.refreshed_token {
-                        session.update_token(refreshed, storage.as_ref());
-                    }
-                    sites.set(fetch.data);
-                }
-                Err(AuthenticatedRequestError::SessionExpired) => {
-                    session.logout(storage.as_ref());
-                }
-                Err(err) => {
-                    sites_error.set(Some(err.to_string()));
-                }
-            }
-
-            is_loading_sites.set(false);
-        });
-    });
-
     let on_map_click = move |(lat, lng): (f64, f64)| {
-        estimate.set(None);
-        estimate_error.set(None);
         origin.set(Some((lat, lng)));
     };
 
-    let on_estimate_click = {
-        let api_client = api_client.clone();
-        let storage = storage.clone();
-        move |_| {
-            let Some(token) = session.token() else {
-                return;
-            };
-            let Some((origin_lat, origin_lng)) = origin() else {
-                return;
-            };
-            let Some(site_id) = destination_site_id() else {
-                return;
-            };
-            let count = passenger_count();
-            let api_client = api_client.clone();
-            let storage = storage.clone();
-
-            spawn(async move {
-                is_loading.set(true);
-                estimate_error.set(None);
-
-                let origin_coords = Coordinates {
-                    latitude: origin_lat,
-                    longitude: origin_lng,
-                };
-
-                match api_client
-                    .estimate_ride(&token, origin_coords, site_id, count)
-                    .await
-                {
-                    Ok(fetch) => {
-                        if let Some(refreshed) = fetch.refreshed_token {
-                            session.update_token(refreshed, storage.as_ref());
-                        }
-                        estimate.set(Some(fetch.data));
-                    }
-                    Err(EstimateRideError::SessionExpired) => {
-                        session.logout(storage.as_ref());
-                    }
-                    Err(err) => {
-                        estimate_error.set(Some(err));
-                    }
-                }
-
-                is_loading.set(false);
-            });
-        }
-    };
-
-    let on_request_click = {
-        let api_client = api_client.clone();
-        let storage = storage.clone();
-        move |_| {
-            let Some(token) = session.token() else {
-                return;
-            };
-            let Some((origin_lat, origin_lng)) = origin() else {
-                return;
-            };
-            let Some(site_id) = destination_site_id() else {
-                return;
-            };
-            let count = passenger_count();
-            let api_client = api_client.clone();
-            let storage = storage.clone();
-
-            spawn(async move {
-                is_requesting.set(true);
-                ride_error.set(None);
-
-                let origin_coords = Coordinates {
-                    latitude: origin_lat,
-                    longitude: origin_lng,
-                };
-
-                match api_client
-                    .request_ride(&token, origin_coords, site_id, count)
-                    .await
-                {
-                    Ok(fetch) => {
-                        if let Some(refreshed) = fetch.refreshed_token {
-                            session.update_token(refreshed, storage.as_ref());
-                        }
-                        requested_ride.set(Some(fetch.data));
-                    }
-                    Err(RequestRideError::SessionExpired) => {
-                        session.logout(storage.as_ref());
-                    }
-                    Err(err) => {
-                        ride_error.set(Some(err));
-                    }
-                }
-
-                is_requesting.set(false);
-            });
-        }
-    };
-
-    // Viaje solo recogida (issue #92): sin estimado, se pide directo con el
-    // texto del destino. Un error (p.ej. un 422) se muestra sin borrar lo
-    // escrito: `destination_text` solo se limpia al volver al inicio.
+    // Siempre "solo recogida": sin precio fijo ni estimado (pedido del dueno,
+    // los precios varian segun a donde se va y se acuerdan con el
+    // conductor). A donde va es opcional. Un error (p.ej. un 422) se muestra
+    // sin borrar lo escrito.
     let on_pickup_only_request_click = {
         let api_client = api_client.clone();
         let storage = storage.clone();
@@ -287,9 +135,6 @@ pub fn RideEstimateScreen() -> Element {
                 return;
             };
             let text = destination_text();
-            if text.trim().is_empty() {
-                return;
-            }
             let count = passenger_count();
             let api_client = api_client.clone();
             let storage = storage.clone();
@@ -365,14 +210,10 @@ pub fn RideEstimateScreen() -> Element {
     let on_cancellation_dismiss = move |_| {
         cancellation_result.set(None);
         requested_ride.set(None);
-        estimate.set(None);
-        estimate_error.set(None);
         ride_error.set(None);
         cancel_error.set(None);
         origin.set(None);
-        destination_site_id.set(None);
         destination_text.set(String::new());
-        ride_mode.set(RideMode::default());
         passenger_count.set(1);
     };
 
@@ -388,9 +229,8 @@ pub fn RideEstimateScreen() -> Element {
         .into_iter()
         .collect();
 
-    let can_estimate = origin().is_some() && destination_site_id().is_some();
-    let is_pickup_only = ride_mode() == RideMode::PickupOnly;
-    let can_request_pickup_only = origin().is_some() && !destination_text().trim().is_empty();
+    let can_request = origin().is_some();
+    let is_errand = service() == Service::Errand;
 
     if let Some(cancellation) = cancellation_result() {
         // Confirmacion explicita de la penalizacion (issue #21) antes de
@@ -497,133 +337,85 @@ pub fn RideEstimateScreen() -> Element {
         div { class: "ride-estimate-screen",
             h2 { "Pedir motocarro" }
             fieldset { class: "ride-mode-selector",
-                legend { "¿Como quieres viajar?" }
+                legend { "¿Que necesitas?" }
                 label {
-                    class: if is_pickup_only { "ride-mode-option" } else { "ride-mode-option ride-mode-option-selected" },
+                    class: if is_errand { "ride-mode-option" } else { "ride-mode-option ride-mode-option-selected" },
                     input {
                         r#type: "radio",
-                        name: "ride-mode",
-                        checked: !is_pickup_only,
-                        onchange: move |_| {
-                            ride_mode.set(RideMode::Catalog);
-                            ride_error.set(None);
-                        },
+                        name: "ride-service",
+                        checked: !is_errand,
+                        onchange: move |_| service.set(Service::Ride),
                     }
                     span { class: "ride-mode-option-text",
-                        strong { "Con destino y precio fijo" }
-                        small { "Eliges a donde vas y ves el precio antes de pedir." }
+                        strong { "🛺 Viaje" }
+                        small { "Te recogemos y te llevamos." }
                     }
                 }
                 label {
-                    class: if is_pickup_only { "ride-mode-option ride-mode-option-selected" } else { "ride-mode-option" },
+                    class: if is_errand { "ride-mode-option ride-mode-option-selected" } else { "ride-mode-option" },
                     input {
                         r#type: "radio",
-                        name: "ride-mode",
-                        checked: is_pickup_only,
-                        onchange: move |_| {
-                            ride_mode.set(RideMode::PickupOnly);
-                            estimate.set(None);
-                            estimate_error.set(None);
-                            ride_error.set(None);
-                        },
+                        name: "ride-service",
+                        checked: is_errand,
+                        onchange: move |_| service.set(Service::Errand),
                     }
                     span { class: "ride-mode-option-text",
-                        strong { "Solo recogida" }
-                        small { "Escribes a donde vas y acuerdas el precio con el conductor." }
+                        strong { "🛍️ Mandado" }
+                        small { "Te compramos o llevamos algo." }
                     }
                 }
             }
-            p { class: "ride-step-title", "1. ¿Donde te recogemos?" }
-            p { class: "ride-estimate-instructions",
-                if origin().is_some() {
-                    "Listo, marcamos tu punto de recogida. Puedes tocar otro lugar para cambiarlo."
-                } else {
-                    "Toca el mapa en el lugar donde estas."
+            if is_errand {
+                RequestErrandScreen { vehicle_type: VehicleType::Motocarro, embedded: true }
+            } else {
+                p { class: "ride-step-title", "1. ¿Donde te recogemos?" }
+                p { class: "ride-estimate-instructions",
+                    if origin().is_some() {
+                        "Listo, marcamos tu punto de recogida. Puedes tocar otro lugar para cambiarlo."
+                    } else {
+                        "Toca el mapa en el lugar donde estas."
+                    }
                 }
-            }
-            div { class: "ride-estimate-map", style: "height: 320px;",
-                MapView {
-                    center_lat: DEFAULT_CENTER_LAT,
-                    center_lng: DEFAULT_CENTER_LNG,
-                    markers,
-                    on_click: on_map_click,
+                div { class: "ride-estimate-map", style: "height: 320px;",
+                    MapView {
+                        center_lat: DEFAULT_CENTER_LAT,
+                        center_lng: DEFAULT_CENTER_LNG,
+                        markers,
+                        on_click: on_map_click,
+                    }
                 }
-            }
-            if is_pickup_only {
-                label { r#for: "ride-pickup-only-destination", class: "ride-step-title", "2. ¿A donde vas?" }
+                label { r#for: "ride-pickup-only-destination", class: "ride-step-title",
+                    "2. ¿A donde vas? "
+                    span { class: "optional-tag", "(opcional)" }
+                }
                 input {
                     id: "ride-pickup-only-destination",
                     r#type: "text",
                     maxlength: "255",
-                    placeholder: "Ej.: al hospital, casa de mi mama en La Esperanza",
+                    placeholder: "Ej.: al hospital, al puerto",
                     value: "{destination_text}",
                     oninput: move |event| destination_text.set(event.value()),
                 }
-            } else {
-            label { r#for: "ride-estimate-destination", class: "ride-step-title", "2. ¿A donde vas?" }
-            if is_loading_sites() {
-                p { "Cargando sitios..." }
-            } else if let Some(message) = sites_error() {
-                p { class: "ride-estimate-sites-error", role: "alert", "{message}" }
-            } else if !sites().iter().any(|site| site.motocarro_fare().is_some()) {
-                // Sin sitios con tarifa de motocarro cargados por el admin,
-                // el `select` quedaba vacio y parecia un error de la app.
-                div { class: "ride-estimate-no-sites", role: "status",
-                    p { "Todavia no hay destinos con precio fijo. Mientras tanto puedes pedir \"Solo recogida\": escribes a donde vas y acuerdas el precio con el conductor." }
-                    button {
-                        r#type: "button",
-                        class: "ride-estimate-use-pickup-only",
-                        onclick: move |_| {
-                            ride_mode.set(RideMode::PickupOnly);
-                            estimate.set(None);
-                            estimate_error.set(None);
-                            ride_error.set(None);
-                        },
-                        "Pedir solo recogida"
-                    }
-                }
-            } else {
+                label { r#for: "ride-estimate-passenger-count", class: "ride-step-title", "3. ¿Cuantas personas van?" }
                 select {
-                    id: "ride-estimate-destination",
-                    value: destination_site_id().map(|id| id.to_string()).unwrap_or_default(),
+                    id: "ride-estimate-passenger-count",
+                    value: "{passenger_count}",
                     onchange: move |event| {
-                        destination_site_id.set(event.value().parse::<u64>().ok());
-                    },
-                    option { value: "", disabled: true, "Elige tu destino" }
-                    for site in sites().iter().filter(|site| site.motocarro_fare().is_some()) {
-                        {
-                            let fare = site.motocarro_fare().expect("filtrado arriba");
-                            rsx! {
-                                option { key: "{site.id}", value: "{site.id}",
-                                    "{site.name} — {fare.day_price} de dia"
-                                }
-                            }
+                        if let Ok(count) = event.value().parse::<u8>() {
+                            passenger_count.set(count);
                         }
-                    }
+                    },
+                    option { value: "1", "1 persona" }
+                    option { value: "2", "2 personas" }
+                    option { value: "3", "3 personas" }
                 }
-            }
-            }
-            label { r#for: "ride-estimate-passenger-count", class: "ride-step-title", "3. ¿Cuantas personas van?" }
-            select {
-                id: "ride-estimate-passenger-count",
-                value: "{passenger_count}",
-                onchange: move |event| {
-                    if let Ok(count) = event.value().parse::<u8>() {
-                        passenger_count.set(count);
-                    }
-                },
-                option { value: "1", "1 persona" }
-                option { value: "2", "2 personas" }
-                option { value: "3", "3 personas" }
-            }
-            if is_pickup_only {
                 p { class: "ride-pickup-only-price-note",
-                    "Precio: a acordar con el conductor cuando acepte tu viaje."
+                    "Precio: lo acuerdas con el conductor cuando acepte tu viaje."
                 }
                 button {
                     r#type: "button",
                     class: "ride-request-button",
-                    disabled: !can_request_pickup_only || is_requesting(),
+                    disabled: !can_request || is_requesting(),
                     onclick: on_pickup_only_request_click,
                     if is_requesting() {
                         "Pidiendo..."
@@ -634,56 +426,20 @@ pub fn RideEstimateScreen() -> Element {
                 if let Some(err) = ride_error() {
                     p { class: "ride-request-error", role: "alert", "{err}" }
                 }
-                if !can_request_pickup_only {
-                    p { class: "ride-estimate-empty",
-                        "Marca donde te recogemos y escribe a donde vas."
-                    }
+                if !can_request {
+                    p { class: "ride-estimate-empty", "Toca el mapa para marcar donde te recogemos." }
                 }
-            } else {
-            button {
-                r#type: "button",
-                class: "ride-estimate-button",
-                disabled: !can_estimate || is_loading(),
-                onclick: on_estimate_click,
-                if is_loading() {
-                    "Calculando..."
-                } else {
-                    "Ver precio"
-                }
-            }
-            if let Some(err) = estimate_error() {
-                p { class: "ride-estimate-error", role: "alert", "{err}" }
-            } else if let Some(value) = estimate() {
-                dl { class: "ride-estimate-result",
-                    dt { "Destino" }
-                    dd { "{value.destination.name}" }
-                    dt { "Personas" }
-                    dd { "{value.passenger_count}" }
-                    dt { "Precio" }
-                    dd { class: "ride-estimate-price", "{value.currency} {value.estimated_fare}" }
-                }
-                button {
-                    r#type: "button",
-                    class: "ride-request-button",
-                    disabled: is_requesting(),
-                    onclick: on_request_click,
-                    if is_requesting() {
-                        "Pidiendo..."
-                    } else {
-                        "Pedir motocarro"
-                    }
-                }
-                if let Some(err) = ride_error() {
-                    p { class: "ride-request-error", role: "alert", "{err}" }
-                }
-            } else if !can_estimate {
-                p { class: "ride-estimate-empty",
-                    "Marca donde te recogemos y elige tu destino para ver el precio."
-                }
-            }
             }
         }
     }
+}
+
+/// Que pide el pasajero desde "Pedir motocarro": un viaje para el, o un
+/// mandado (mismo formulario que "Pedir motocarga", con motocarro).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Service {
+    Ride,
+    Errand,
 }
 
 /// Estado de la conexion en tiempo real que muestra esta pantalla — mismo
