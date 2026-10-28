@@ -3654,6 +3654,21 @@ impl ApiClient {
     /// #105). Es lo que permite que un conductor que entro despues del pedido
     /// lo vea igual: el aviso en tiempo real solo llega a quien estaba en
     /// linea en ese momento.
+    /// `GET /api/v1/me/errands` (backend #106): los mandados propios, mas
+    /// nuevo primero. `Role::Passenger` los pedidos (para ver si los
+    /// aceptaron y a que precio); `Role::Driver` los asignados.
+    pub async fn my_errands(
+        &self,
+        token: &AuthToken,
+        role: Role,
+    ) -> Result<AuthenticatedFetch<Vec<Errand>>, AuthenticatedRequestError> {
+        let path = match role {
+            Role::Driver => "/api/v1/me/errands?as=driver",
+            Role::Passenger => "/api/v1/me/errands?as=passenger",
+        };
+        self.get_authenticated::<Vec<Errand>>(path, token).await
+    }
+
     pub async fn available_rides(
         &self,
         token: &AuthToken,

@@ -6,6 +6,7 @@ use moto_core::models::{Role, VehicleType};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+pub mod driver_alert;
 pub mod fields;
 pub mod file_picker;
 pub mod map;
@@ -350,6 +351,14 @@ fn Home() -> Element {
                         onclick: move |_| go_to(HomeSection::Profile),
                         "Mi perfil"
                     }
+                }
+            }
+            if is_driver && section() != HomeSection::NearbyRides
+                && section() != HomeSection::NearbyErrands
+            {
+                driver_alert::DriverServiceAlert {
+                    on_open_rides: move |_| go_to(HomeSection::NearbyRides),
+                    on_open_errands: move |_| go_to(HomeSection::NearbyErrands),
                 }
             }
             match section() {

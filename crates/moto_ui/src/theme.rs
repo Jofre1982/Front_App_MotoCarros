@@ -557,4 +557,47 @@ button.photo-picker-gallery:hover:not(:disabled) { background: var(--color-prima
 }
 .request-errand-done h2 { color: var(--color-success); }
 .request-errand-done-detail { font-weight: 600; }
+
+/* Aviso al conductor de servicios esperando (cualquier pantalla). */
+.driver-service-alert {
+    margin: 0 0 16px;
+    padding: 14px 16px;
+    border-radius: var(--radius);
+    background: var(--color-primary);
+    color: #fff;
+    animation: motoya-pulse 1.6s ease-in-out infinite;
+}
+.driver-service-alert p { margin: 0; font-weight: 700; font-size: 1.05rem; }
+.driver-service-alert-actions { display: flex; gap: 8px; }
+.driver-service-alert-actions button {
+    margin-top: 10px;
+    background: #fff;
+    color: var(--color-primary-dark);
+}
+.driver-service-alert-actions button:hover:not(:disabled) { background: var(--color-primary-light); }
+@keyframes motoya-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(232, 89, 12, 0.5); } 50% { box-shadow: 0 0 0 8px rgba(232, 89, 12, 0); } }
+
+/* Punto de recogida para el conductor. */
+.pickup-location { margin: 10px 0; }
+.pickup-location-title { font-weight: 700; margin: 0 0 6px; }
+.pickup-location-map { border-radius: var(--radius); overflow: hidden; border: 1px solid var(--color-border); }
+a.pickup-directions-link {
+    display: block;
+    margin-top: 8px;
+    padding: 12px 14px;
+    text-align: center;
+    border-radius: var(--radius);
+    border: 2px solid var(--color-primary);
+    color: var(--color-primary-dark);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+/* Seguimiento del mandado del pasajero. */
+.request-errand-waiting {
+    padding: 16px;
+    border-radius: var(--radius);
+    background: var(--color-primary-light);
+}
+.request-errand-status { font-weight: 700; font-size: 1.05rem; }
 "#;

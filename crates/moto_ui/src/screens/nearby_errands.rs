@@ -55,14 +55,16 @@ use futures_timer::Delay;
 use moto_core::api::{
     AcceptErrandError, ApiClient, AuthenticatedRequestError, CompleteErrandError,
 };
-use moto_core::models::{Errand, ErrandStatus};
+use moto_core::models::{Errand, ErrandStatus, Role};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
-/// Intervalo entre sondeos de `GET /api/v1/errands` — mismo valor y mismo
-/// motivo que el `POLL_INTERVAL` de `NearbyRidesList` (`nearby_rides.rs`):
-/// el transporte no avisa solo cuando hay un mandado nuevo.
-const POLL_INTERVAL: Duration = Duration::from_millis(700);
+use crate::map::PickupLocation;
+
+/// Intervalo entre sondeos de `GET /api/v1/errands`. Antes eran 700 ms
+/// (copiado del loop del socket de tiempo real), que en un celular con
+/// datos era una peticion HTTP por segundo: 8 s alcanzan para un mandado.
+const POLL_INTERVAL: Duration = Duration::from_secs(8);
 
 #[component]
 pub fn NearbyErrandsScreen() -> Element {
@@ -105,6 +107,20 @@ pub fn NearbyErrandsScreen() -> Element {
 
         spawn(async move {
             let mut current_token = token;
+
+            // Recupera los mandados que este conductor ya tenia aceptados
+            // (backend #106, `GET /me/errands?as=driver`): antes se perdian
+            // al cerrar la app o cambiar de pantalla.
+            if let Ok(fetch) = api_client.my_errands(&current_token, Role::Driver).await {
+                let pending: Vec<Errand> = fetch
+                    .data
+                    .into_iter()
+                    .filter(|errand| errand.status == ErrandStatus::Accepted)
+                    .collect();
+                if !pending.is_empty() {
+                    accepted_errands.set(pending);
+                }
+            }
 
             loop {
                 match api_client.list_errands(&current_token).await {
@@ -185,7 +201,7 @@ pub fn NearbyErrandsScreen() -> Element {
             }
             if !accepted_errands().is_empty() {
                 div { class: "accepted-errands-section",
-                    h3 { "Mandados que aceptaste en esta sesion" }
+                    h3 { "Mandados que aceptaste" }
                     ul { class: "accepted-errands-list",
                         for errand in accepted_errands() {
                             AcceptedErrandRow {
@@ -325,9 +341,7 @@ fn NearbyErrandRow(props: NearbyErrandRowProps) -> Element {
     rsx! {
         li { class: "nearby-errand-row",
             p { "{props.errand.description}" }
-            p {
-                "Origen: {props.errand.origin.latitude}, {props.errand.origin.longitude}"
-            }
+            PickupLocation { lat: props.errand.origin.latitude, lng: props.errand.origin.longitude }
             if props.errand.is_motocarga() {
                 p { class: "errand-kind-badge", "📦 Motocarga" }
             }
@@ -447,6 +461,7 @@ fn AcceptedErrandRow(props: AcceptedErrandRowProps) -> Element {
             if props.errand.status == ErrandStatus::Completed {
                 p { class: "accepted-errand-completed", "Completado." }
             } else {
+                PickupLocation { lat: props.errand.origin.latitude, lng: props.errand.origin.longitude }
                 button {
                     r#type: "button",
                     class: "accepted-errand-complete-button",

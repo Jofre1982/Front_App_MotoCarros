@@ -290,6 +290,41 @@ pub fn MapView(
     }
 }
 
+/// Enlace que abre el punto en Google Maps (la app instalada, o el
+/// navegador). En el shell nativo los enlaces `https://` se abren fuera del
+/// WebView, asi que el conductor sale de MotoYa a la navegacion de Maps.
+pub fn google_maps_url(lat: f64, lng: f64) -> String {
+    format!("https://www.google.com/maps/search/?api=1&query={lat},{lng}")
+}
+
+/// Donde recoger, para el conductor: mapa chico con el punto y el boton para
+/// llegar con Google Maps. Reemplaza las coordenadas en numeros, que no le
+/// decian nada a nadie (reportado probando el APK).
+#[component]
+pub fn PickupLocation(lat: f64, lng: f64) -> Element {
+    let markers = vec![MapMarker {
+        lat,
+        lng,
+        label: Some("Recogida".to_string()),
+    }];
+
+    rsx! {
+        div { class: "pickup-location",
+            p { class: "pickup-location-title", "📍 Punto de recogida" }
+            div { class: "pickup-location-map", style: "height: 240px;",
+                MapView { center_lat: lat, center_lng: lng, zoom: 16, markers }
+            }
+            a {
+                class: "pickup-directions-link",
+                href: "{google_maps_url(lat, lng)}",
+                target: "_blank",
+                rel: "noopener",
+                "🧭 Como llegar (Google Maps)"
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +409,14 @@ mod tests {
 
         assert!(script.contains("map.on(\"click\""));
         assert!(script.contains("dioxus.send({ lat: e.latlng.lat, lng: e.latlng.lng });"));
+    }
+
+    #[test]
+    fn google_maps_url_points_at_the_coordinates() {
+        assert_eq!(
+            google_maps_url(3.8653, -67.9239),
+            "https://www.google.com/maps/search/?api=1&query=3.8653,-67.9239"
+        );
     }
 
     #[test]
