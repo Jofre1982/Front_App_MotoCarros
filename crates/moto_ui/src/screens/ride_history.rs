@@ -21,10 +21,11 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use moto_core::api::{ApiClient, AuthenticatedRequestError};
-use moto_core::models::{Ride, RideStatus};
+use moto_core::models::{Ride, RideStatus, Role};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+use super::errand_history::{ErrandHistoryList, short_date};
 use super::ride_receipt::RideReceiptScreen;
 
 #[component]
@@ -63,10 +64,7 @@ pub fn RideHistoryScreen() -> Element {
             is_loading.set(true);
             load_error.set(None);
 
-            match api_client
-                .ride_history(&token, Some(moto_core::models::Role::Passenger))
-                .await
-            {
+            match api_client.ride_history(&token, Some(Role::Passenger)).await {
                 Ok(fetch) => {
                     if let Some(refreshed) = fetch.refreshed_token {
                         session.update_token(refreshed, storage.as_ref());
@@ -87,7 +85,7 @@ pub fn RideHistoryScreen() -> Element {
 
     rsx! {
         div { class: "ride-history-screen",
-            h2 { "Historial de viajes" }
+            h2 { "Mi historial" }
             if let Some(ride_id) = viewing_receipt() {
                 RideReceiptScreen {
                     ride_id,
@@ -97,18 +95,23 @@ pub fn RideHistoryScreen() -> Element {
                 p { "Cargando..." }
             } else if let Some(message) = load_error() {
                 p { class: "ride-history-error", role: "alert", "{message}" }
-            } else if rides().is_empty() {
-                p { class: "ride-history-empty", "Todavia no tienes viajes." }
             } else {
-                ul { class: "ride-history-list",
-                    for ride in rides() {
-                        RideHistoryRow {
-                            key: "{ride.id}",
-                            ride,
-                            on_view_receipt: move |ride_id| viewing_receipt.set(Some(ride_id)),
+                h3 { "🛺 Viajes" }
+                if rides().is_empty() {
+                    p { class: "ride-history-empty", "Todavia no tienes viajes." }
+                } else {
+                    ul { class: "ride-history-list",
+                        for ride in rides() {
+                            RideHistoryRow {
+                                key: "{ride.id}",
+                                ride,
+                                on_view_receipt: move |ride_id| viewing_receipt.set(Some(ride_id)),
+                            }
                         }
                     }
                 }
+                h3 { "🛍️ Mandados y motocargas" }
+                ErrandHistoryList { role: Role::Passenger }
             }
         }
     }
@@ -129,10 +132,9 @@ fn RideHistoryRow(props: RideHistoryRowProps) -> Element {
     rsx! {
         li { class: "ride-history-row",
             p { class: "ride-history-status", "{ride_status_label(ride.status)}" }
-            p { "Fecha: {ride.requested_at}" }
-            p { "Origen: {ride.origin.latitude}, {ride.origin.longitude}" }
+            p { "Fecha: {short_date(&ride.requested_at)}" }
             p { "Destino: {ride.destination_label()}" }
-            p { "Tarifa: {fare}" }
+            p { class: "ride-history-price", "Valor: {fare}" }
             if let Some(driver) = &ride.driver {
                 p { "Conductor: {driver.name}" }
             }

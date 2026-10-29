@@ -1306,7 +1306,7 @@ impl std::fmt::Display for AcceptRideError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AcceptRideError::InvalidAgreedPrice => {
-                write!(f, "Ingresa el precio acordado (mayor que cero).")
+                write!(f, "Ingresa el precio a acordar (mayor que cero).")
             }
             AcceptRideError::Forbidden => {
                 write!(f, "Esta cuenta no puede aceptar viajes.")
@@ -2383,6 +2383,73 @@ impl ApiClient {
             accept,
         )
         .await
+    }
+
+    /// `PATCH /api/v1/me/availability` ("Recibir viajes", backend #110). La
+    /// ubicacion es opcional: si el celular no la da, igual se activa y el
+    /// conductor ve la lista de viajes que esperan.
+    pub async fn update_ride_availability(
+        &self,
+        token: &AuthToken,
+        is_available: bool,
+        location: Option<Coordinates>,
+    ) -> Result<AuthenticatedFetch<DriverProfile>, ServiceActionError> {
+        let mut body = serde_json::json!({ "is_available": is_available });
+        if let Some(point) = location {
+            body["latitude"] = serde_json::json!(point.latitude);
+            body["longitude"] = serde_json::json!(point.longitude);
+        }
+        if let Some(profile) = self.patch_availability(&token.access_token, &body).await? {
+            return Ok(AuthenticatedFetch {
+                data: profile,
+                refreshed_token: None,
+            });
+        }
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| ServiceActionError::SessionExpired)?;
+        match self
+            .patch_availability(&renewed.access_token, &body)
+            .await?
+        {
+            Some(profile) => Ok(AuthenticatedFetch {
+                data: profile,
+                refreshed_token: Some(renewed),
+            }),
+            None => Err(ServiceActionError::SessionExpired),
+        }
+    }
+
+    async fn patch_availability(
+        &self,
+        access_token: &str,
+        body: &serde_json::Value,
+    ) -> Result<Option<DriverProfile>, ServiceActionError> {
+        let response = self
+            .http
+            .patch(format!("{}/api/v1/me/availability", self.base_url))
+            .bearer_auth(access_token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| ServiceActionError::Network(describe_error(&err)))?;
+        match response.status().as_u16() {
+            200..=299 => {
+                let envelope: DataEnvelope<DriverProfile> = decode_json(response)
+                    .await
+                    .map_err(ServiceActionError::Network)?;
+                Ok(Some(envelope.data))
+            }
+            401 => Ok(None),
+            422 => {
+                let body: ApiErrorBody = decode_json(response)
+                    .await
+                    .map_err(ServiceActionError::Network)?;
+                Err(ServiceActionError::Validation(body))
+            }
+            other => Err(ServiceActionError::Unexpected(other)),
+        }
     }
 
     /// `POST /api/v1/errands/{id}/cancel` (backend #108): el pasajero cancela
@@ -6593,6 +6660,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_ride_availability_sends_the_location_only_when_known() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/me/availability"))
+            .and(body_json(serde_json::json!({ "is_available": false })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "license_number": "ABC-12345", "is_available": false,
+                    "is_available_for_errands": true, "latitude": null,
+                    "longitude": null, "location_updated_at": null
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let fetch = ApiClient::new(server.uri())
+            .update_ride_availability(&sample_token(), false, None)
+            .await
+            .unwrap();
+
+        assert!(!fetch.data.is_available);
+        assert!(fetch.data.is_available_for_errands);
+    }
+
+    #[tokio::test]
     async fn cancel_errand_posts_and_returns_the_cancelled_errand() {
         let server = MockServer::start().await;
 
@@ -9590,7 +9683,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(fetch.data.agreed_price, Some(7000));
-        assert_eq!(fetch.data.fare_label(), "COP 7000");
+        assert_eq!(fetch.data.fare_label(), "$7.000");
     }
 
     #[tokio::test]

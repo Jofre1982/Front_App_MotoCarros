@@ -692,4 +692,25 @@ button.confirm-cancel-yes { background: var(--color-error); }
     margin-bottom: 8px;
 }
 .price-offer-vehicle { margin: 2px 0 0; color: var(--color-text); }
+.availability-switch {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    margin-top: 8px;
+    background: var(--color-surface);
+    color: var(--color-text);
+    border: 2px solid var(--color-border);
+    font-weight: 700;
+}
+.availability-switch-on {
+    background: var(--color-success-bg);
+    color: var(--color-success);
+    border-color: var(--color-success);
+}
+.char-counter { text-align: right; color: var(--color-muted); font-size: 0.85rem; margin: 4px 0 0; }
+.ride-request-again-button, .nearby-ride-done-button { width: 100%; margin-top: 12px; }
+.ride-history-price { font-weight: 700; color: var(--color-primary-dark); }
+.driver-earnings-total { font-size: 1.6rem; font-weight: 800; color: var(--color-primary-dark); }
+.driver-errand-history { margin-top: 18px; }
 "#;

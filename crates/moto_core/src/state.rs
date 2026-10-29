@@ -25,6 +25,8 @@ pub struct SessionState {
     /// fuente de verdad que tiene la app — `None` significa "todavia no lo
     /// sabemos en esta sesion", nunca se asume `false`.
     errand_availability: Signal<Option<bool>>,
+    /// Lo mismo para viajes de pasajero ("Recibir viajes").
+    ride_availability: Signal<Option<bool>>,
     /// El modo que eligio la persona en esta sesion (historia #99 del
     /// backend, issue #95): pasajero o conductor. Solo importa en una cuenta
     /// con ambos roles; `None` mientras no haya elegido (ver
@@ -38,6 +40,7 @@ impl SessionState {
             user: Signal::new(None),
             token: Signal::new(None),
             errand_availability: Signal::new(None),
+            ride_availability: Signal::new(None),
             mode: Signal::new(None),
         }
     }
@@ -73,6 +76,7 @@ impl SessionState {
         self.user.set(None);
         self.token.set(None);
         self.errand_availability.set(None);
+        self.ride_availability.set(None);
         self.mode.set(None);
     }
 
@@ -99,7 +103,24 @@ impl SessionState {
     /// No toca el token: el caller que haya recibido un `refreshed_token`
     /// junto a la respuesta debe persistirlo aparte con `update_token`.
     pub fn set_user(&mut self, user: User) {
+        // `GET /me` trae el perfil de conductor con su disponibilidad: se
+        // toma de ahi para que los interruptores arranquen en su estado real.
+        if let Some(profile) = &user.driver_profile {
+            self.ride_availability.set(Some(profile.is_available));
+            self.errand_availability
+                .set(Some(profile.is_available_for_errands));
+        }
         self.user.set(Some(user));
+    }
+
+    /// Si el conductor esta recibiendo viajes ("Recibir viajes"), o `None`
+    /// si todavia no se sabe en esta sesion.
+    pub fn ride_availability(&self) -> Option<bool> {
+        *self.ride_availability.read()
+    }
+
+    pub fn set_ride_availability(&mut self, is_available: bool) {
+        self.ride_availability.set(Some(is_available));
     }
 
     /// Lo que esta sesion sabe sobre la disponibilidad del conductor para
@@ -217,6 +238,7 @@ mod tests {
                 avatar_url: None,
                 avatar_status: None,
                 avatar_rejection_reason: None,
+                driver_profile: None,
             },
             token: AuthToken {
                 access_token: "jwt-token".to_string(),

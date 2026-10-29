@@ -23,19 +23,24 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use moto_core::api::{ApiClient, AuthenticatedRequestError, GetDriverEarningsError};
-use moto_core::models::{DriverEarningsSummary, Ride};
+use moto_core::models::{DriverEarningsSummary, Ride, Role, format_cop};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+use super::errand_history::{ErrandHistoryList, short_date};
 use super::ride_history::ride_status_label;
 
 #[component]
 pub fn DriverEarningsScreen() -> Element {
     rsx! {
         div { class: "driver-earnings-screen",
-            h2 { "Historial de viajes y ganancias" }
-            DriverRideHistory {}
+            h2 { "Historial y ganancias" }
             DriverEarningsSummaryForm {}
+            DriverRideHistory {}
+            section { class: "driver-errand-history",
+                h3 { "🛍️ Mandados y motocargas" }
+                ErrandHistoryList { role: Role::Driver }
+            }
         }
     }
 }
@@ -96,7 +101,7 @@ fn DriverRideHistory() -> Element {
 
     rsx! {
         section { class: "driver-ride-history",
-            h3 { "Viajes asignados" }
+            h3 { "🛺 Viajes" }
             if is_loading() {
                 p { "Cargando..." }
             } else if let Some(message) = load_error() {
@@ -127,10 +132,9 @@ fn DriverRideHistoryRow(props: DriverRideHistoryRowProps) -> Element {
     rsx! {
         li { class: "driver-ride-history-row",
             p { class: "driver-ride-history-status", "{ride_status_label(ride.status)}" }
-            p { "Fecha: {ride.requested_at}" }
-            p { "Origen: {ride.origin.latitude}, {ride.origin.longitude}" }
+            p { "Fecha: {short_date(&ride.requested_at)}" }
             p { "Destino: {ride.destination_label()}" }
-            p { "Tarifa: {fare}" }
+            p { class: "ride-history-price", "Valor: {fare}" }
         }
     }
 }
@@ -218,16 +222,18 @@ fn DriverEarningsSummaryForm() -> Element {
             if let Some(message) = load_error().as_ref().map(|err| err.to_string()) {
                 p { class: "driver-earnings-error", role: "alert", "{message}" }
             } else if let Some(current) = summary() {
-                if current.completed_rides == 0 {
+                if current.completed_rides == 0 && current.completed_errands == 0 {
                     p { class: "driver-earnings-empty",
-                        "No tienes viajes completados entre {current.from} y {current.to}."
+                        "No tienes viajes ni mandados completados entre {current.from} y {current.to}."
                     }
                 } else {
                     dl { class: "driver-earnings-result",
                         dt { "Total ganado" }
-                        dd { "{current.currency} {current.total_earned}" }
-                        dt { "Viajes completados" }
-                        dd { "{current.completed_rides}" }
+                        dd { class: "driver-earnings-total", "{format_cop(current.total_earned)}" }
+                        dt { "🛺 Viajes ({current.completed_rides})" }
+                        dd { "{format_cop(current.rides_earned)}" }
+                        dt { "🛍️ Mandados y motocargas ({current.completed_errands})" }
+                        dd { "{format_cop(current.errands_earned)}" }
                     }
                 }
             }

@@ -20,7 +20,7 @@
 //!
 //! La disponibilidad para mandados (historia #92 del backend, issue #77 de
 //! este repo) tambien vive aca, solo visible para cuentas de conductor
-//! (`ErrandAvailabilitySection`). El backend no expone ningun `GET` para
+//! (`AvailabilitySection`). El backend no expone ningun `GET` para
 //! leer el valor actual — el unico endpoint que existe es el `PATCH` que lo
 //! cambia (`ApiClient::update_errand_availability`) — asi que la seccion
 //! arranca en un estado "desconocido" en vez de asumir `false`, y solo
@@ -35,6 +35,7 @@ use moto_core::api::{
     RequestPhoneVerificationError, ServiceActionError, UpdateErrandAvailabilityError,
     UpdateProfileError,
 };
+use moto_core::location::LocationProvider;
 use moto_core::models::{Role, UpdateProfilePayload, User};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
@@ -143,7 +144,7 @@ pub fn ProfileScreen() -> Element {
                         PhoneVerificationSection {}
                     }
                     if session.active_mode() == Some(Role::Driver) {
-                        ErrandAvailabilitySection {}
+                        AvailabilitySection {}
                     }
                     if !user.can_drive() {
                         BecomeDriverSection {}
@@ -659,74 +660,67 @@ fn PhoneVerificationSection() -> Element {
     }
 }
 
-/// Control de disponibilidad para mandados (historia #92 del backend, issue
-/// #77 de este repo) — solo se monta para cuentas de conductor, ver
-/// `ProfileScreen`.
-///
-/// `session.errand_availability()` arranca en `None` a proposito: el backend
-/// no tiene un `GET` para esto (a diferencia de `me`/`me/vehicle`), asi que
-/// no hay forma de precargar el valor real al entrar a la pantalla. Mostrar
-/// `false` por defecto seria mentirle al conductor si ya se habia marcado
-/// disponible en una sesion anterior — en cambio, la seccion dice
-/// explicitamente que no sabe el estado actual hasta que el conductor elige
-/// una opcion, y desde ahi refleja lo que el propio `PATCH` devuelve. Vive
-/// en `SessionState` y no en un signal local de este componente porque la
-/// pantalla de mandados cercanos (issue #78) tambien lo necesita para
-/// distinguir "no disponible" de "no hay mandados ahora".
+/// Interruptores "Recibir viajes" y "Recibir mandados" (pedido del dueno:
+/// poder estar dentro de la app sin que lleguen solicitudes). Arrancan en el
+/// estado real que trae `GET /me` (`SessionState::set_user`). Con un
+/// interruptor apagado, la lista correspondiente viene vacia y no hay aviso.
 #[component]
-fn ErrandAvailabilitySection() -> Element {
+fn AvailabilitySection() -> Element {
     let api_client = use_context::<ApiClient>();
     let storage = use_context::<Arc<dyn TokenStorage>>();
+    let location = use_context::<Arc<dyn LocationProvider>>();
     let mut session = use_context::<SessionState>();
-
     let mut is_saving = use_signal(|| false);
-    let mut update_error = use_signal(|| None::<UpdateErrandAvailabilityError>);
+    let mut error = use_signal(|| None::<String>);
 
-    let api_client_for_available = api_client.clone();
-    let storage_for_available = storage.clone();
-
-    let on_mark_available = move |_| {
+    let rides_api = api_client.clone();
+    let rides_storage = storage.clone();
+    let toggle_rides = move |_| {
         let Some(token) = session.token() else {
             return;
         };
-        let api_client = api_client_for_available.clone();
-        let storage = storage_for_available.clone();
-
+        let turn_on = session.ride_availability() != Some(true);
+        let api_client = rides_api.clone();
+        let storage = rides_storage.clone();
+        let location = location.clone();
         spawn(async move {
             is_saving.set(true);
-            update_error.set(None);
-
-            match api_client.update_errand_availability(&token, true).await {
+            error.set(None);
+            // La ubicacion ayuda al aviso en tiempo real, pero no es
+            // obligatoria: si el celular no la da, igual se activa.
+            let point = if turn_on {
+                location.current_position().await.ok()
+            } else {
+                None
+            };
+            match api_client
+                .update_ride_availability(&token, turn_on, point)
+                .await
+            {
                 Ok(fetch) => {
                     if let Some(refreshed) = fetch.refreshed_token {
                         session.update_token(refreshed, storage.as_ref());
                     }
-                    session.set_errand_availability(fetch.data.is_available_for_errands);
+                    session.set_ride_availability(fetch.data.is_available);
                 }
-                Err(UpdateErrandAvailabilityError::SessionExpired) => {
-                    session.logout(storage.as_ref());
-                }
-                Err(err) => {
-                    update_error.set(Some(err));
-                }
+                Err(ServiceActionError::SessionExpired) => session.logout(storage.as_ref()),
+                Err(err) => error.set(Some(err.to_string())),
             }
-
             is_saving.set(false);
         });
     };
 
-    let on_mark_unavailable = move |_| {
+    let toggle_errands = move |_| {
         let Some(token) = session.token() else {
             return;
         };
+        let turn_on = session.errand_availability() != Some(true);
         let api_client = api_client.clone();
         let storage = storage.clone();
-
         spawn(async move {
             is_saving.set(true);
-            update_error.set(None);
-
-            match api_client.update_errand_availability(&token, false).await {
+            error.set(None);
+            match api_client.update_errand_availability(&token, turn_on).await {
                 Ok(fetch) => {
                     if let Some(refreshed) = fetch.refreshed_token {
                         session.update_token(refreshed, storage.as_ref());
@@ -734,42 +728,45 @@ fn ErrandAvailabilitySection() -> Element {
                     session.set_errand_availability(fetch.data.is_available_for_errands);
                 }
                 Err(UpdateErrandAvailabilityError::SessionExpired) => {
-                    session.logout(storage.as_ref());
+                    session.logout(storage.as_ref())
                 }
-                Err(err) => {
-                    update_error.set(Some(err));
-                }
+                Err(err) => error.set(Some(err.to_string())),
             }
-
             is_saving.set(false);
         });
     };
 
-    let status_message = match session.errand_availability() {
-        None => "Todavia no sabemos tu disponibilidad para mandados en esta sesion.",
-        Some(true) => "Estas disponible para recibir mandados.",
-        Some(false) => "No estas disponible para recibir mandados.",
-    };
-    let error_message = update_error().as_ref().map(|err| err.to_string());
+    let rides_on = session.ride_availability() == Some(true);
+    let errands_on = session.errand_availability() == Some(true);
 
     rsx! {
-        div { class: "errand-availability-section",
-            h3 { "Disponibilidad para mandados" }
-            p { "{status_message}" }
-            button {
-                r#type: "button",
-                disabled: is_saving() || session.errand_availability() == Some(true),
-                onclick: on_mark_available,
-                "Marcarme disponible para mandados"
+        div { class: "availability-section",
+            h3 { "Disponibilidad" }
+            p { class: "availability-hint",
+                "Apagado, puedes usar la app sin que te lleguen solicitudes."
             }
             button {
                 r#type: "button",
-                disabled: is_saving() || session.errand_availability() == Some(false),
-                onclick: on_mark_unavailable,
-                "Marcarme no disponible para mandados"
+                class: if rides_on { "availability-switch availability-switch-on" } else { "availability-switch" },
+                role: "switch",
+                aria_checked: if rides_on { "true" } else { "false" },
+                disabled: is_saving(),
+                onclick: toggle_rides,
+                span { class: "availability-switch-label", "🛺 Recibir viajes" }
+                span { class: "availability-switch-state", if rides_on { "Encendido" } else { "Apagado" } }
             }
-            if let Some(message) = error_message {
-                p { class: "errand-availability-error", role: "alert", "{message}" }
+            button {
+                r#type: "button",
+                class: if errands_on { "availability-switch availability-switch-on" } else { "availability-switch" },
+                role: "switch",
+                aria_checked: if errands_on { "true" } else { "false" },
+                disabled: is_saving(),
+                onclick: toggle_errands,
+                span { class: "availability-switch-label", "🛍️ Recibir mandados y motocargas" }
+                span { class: "availability-switch-state", if errands_on { "Encendido" } else { "Apagado" } }
+            }
+            if let Some(message) = error() {
+                p { class: "price-offer-error", role: "alert", "{message}" }
             }
         }
     }

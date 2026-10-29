@@ -56,7 +56,7 @@ use moto_core::api::{
     AcceptErrandError, ApiClient, AuthenticatedRequestError, CompleteErrandError,
     ServiceActionError,
 };
-use moto_core::models::{Errand, ErrandStatus, Role};
+use moto_core::models::{Errand, ErrandStatus, Role, format_cop};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
@@ -194,12 +194,12 @@ pub fn NearbyErrandsScreen() -> Element {
                 match availability {
                     None => rsx! {
                         p { class: "nearby-errands-empty",
-                            "Todavia no sabemos si estas disponible para mandados en esta sesion. Revisa tu perfil para activarlo."
+                            "No estas recibiendo mandados. Enciende \"Recibir mandados y motocargas\" en Mi perfil para empezar a verlos."
                         }
                     },
                     Some(false) => rsx! {
                         p { class: "nearby-errands-empty",
-                            "No estas disponible para mandados. Activalo en tu perfil para empezar a verlos."
+                            "No estas recibiendo mandados. Enciende \"Recibir mandados y motocargas\" en Mi perfil para empezar a verlos."
                         }
                     },
                     Some(true) => rsx! {
@@ -399,7 +399,7 @@ fn NearbyErrandRow(props: NearbyErrandRowProps) -> Element {
                     p { class: "nearby-errand-photo-error", role: "alert", "{message}" }
                 }
             }
-            label { r#for: "errand-{errand_id}-price", "Precio acordado" }
+            label { r#for: "errand-{errand_id}-price", "Precio a acordar" }
             input {
                 id: "errand-{errand_id}-price",
                 r#type: "number",
@@ -546,10 +546,20 @@ fn AcceptedErrandRow(props: AcceptedErrandRowProps) -> Element {
                 p { "Destino: {destination}" }
             }
             if let Some(price) = props.errand.agreed_price {
-                p { "Precio acordado: {price}" }
+                if props.errand.price_confirmed {
+                    p { "Precio acordado: {format_cop(price)}" }
+                } else {
+                    p { "Precio propuesto: {format_cop(price)} (esperando que el pasajero acepte)" }
+                }
             }
             if props.errand.status == ErrandStatus::Completed {
-                p { class: "accepted-errand-completed", "Completado." }
+                p { class: "upload-status upload-status-done", "✓ Completado." }
+                button {
+                    r#type: "button",
+                    class: "nearby-ride-done-button",
+                    onclick: move |_| props.on_released.call(props.errand.id),
+                    "Listo, quitar de la lista"
+                }
             } else {
                 PickupLocation { lat: props.errand.origin.latitude, lng: props.errand.origin.longitude }
                 if let Some(counterpart) = props.errand.counterpart.clone() {
