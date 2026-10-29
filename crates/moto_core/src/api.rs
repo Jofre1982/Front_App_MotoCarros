@@ -440,11 +440,11 @@ pub struct ErrandPhoto {
 }
 
 /// Fallos posibles de una request autenticada con reintento automatico.
-/// Fallos de `POST /rides/{id}/price-response` y
-/// `POST /errands/{id}/price-response` (backend #107): el pasajero acepta o
-/// rechaza el precio que propuso el conductor.
+/// Fallos de las acciones sobre un servicio que responden el viaje o
+/// mandado actualizado: responder el precio (backend #107) y cancelar o
+/// soltar un mandado (backend #108).
 #[derive(Debug, Clone, PartialEq)]
-pub enum RespondToPriceError {
+pub enum ServiceActionError {
     SessionExpired,
     /// 422: ya no hay oferta que responder (otro estado, ya respondida...).
     Validation(ApiErrorBody),
@@ -452,27 +452,27 @@ pub enum RespondToPriceError {
     Unexpected(u16),
 }
 
-impl std::fmt::Display for RespondToPriceError {
+impl std::fmt::Display for ServiceActionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RespondToPriceError::SessionExpired => {
+            ServiceActionError::SessionExpired => {
                 write!(f, "Tu sesion vencio. Inicia sesion de nuevo.")
             }
-            RespondToPriceError::Validation(body) => write!(f, "{}", body.message),
-            RespondToPriceError::Network(_) => {
+            ServiceActionError::Validation(body) => write!(f, "{}", body.message),
+            ServiceActionError::Network(_) => {
                 write!(
                     f,
                     "No se pudo conectar con el servidor. Revisa tu conexion."
                 )
             }
-            RespondToPriceError::Unexpected(status) => {
+            ServiceActionError::Unexpected(status) => {
                 write!(f, "Ocurrio un error inesperado (codigo {status}).")
             }
         }
     }
 }
 
-impl std::error::Error for RespondToPriceError {}
+impl std::error::Error for ServiceActionError {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthenticatedRequestError {
@@ -1752,6 +1752,9 @@ enum PatchErrandAvailabilityOutcome<T> {
     Validation(ApiErrorBody),
 }
 
+// Vive solo lo que dura una request y se desarma enseguida: no vale la
+// pena el `Box` que pide clippy por el tamano de `Ride`/`Errand`.
+#[allow(clippy::large_enum_variant)]
 enum CancelRideOutcome {
     Success(RideCancellation),
     Unauthorized,
@@ -1760,6 +1763,9 @@ enum CancelRideOutcome {
     Validation(ApiErrorBody),
 }
 
+// Vive solo lo que dura una request y se desarma enseguida: no vale la
+// pena el `Box` que pide clippy por el tamano de `Ride`/`Errand`.
+#[allow(clippy::large_enum_variant)]
 enum AcceptRideOutcome {
     Success(Ride),
     Unauthorized,
@@ -1769,6 +1775,9 @@ enum AcceptRideOutcome {
     Validation(ApiErrorBody),
 }
 
+// Vive solo lo que dura una request y se desarma enseguida: no vale la
+// pena el `Box` que pide clippy por el tamano de `Ride`/`Errand`.
+#[allow(clippy::large_enum_variant)]
 enum AcceptErrandOutcome {
     Success(Errand),
     Unauthorized,
@@ -1778,6 +1787,9 @@ enum AcceptErrandOutcome {
     Validation(ApiErrorBody),
 }
 
+// Vive solo lo que dura una request y se desarma enseguida: no vale la
+// pena el `Box` que pide clippy por el tamano de `Ride`/`Errand`.
+#[allow(clippy::large_enum_variant)]
 enum StartRideOutcome {
     Success(Ride),
     Unauthorized,
@@ -1786,6 +1798,9 @@ enum StartRideOutcome {
     Validation(ApiErrorBody),
 }
 
+// Vive solo lo que dura una request y se desarma enseguida: no vale la
+// pena el `Box` que pide clippy por el tamano de `Ride`/`Errand`.
+#[allow(clippy::large_enum_variant)]
 enum CompleteRideOutcome {
     Success(Ride),
     Unauthorized,
@@ -1794,6 +1809,9 @@ enum CompleteRideOutcome {
     Validation(ApiErrorBody),
 }
 
+// Vive solo lo que dura una request y se desarma enseguida: no vale la
+// pena el `Box` que pide clippy por el tamano de `Ride`/`Errand`.
+#[allow(clippy::large_enum_variant)]
 enum CompleteErrandOutcome {
     Success(Errand),
     Unauthorized,
@@ -2358,11 +2376,26 @@ impl ApiClient {
         token: &AuthToken,
         ride_id: u64,
         accept: bool,
-    ) -> Result<AuthenticatedFetch<Ride>, RespondToPriceError> {
+    ) -> Result<AuthenticatedFetch<Ride>, ServiceActionError> {
         self.respond_to_price(
             &format!("/api/v1/rides/{ride_id}/price-response"),
             token,
             accept,
+        )
+        .await
+    }
+
+    /// `POST /api/v1/errands/{id}/cancel` (backend #108): el pasajero cancela
+    /// su mandado; el conductor asignado lo suelta y vuelve a la lista.
+    pub async fn cancel_errand(
+        &self,
+        token: &AuthToken,
+        errand_id: u64,
+    ) -> Result<AuthenticatedFetch<Errand>, ServiceActionError> {
+        self.post_service_action(
+            &format!("/api/v1/errands/{errand_id}/cancel"),
+            token,
+            &serde_json::json!({}),
         )
         .await
     }
@@ -2373,7 +2406,7 @@ impl ApiClient {
         token: &AuthToken,
         errand_id: u64,
         accept: bool,
-    ) -> Result<AuthenticatedFetch<Errand>, RespondToPriceError> {
+    ) -> Result<AuthenticatedFetch<Errand>, ServiceActionError> {
         self.respond_to_price(
             &format!("/api/v1/errands/{errand_id}/price-response"),
             token,
@@ -2387,13 +2420,25 @@ impl ApiClient {
         path: &str,
         token: &AuthToken,
         accept: bool,
-    ) -> Result<AuthenticatedFetch<T>, RespondToPriceError>
+    ) -> Result<AuthenticatedFetch<T>, ServiceActionError>
     where
         T: serde::de::DeserializeOwned,
     {
         let body = serde_json::json!({ "decision": if accept { "accept" } else { "reject" } });
+        self.post_service_action(path, token, &body).await
+    }
+
+    async fn post_service_action<T>(
+        &self,
+        path: &str,
+        token: &AuthToken,
+        body: &serde_json::Value,
+    ) -> Result<AuthenticatedFetch<T>, ServiceActionError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
         if let Some(data) = self
-            .post_price_response(path, &token.access_token, &body)
+            .post_price_response(path, &token.access_token, body)
             .await?
         {
             return Ok(AuthenticatedFetch {
@@ -2404,16 +2449,16 @@ impl ApiClient {
         let renewed = self
             .refresh(&token.access_token)
             .await
-            .map_err(|_| RespondToPriceError::SessionExpired)?;
+            .map_err(|_| ServiceActionError::SessionExpired)?;
         match self
-            .post_price_response(path, &renewed.access_token, &body)
+            .post_price_response(path, &renewed.access_token, body)
             .await?
         {
             Some(data) => Ok(AuthenticatedFetch {
                 data,
                 refreshed_token: Some(renewed),
             }),
-            None => Err(RespondToPriceError::SessionExpired),
+            None => Err(ServiceActionError::SessionExpired),
         }
     }
 
@@ -2423,7 +2468,7 @@ impl ApiClient {
         path: &str,
         access_token: &str,
         body: &serde_json::Value,
-    ) -> Result<Option<T>, RespondToPriceError>
+    ) -> Result<Option<T>, ServiceActionError>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -2434,23 +2479,23 @@ impl ApiClient {
             .json(body)
             .send()
             .await
-            .map_err(|err| RespondToPriceError::Network(describe_error(&err)))?;
+            .map_err(|err| ServiceActionError::Network(describe_error(&err)))?;
         let status = response.status().as_u16();
         match status {
             200..=299 => {
                 let envelope: DataEnvelope<T> = decode_json(response)
                     .await
-                    .map_err(RespondToPriceError::Network)?;
+                    .map_err(ServiceActionError::Network)?;
                 Ok(Some(envelope.data))
             }
             401 => Ok(None),
             422 => {
                 let body: ApiErrorBody = decode_json(response)
                     .await
-                    .map_err(RespondToPriceError::Network)?;
-                Err(RespondToPriceError::Validation(body))
+                    .map_err(ServiceActionError::Network)?;
+                Err(ServiceActionError::Validation(body))
             }
-            other => Err(RespondToPriceError::Unexpected(other)),
+            other => Err(ServiceActionError::Unexpected(other)),
         }
     }
 
@@ -6371,6 +6416,34 @@ mod tests {
             destination_text: Some("  Barrio Las Palmas ".to_string()),
             vehicle_type: VehicleType::Motocarga,
         }
+    }
+
+    #[tokio::test]
+    async fn cancel_errand_posts_and_returns_the_cancelled_errand() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/errands/3/cancel"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": 3, "status": "cancelled", "description": "Pan",
+                    "has_photo": false, "photo_url": null,
+                    "origin": {"latitude": 3.8653, "longitude": -67.9239},
+                    "vehicle_type": "motocarro", "destination": null,
+                    "destination_text": null, "driver": null, "agreed_price": null,
+                    "price_confirmed": false, "counterpart": null,
+                    "requested_at": "2026-10-28T10:00:00+00:00", "completed_at": null
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let fetch = ApiClient::new(server.uri())
+            .cancel_errand(&sample_token(), 3)
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.status, ErrandStatus::Cancelled);
     }
 
     #[tokio::test]

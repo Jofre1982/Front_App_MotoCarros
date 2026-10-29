@@ -72,7 +72,7 @@ use dioxus::prelude::*;
 use futures_timer::Delay;
 use moto_core::api::{
     ApiClient, AuthenticatedRequestError, CancelRideError, GetRideError, RequestRideError,
-    RespondToPriceError,
+    ServiceActionError,
 };
 use moto_core::models::{
     Coordinates, PaymentStatus, Ride, RideCancellation, RideStatus, RideTracking, Role,
@@ -86,7 +86,7 @@ use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
 use crate::map::{MapMarker, MapView};
-use crate::price_offer::PriceOfferCard;
+use crate::price_offer::{ContactCard, PriceOfferCard};
 use crate::screens::request_errand::RequestErrandScreen;
 
 /// Intervalo entre sondeos de `RealtimeClient::poll_events` para el canal
@@ -249,7 +249,7 @@ pub fn RideEstimateScreen() -> Element {
                     rejected_notice.set(!accept);
                     requested_ride.set(Some(fetch.data));
                 }
-                Err(RespondToPriceError::SessionExpired) => session.logout(storage.as_ref()),
+                Err(ServiceActionError::SessionExpired) => session.logout(storage.as_ref()),
                 Err(err) => price_error.set(Some(err.to_string())),
             }
             is_responding_price.set(false);
@@ -383,6 +383,9 @@ pub fn RideEstimateScreen() -> Element {
                             on_reject: move |_| respond_to_price.call(false),
                         }
                     }
+                }
+                if let Some(counterpart) = ride.counterpart.clone() {
+                    ContactCard { title: "Tu conductor", counterpart }
                 }
                 if rejected_notice() && ride.status == RideStatus::Requested {
                     p { class: "ride-request-status",

@@ -54,12 +54,14 @@ use dioxus::prelude::*;
 use futures_timer::Delay;
 use moto_core::api::{
     AcceptErrandError, ApiClient, AuthenticatedRequestError, CompleteErrandError,
+    ServiceActionError,
 };
 use moto_core::models::{Errand, ErrandStatus, Role};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
 use crate::map::PickupLocation;
+use crate::price_offer::{ConfirmCancelButton, ContactCard};
 
 /// Intervalo entre sondeos de `GET /api/v1/errands`. Antes eran 700 ms
 /// (copiado del loop del socket de tiempo real), que en un celular con
@@ -127,35 +129,24 @@ pub fn NearbyErrandsScreen() -> Element {
                 // cuando el pasajero acepta el precio (y se habilita
                 // "Completar") o lo rechaza (el mandado deja de ser de este
                 // conductor y vuelve a la lista) — backend #107.
-                let waiting_ids: Vec<u64> = accepted_errands
+                // Los aceptados se refrescan desde el servidor: asi se ve si
+                // el pasajero acepta el precio (y se habilita "Completar"),
+                // lo rechaza (vuelve a la lista) o cancela el mandado.
+                let open_ids: Vec<u64> = accepted_errands
                     .peek()
                     .iter()
-                    .filter(|errand| errand.awaiting_price_response())
+                    .filter(|errand| errand.status == ErrandStatus::Accepted)
                     .map(|errand| errand.id)
                     .collect();
-                if !waiting_ids.is_empty()
+                if !open_ids.is_empty()
                     && let Ok(fetch) = api_client.my_errands(&current_token, Role::Driver).await
                 {
-                    let mine = fetch.data;
-                    let rejected = waiting_ids
-                        .iter()
-                        .any(|id| !mine.iter().any(|errand| errand.id == *id));
-                    accepted_errands.with_mut(|list| {
-                        list.retain(|errand| {
-                            !waiting_ids.contains(&errand.id)
-                                || mine.iter().any(|m| m.id == errand.id)
-                        });
-                        for errand in list.iter_mut() {
-                            if let Some(fresh) = mine.iter().find(|m| m.id == errand.id) {
-                                *errand = fresh.clone();
-                            }
-                        }
-                    });
-                    if rejected {
-                        unavailable_notice.set(Some(
-                            "El pasajero no acepto tu precio. El mandado volvio a la lista."
-                                .to_string(),
-                        ));
+                    let outcome = reconcile_accepted(&accepted_errands.peek(), &fetch.data);
+                    if accepted_errands.peek().as_slice() != outcome.kept.as_slice() {
+                        accepted_errands.set(outcome.kept);
+                    }
+                    if let Some(message) = outcome.notice {
+                        unavailable_notice.set(Some(message.to_string()));
                     }
                 }
 
@@ -254,6 +245,10 @@ pub fn NearbyErrandsScreen() -> Element {
                                                 *existing = completed;
                                             }
                                         });
+                                },
+                                on_released: move |released_id: u64| {
+                                    accepted_errands
+                                        .with_mut(|list| list.retain(|e| e.id != released_id));
                                 },
                             }
                         }
@@ -431,10 +426,40 @@ fn NearbyErrandRow(props: NearbyErrandRowProps) -> Element {
     }
 }
 
+/// Resultado de cruzar los mandados aceptados que muestra la pantalla con
+/// los que el servidor dice que son de este conductor (`GET /me/errands`).
+#[derive(Debug, PartialEq)]
+struct Reconciled {
+    kept: Vec<Errand>,
+    notice: Option<&'static str>,
+}
+
+/// Se quedan los que siguen siendo del conductor (actualizados); salen los
+/// que el pasajero cancelo o los que volvieron a la lista porque rechazo el
+/// precio, con el aviso correspondiente. Logica pura, testeada abajo.
+fn reconcile_accepted(local: &[Errand], server: &[Errand]) -> Reconciled {
+    let mut kept = Vec::new();
+    let mut notice = None;
+    for errand in local {
+        match server.iter().find(|fresh| fresh.id == errand.id) {
+            Some(fresh) if fresh.status == ErrandStatus::Cancelled => {
+                notice = Some("El pasajero cancelo el mandado.");
+            }
+            Some(fresh) => kept.push(fresh.clone()),
+            None if errand.status == ErrandStatus::Accepted => {
+                notice = Some("El pasajero no acepto tu precio. El mandado volvio a la lista.");
+            }
+            None => kept.push(errand.clone()),
+        }
+    }
+    Reconciled { kept, notice }
+}
+
 #[derive(Props, Clone, PartialEq)]
 struct AcceptedErrandRowProps {
     errand: Errand,
     on_completed: EventHandler<Errand>,
+    on_released: EventHandler<u64>,
 }
 
 /// Una fila de "Mandados que aceptaste en esta sesion" con su propio estado
@@ -448,6 +473,35 @@ fn AcceptedErrandRow(props: AcceptedErrandRowProps) -> Element {
 
     let mut is_completing = use_signal(|| false);
     let mut complete_error = use_signal(|| None::<String>);
+
+    // Soltar el mandado (backend #108): vuelve a la lista para otro conductor.
+    let mut is_releasing = use_signal(|| false);
+    let release_api_client = api_client.clone();
+    let release_storage = storage.clone();
+    let errand_id = props.errand.id;
+    let on_released = props.on_released;
+    let release = use_callback(move |_: ()| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let api_client = release_api_client.clone();
+        let storage = release_storage.clone();
+        spawn(async move {
+            is_releasing.set(true);
+            complete_error.set(None);
+            match api_client.cancel_errand(&token, errand_id).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    on_released.call(errand_id);
+                }
+                Err(ServiceActionError::SessionExpired) => session.logout(storage.as_ref()),
+                Err(err) => complete_error.set(Some(err.to_string())),
+            }
+            is_releasing.set(false);
+        });
+    });
 
     let errand_id = props.errand.id;
     let on_completed = props.on_completed;
@@ -498,6 +552,9 @@ fn AcceptedErrandRow(props: AcceptedErrandRowProps) -> Element {
                 p { class: "accepted-errand-completed", "Completado." }
             } else {
                 PickupLocation { lat: props.errand.origin.latitude, lng: props.errand.origin.longitude }
+                if let Some(counterpart) = props.errand.counterpart.clone() {
+                    ContactCard { title: "Tu pasajero", counterpart }
+                }
                 if props.errand.awaiting_price_response() {
                     p { class: "upload-status", role: "status",
                         span { class: "upload-spinner" }
@@ -519,10 +576,67 @@ fn AcceptedErrandRow(props: AcceptedErrandRowProps) -> Element {
                         "Completar"
                     }
                 }
+                ConfirmCancelButton {
+                    label: "Soltar mandado",
+                    question: "¿Soltar este mandado? Vuelve a la lista para otro conductor.",
+                    is_busy: is_releasing(),
+                    on_confirm: move |_| release.call(()),
+                }
                 if let Some(message) = complete_error() {
                     p { class: "accepted-errand-complete-error", role: "alert", "{message}" }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+
+    fn errand(id: u64, status: ErrandStatus) -> Errand {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "status": status, "description": "Pan",
+            "has_photo": false, "photo_url": null,
+            "origin": {"latitude": 3.8653, "longitude": -67.9239},
+            "vehicle_type": "motocarro", "destination": null, "destination_text": null,
+            "driver": {"id": 9, "name": "Luis"}, "agreed_price": 5000,
+            "price_confirmed": false,
+            "requested_at": "2026-10-28T10:00:00+00:00", "completed_at": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn keeps_and_updates_the_errands_still_assigned() {
+        let mut fresh = errand(1, ErrandStatus::Accepted);
+        fresh.price_confirmed = true;
+        let out = reconcile_accepted(&[errand(1, ErrandStatus::Accepted)], &[fresh.clone()]);
+        assert_eq!(out.kept, vec![fresh]);
+        assert_eq!(out.notice, None);
+    }
+
+    #[test]
+    fn drops_a_cancelled_errand_with_its_notice() {
+        let out = reconcile_accepted(
+            &[errand(1, ErrandStatus::Accepted)],
+            &[errand(1, ErrandStatus::Cancelled)],
+        );
+        assert!(out.kept.is_empty());
+        assert_eq!(out.notice, Some("El pasajero cancelo el mandado."));
+    }
+
+    #[test]
+    fn drops_an_errand_whose_price_was_rejected() {
+        let out = reconcile_accepted(&[errand(1, ErrandStatus::Accepted)], &[]);
+        assert!(out.kept.is_empty());
+        assert!(out.notice.unwrap().contains("no acepto tu precio"));
+    }
+
+    #[test]
+    fn keeps_a_completed_errand_that_already_left_the_server_list() {
+        let done = errand(2, ErrandStatus::Completed);
+        let out = reconcile_accepted(std::slice::from_ref(&done), &[]);
+        assert_eq!(out.kept, vec![done]);
     }
 }

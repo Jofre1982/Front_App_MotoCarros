@@ -105,6 +105,7 @@ use moto_core::storage::TokenStorage;
 
 use super::register_vehicle::RegisterVehicleScreen;
 use crate::map::PickupLocation;
+use crate::price_offer::ContactCard;
 
 /// Intervalo entre sondeos de `RealtimeClient::poll_events` — no hay forma de
 /// que el transporte avise por si solo cuando llega un frame nuevo (ver
@@ -265,6 +266,8 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
     let mut list_loaded = use_signal(|| false);
     // Aviso cuando el pasajero rechaza el precio que propuso este conductor.
     let mut rejected_notice = use_signal(|| false);
+    // Aviso cuando el pasajero cancela un viaje que este conductor ya tenia.
+    let mut cancelled_notice = use_signal(|| false);
     let mut offer_watch_started = use_signal(|| false);
 
     // Mientras el pasajero no responda el precio (backend #107), se vuelve a
@@ -285,10 +288,15 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
             spawn(async move {
                 loop {
                     Delay::new(AVAILABLE_RIDES_INTERVAL).await;
+                    // Se sigue el viaje mientras este activo: asi el conductor
+                    // se entera si el pasajero acepta o rechaza el precio, o
+                    // si cancela el viaje.
                     let waiting = accepted_ride
                         .peek()
                         .as_ref()
-                        .filter(|ride| ride.awaiting_price_response())
+                        .filter(|ride| {
+                            matches!(ride.status, RideStatus::Accepted | RideStatus::InProgress)
+                        })
                         .map(|ride| ride.id);
                     let (Some(ride_id), Some(token)) = (waiting, session.token()) else {
                         continue;
@@ -303,8 +311,13 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                                 .driver
                                 .as_ref()
                                 .is_some_and(|d| d.id == driver_id);
-                            if still_mine {
-                                accepted_ride.set(Some(fetch.data));
+                            if fetch.data.status == RideStatus::Cancelled {
+                                accepted_ride.set(None);
+                                cancelled_notice.set(true);
+                            } else if still_mine {
+                                if accepted_ride.peek().as_ref() != Some(&fetch.data) {
+                                    accepted_ride.set(Some(fetch.data));
+                                }
                             } else {
                                 accepted_ride.set(None);
                                 rejected_notice.set(true);
@@ -492,6 +505,9 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                         PickupLocation { lat: ride.origin.latitude, lng: ride.origin.longitude }
                     }
                     p { "Destino: {ride.destination_label()}" }
+                    if let Some(counterpart) = ride.counterpart.clone() {
+                        ContactCard { title: "Tu pasajero", counterpart }
+                    }
                     if ride.is_pickup_only() {
                         p { "Precio acordado: {ride.fare_label()}" }
                     } else {
@@ -556,6 +572,17 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                     }
                 }
             } else if list_loaded() || status() == RealtimeStatus::Connected {
+                if cancelled_notice() {
+                    p { class: "nearby-rides-error", role: "alert",
+                        "El pasajero cancelo el viaje."
+                        button {
+                            r#type: "button",
+                            class: "nearby-rides-dismiss-link",
+                            onclick: move |_| cancelled_notice.set(false),
+                            "Entendido"
+                        }
+                    }
+                }
                 if rejected_notice() {
                     p { class: "nearby-rides-error", role: "alert",
                         "El pasajero no acepto tu precio. El viaje volvio a la lista."

@@ -549,6 +549,8 @@ pub enum ErrandStatus {
     Requested,
     Accepted,
     Completed,
+    /// El pasajero lo cancelo (backend #108).
+    Cancelled,
 }
 
 /// El sitio de destino de un mandado
@@ -594,6 +596,8 @@ pub struct Errand {
     /// defecto para servidores anteriores.
     #[serde(default = "default_true")]
     pub price_confirmed: bool,
+    #[serde(default)]
+    pub counterpart: Option<Counterpart>,
     pub requested_at: String,
     pub completed_at: Option<String>,
 }
@@ -610,6 +614,23 @@ pub fn format_cop(amount: i64) -> String {
     }
     let sign = if amount < 0 { "-" } else { "" };
     format!("{sign}${grouped}")
+}
+
+/// La otra persona del servicio (backend #108, `counterpart`): al pasajero
+/// le llega el conductor y al conductor el pasajero, solo con el precio ya
+/// confirmado. Sirve para escribirse por WhatsApp.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Counterpart {
+    pub name: String,
+    pub phone: String,
+}
+
+/// Enlace para escribirle por WhatsApp a un celular guardado como
+/// `+573001234567`. En el shell nativo los enlaces `https://` se abren fuera
+/// del WebView, asi que abre la app de WhatsApp.
+pub fn whatsapp_url(phone: &str) -> String {
+    let digits: String = phone.chars().filter(char::is_ascii_digit).collect();
+    format!("https://wa.me/{digits}")
 }
 
 fn default_true() -> bool {
@@ -630,6 +651,14 @@ impl Errand {
             .filter(|text| !text.is_empty())
             .map(str::to_string)
             .or_else(|| self.destination.as_ref().map(|site| site.name.clone()))
+    }
+
+    /// Sigue abierto: nadie lo acepto todavia o esta en curso.
+    pub fn is_open(&self) -> bool {
+        matches!(
+            self.status,
+            ErrandStatus::Requested | ErrandStatus::Accepted
+        )
     }
 
     pub fn is_motocarga(&self) -> bool {
@@ -717,6 +746,8 @@ pub struct Ride {
     /// defecto para servidores anteriores, que no lo pedian.
     #[serde(default = "default_true")]
     pub price_confirmed: bool,
+    #[serde(default)]
+    pub counterpart: Option<Counterpart>,
     pub driver: Option<RideDriver>,
     pub requested_at: String,
     pub started_at: Option<String>,
@@ -1778,6 +1809,7 @@ mod tests {
             estimated_fare: Some(8850),
             agreed_price: None,
             price_confirmed: true,
+            counterpart: None,
             driver: None,
             requested_at: "2026-07-31T14:03:21+00:00".to_string(),
             started_at: None,
@@ -2151,5 +2183,30 @@ mod tests {
         assert_eq!(format_cop(150000), "$150.000");
         assert_eq!(format_cop(500), "$500");
         assert_eq!(format_cop(1234567), "$1.234.567");
+    }
+
+    #[test]
+    fn whatsapp_url_keeps_only_the_digits() {
+        assert_eq!(
+            whatsapp_url("+57 300 123-4567"),
+            "https://wa.me/573001234567"
+        );
+    }
+
+    #[test]
+    fn errand_reads_cancelled_and_counterpart() {
+        let errand: Errand = serde_json::from_value(serde_json::json!({
+            "id": 1, "status": "cancelled", "description": "Pan",
+            "has_photo": false, "photo_url": null,
+            "origin": {"latitude": 3.8653, "longitude": -67.9239},
+            "vehicle_type": "motocarro", "destination": null, "destination_text": null,
+            "driver": null, "agreed_price": null, "price_confirmed": false,
+            "counterpart": {"name": "Luis", "phone": "+573002222222"},
+            "requested_at": "2026-10-28T10:00:00+00:00", "completed_at": null
+        }))
+        .unwrap();
+        assert_eq!(errand.status, ErrandStatus::Cancelled);
+        assert!(!errand.is_open());
+        assert_eq!(errand.counterpart.map(|c| c.name).as_deref(), Some("Luis"));
     }
 }

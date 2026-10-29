@@ -47,3 +47,75 @@ pub fn PriceOfferCard(props: PriceOfferCardProps) -> Element {
         }
     }
 }
+
+#[derive(Props, Clone, PartialEq)]
+pub struct ContactCardProps {
+    /// "Tu conductor" o "Tu pasajero".
+    pub title: &'static str,
+    pub counterpart: moto_core::models::Counterpart,
+}
+
+/// Nombre y celular de la otra persona con el boton para escribirle por
+/// WhatsApp (backend #108, `counterpart`). Solo llega con el precio ya
+/// confirmado.
+#[component]
+pub fn ContactCard(props: ContactCardProps) -> Element {
+    let url = moto_core::models::whatsapp_url(&props.counterpart.phone);
+    rsx! {
+        div { class: "contact-card",
+            p { class: "contact-card-title", "{props.title}: {props.counterpart.name}" }
+            p { class: "contact-card-phone", "📱 {props.counterpart.phone}" }
+            a {
+                class: "contact-card-whatsapp",
+                href: "{url}",
+                target: "_blank",
+                rel: "noopener",
+                "💬 Escribir por WhatsApp"
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+pub struct ConfirmCancelButtonProps {
+    /// Texto del boton, p. ej. "Cancelar pedido" o "Soltar mandado".
+    pub label: &'static str,
+    /// Pregunta de confirmacion.
+    pub question: &'static str,
+    pub is_busy: bool,
+    pub on_confirm: EventHandler<()>,
+}
+
+/// Boton de cancelar en dos pasos, para no cancelar por un toque sin querer.
+#[component]
+pub fn ConfirmCancelButton(props: ConfirmCancelButtonProps) -> Element {
+    let mut asking = use_signal(|| false);
+    rsx! {
+        if asking() {
+            div { class: "confirm-cancel",
+                p { "{props.question}" }
+                button {
+                    r#type: "button",
+                    class: "confirm-cancel-yes",
+                    disabled: props.is_busy,
+                    onclick: move |_| props.on_confirm.call(()),
+                    if props.is_busy { "Cancelando..." } else { "Si, cancelar" }
+                }
+                button {
+                    r#type: "button",
+                    class: "confirm-cancel-no-link",
+                    disabled: props.is_busy,
+                    onclick: move |_| asking.set(false),
+                    "No, volver"
+                }
+            }
+        } else {
+            button {
+                r#type: "button",
+                class: "confirm-cancel-start",
+                onclick: move |_| asking.set(true),
+                "{props.label}"
+            }
+        }
+    }
+}
