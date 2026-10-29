@@ -15,9 +15,7 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use futures_timer::Delay;
-use moto_core::api::{
-    ApiClient, AuthenticatedRequestError, CreateErrandError, RespondToPriceError,
-};
+use moto_core::api::{ApiClient, AuthenticatedRequestError, CreateErrandError, ServiceActionError};
 use moto_core::models::{
     Coordinates, CreateErrandPayload, Errand, ErrandStatus, Role, VehicleType, format_cop,
 };
@@ -26,7 +24,7 @@ use moto_core::storage::TokenStorage;
 
 use crate::file_picker::{PhotoPicker, PickedFile};
 use crate::map::{MapMarker, MapView};
-use crate::price_offer::PriceOfferCard;
+use crate::price_offer::{ConfirmCancelButton, ContactCard, PriceOfferCard};
 
 /// Centro inicial del mapa: casco urbano de Inirida (ver `ride_estimate.rs`).
 const DEFAULT_CENTER_LAT: f64 = 3.8653;
@@ -116,7 +114,7 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
                     let watching = created_errand
                         .peek()
                         .as_ref()
-                        .filter(|errand| errand.status != ErrandStatus::Completed)
+                        .filter(|errand| errand.is_open())
                         .map(|errand| errand.id);
                     if first || watching.is_some() {
                         match api_client.my_errands(&token, Role::Passenger).await {
@@ -233,14 +231,54 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
                     rejected_notice.set(!accept);
                     created_errand.set(Some(fetch.data));
                 }
-                Err(RespondToPriceError::SessionExpired) => session.logout(storage.as_ref()),
+                Err(ServiceActionError::SessionExpired) => session.logout(storage.as_ref()),
                 Err(err) => price_error.set(Some(err.to_string())),
             }
             is_responding_price.set(false);
         });
     });
 
+    // Cancelar el pedido (backend #108): nadie lo acepto, o ya no se
+    // necesita. Vuelve al formulario con un aviso.
+    let mut is_cancelling = use_signal(|| false);
+    let mut cancel_error = use_signal(|| None::<String>);
+    let mut cancelled_notice = use_signal(|| false);
+    let cancel_api_client = use_context::<ApiClient>();
+    let cancel_storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut selected_photo_for_cancel = selected_photo;
+    let cancel_errand = use_callback(move |_: ()| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let Some(errand_id) = created_errand.peek().as_ref().map(|errand| errand.id) else {
+            return;
+        };
+        let api_client = cancel_api_client.clone();
+        let storage = cancel_storage.clone();
+        spawn(async move {
+            is_cancelling.set(true);
+            cancel_error.set(None);
+            match api_client.cancel_errand(&token, errand_id).await {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    created_errand.set(None);
+                    origin.set(None);
+                    description.set(String::new());
+                    destination_text.set(String::new());
+                    selected_photo_for_cancel.set(None);
+                    cancelled_notice.set(true);
+                }
+                Err(ServiceActionError::SessionExpired) => session.logout(storage.as_ref()),
+                Err(err) => cancel_error.set(Some(err.to_string())),
+            }
+            is_cancelling.set(false);
+        });
+    });
+
     let on_new_click = move |_| {
+        cancelled_notice.set(false);
         created_errand.set(None);
         origin.set(None);
         description.set(String::new());
@@ -295,11 +333,26 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
                         }
                     }
                 }
-                button {
-                    r#type: "button",
-                    class: "request-errand-new-link",
-                    onclick: on_new_click,
-                    "Pedir otro"
+                if let Some(counterpart) = errand.counterpart.clone() {
+                    ContactCard { title: "Tu conductor", counterpart }
+                }
+                if errand.is_open() {
+                    ConfirmCancelButton {
+                        label: "Cancelar pedido",
+                        question: "¿Seguro que quieres cancelar este pedido?",
+                        is_busy: is_cancelling(),
+                        on_confirm: move |_| cancel_errand.call(()),
+                    }
+                    if let Some(message) = cancel_error() {
+                        p { class: "price-offer-error", role: "alert", "{message}" }
+                    }
+                } else {
+                    button {
+                        r#type: "button",
+                        class: "request-errand-new-link",
+                        onclick: on_new_click,
+                        "Pedir otro"
+                    }
                 }
             }
         };
@@ -347,6 +400,11 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
         div { class: "request-errand-screen",
             if !props.embedded {
                 h2 { "{copy.title}" }
+            }
+            if cancelled_notice() {
+                p { class: "upload-status", role: "status",
+                    "Cancelaste tu pedido. Si quieres, puedes pedir otro."
+                }
             }
             p { class: "ride-step-title", "{copy.pickup_step}" }
             p { class: "ride-estimate-instructions",
@@ -436,9 +494,9 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
 /// tipo de esta pantalla (mandado o motocarga). `rides` viene del mas nuevo
 /// al mas viejo.
 fn open_errand_of_kind(errands: Vec<Errand>, vehicle_type: VehicleType) -> Option<Errand> {
-    errands.into_iter().find(|errand| {
-        errand.vehicle_type == vehicle_type && errand.status != ErrandStatus::Completed
-    })
+    errands
+        .into_iter()
+        .find(|errand| errand.vehicle_type == vehicle_type && errand.is_open())
 }
 
 /// Texto del estado de un pedido recien creado (`Errand::status`). Justo
@@ -449,6 +507,7 @@ fn errand_status_label(status: ErrandStatus) -> &'static str {
         ErrandStatus::Requested => "Esperando a que un conductor lo acepte.",
         ErrandStatus::Accepted => "Un conductor tomo tu pedido.",
         ErrandStatus::Completed => "Ya se completo.",
+        ErrandStatus::Cancelled => "Cancelaste este pedido.",
     }
 }
 

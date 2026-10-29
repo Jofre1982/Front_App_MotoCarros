@@ -622,4 +622,40 @@ button.price-offer-reject {
 }
 button.price-offer-reject:hover:not(:disabled) { background: var(--color-error-bg); }
 .price-offer-error { color: var(--color-error); margin-top: 8px; }
+
+/* Contacto con la otra persona (WhatsApp). */
+.contact-card {
+    margin: 14px 0;
+    padding: 14px 16px;
+    border-radius: var(--radius);
+    background: var(--color-success-bg);
+}
+.contact-card-title { font-weight: 700; margin: 0 0 4px; }
+.contact-card-phone { margin: 0 0 8px; }
+a.contact-card-whatsapp {
+    display: block;
+    padding: 12px 14px;
+    text-align: center;
+    border-radius: var(--radius);
+    background: #25d366;
+    color: #fff;
+    font-weight: 700;
+    text-decoration: none;
+}
+
+/* Cancelar en dos pasos. */
+button.confirm-cancel-start {
+    background: var(--color-surface);
+    color: var(--color-error);
+    border: 2px solid var(--color-error);
+}
+button.confirm-cancel-start:hover:not(:disabled) { background: var(--color-error-bg); }
+.confirm-cancel {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: var(--radius);
+    background: var(--color-error-bg);
+}
+.confirm-cancel p { margin: 0; font-weight: 600; }
+button.confirm-cancel-yes { background: var(--color-error); }
 "#;
