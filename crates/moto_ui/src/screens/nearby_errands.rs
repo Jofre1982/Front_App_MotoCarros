@@ -399,7 +399,7 @@ fn NearbyErrandRow(props: NearbyErrandRowProps) -> Element {
                     p { class: "nearby-errand-photo-error", role: "alert", "{message}" }
                 }
             }
-            label { r#for: "errand-{errand_id}-price", "Precio acordado" }
+            label { r#for: "errand-{errand_id}-price", "Precio a acordar" }
             input {
                 id: "errand-{errand_id}-price",
                 r#type: "number",
@@ -546,7 +546,11 @@ fn AcceptedErrandRow(props: AcceptedErrandRowProps) -> Element {
                 p { "Destino: {destination}" }
             }
             if let Some(price) = props.errand.agreed_price {
-                p { "Precio acordado: {format_cop(price)}" }
+                if props.errand.price_confirmed {
+                    p { "Precio acordado: {format_cop(price)}" }
+                } else {
+                    p { "Precio propuesto: {format_cop(price)} (esperando que el pasajero acepte)" }
+                }
             }
             if props.errand.status == ErrandStatus::Completed {
                 p { class: "upload-status upload-status-done", "✓ Completado." }

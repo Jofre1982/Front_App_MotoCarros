@@ -849,12 +849,18 @@ impl Ride {
         }
     }
 
-    /// "Precio acordado: $7.000" cuando ya hay precio, "Precio por acordar"
-    /// mientras no (pedido del dueno: se lee mejor que "A acordar").
+    /// "Precio acordado" solo cuando el pasajero ya acepto el precio del
+    /// conductor; antes es "Precio propuesto" (pedido del dueno).
     pub fn price_label(&self) -> String {
         match self.fare() {
-            Some(amount) if self.is_pickup_only() => {
+            Some(amount) if self.is_pickup_only() && self.price_confirmed => {
                 format!("Precio acordado: {}", format_cop(amount))
+            }
+            Some(amount) if self.is_pickup_only() => {
+                format!(
+                    "Precio propuesto: {} (esperando que el pasajero acepte)",
+                    format_cop(amount)
+                )
             }
             Some(amount) => format!("Precio: {}", format_cop(amount)),
             None => "Precio por acordar".to_string(),
@@ -2302,5 +2308,10 @@ mod tests {
         assert_eq!(ride.price_label(), "Precio por acordar");
         ride.agreed_price = Some(7000);
         assert_eq!(ride.price_label(), "Precio acordado: $7.000");
+        ride.price_confirmed = false;
+        assert_eq!(
+            ride.price_label(),
+            "Precio propuesto: $7.000 (esperando que el pasajero acepte)"
+        );
     }
 }

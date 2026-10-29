@@ -1306,7 +1306,7 @@ impl std::fmt::Display for AcceptRideError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AcceptRideError::InvalidAgreedPrice => {
-                write!(f, "Ingresa el precio acordado (mayor que cero).")
+                write!(f, "Ingresa el precio a acordar (mayor que cero).")
             }
             AcceptRideError::Forbidden => {
                 write!(f, "Esta cuenta no puede aceptar viajes.")

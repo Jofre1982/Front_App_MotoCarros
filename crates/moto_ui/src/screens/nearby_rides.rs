@@ -509,11 +509,7 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                     if let Some(counterpart) = ride.counterpart.clone() {
                         ContactCard { title: "Tu pasajero", counterpart }
                     }
-                    if ride.is_pickup_only() {
-                        p { "{ride.price_label()}" }
-                    } else {
-                        p { "{ride.price_label()}" }
-                    }
+                    p { "{ride.price_label()}" }
                     if ride.awaiting_price_response() {
                         p { class: "upload-status", role: "status",
                             span { class: "upload-spinner" }
@@ -754,7 +750,7 @@ fn NearbyRideRow(props: NearbyRideRowProps) -> Element {
             p { "Destino: {props.request.destination_label()}" }
             p { "Pasajeros: {props.request.passenger_count}" }
             if is_pickup_only {
-                label { r#for: "ride-{ride_id}-price", "Precio acordado ({props.request.currency})" }
+                label { r#for: "ride-{ride_id}-price", "Precio a acordar ({props.request.currency})" }
                 input {
                     id: "ride-{ride_id}-price",
                     r#type: "number",

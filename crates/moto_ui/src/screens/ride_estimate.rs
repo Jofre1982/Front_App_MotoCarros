@@ -403,7 +403,7 @@ pub fn RideEstimateScreen() -> Element {
                     dd { "{ride.destination_label()}" }
                     dt { "Personas" }
                     dd { "{ride.passenger_count}" }
-                    dt { if ride.is_pickup_only() && ride.agreed_price.is_some() { "Precio acordado" } else { "Precio" } }
+                    dt { if ride.is_pickup_only() && ride.agreed_price.is_some() && ride.price_confirmed { "Precio acordado" } else { "Precio" } }
                     dd { class: "ride-request-agreed-price", "{ride.fare_label()}" }
                 }
                 if is_cancellable {

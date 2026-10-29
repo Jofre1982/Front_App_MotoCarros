@@ -320,7 +320,7 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
                                 on_reject: move |_| respond_to_price.call(false),
                             }
                         }
-                    } else if let Some(price) = errand.agreed_price {
+                    } else if let Some(price) = errand.agreed_price.filter(|_| errand.price_confirmed) {
                         p { class: "request-errand-done-detail", "Precio acordado: {format_cop(price)}" }
                     }
                     if rejected_notice() && errand.status == ErrandStatus::Requested {
