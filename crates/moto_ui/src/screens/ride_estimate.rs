@@ -403,13 +403,8 @@ pub fn RideEstimateScreen() -> Element {
                     dd { "{ride.destination_label()}" }
                     dt { "Personas" }
                     dd { "{ride.passenger_count}" }
-                    if ride.is_pickup_only() {
-                        dt { "Precio" }
-                        dd { class: "ride-request-agreed-price", "{ride.fare_label()}" }
-                    } else {
-                        dt { "Precio" }
-                        dd { "{ride.fare_label()}" }
-                    }
+                    dt { if ride.is_pickup_only() && ride.agreed_price.is_some() { "Precio acordado" } else { "Precio" } }
+                    dd { class: "ride-request-agreed-price", "{ride.fare_label()}" }
                 }
                 if is_cancellable {
                     button {
@@ -450,6 +445,24 @@ pub fn RideEstimateScreen() -> Element {
                             role: if payment.status == PaymentStatus::Failed { "alert" } else { "status" },
                             "{payment_result_message(payment.status)}"
                         }
+                    }
+                }
+                // Al terminar (o si lo cancelaron del otro lado) la pantalla
+                // no se quedaba sin salida: se vuelve al formulario.
+                if !is_active {
+                    button {
+                        r#type: "button",
+                        class: "ride-request-again-button",
+                        onclick: move |_| {
+                            requested_ride.set(None);
+                            ride_error.set(None);
+                            cancel_error.set(None);
+                            rejected_notice.set(false);
+                            origin.set(None);
+                            destination_text.set(String::new());
+                            passenger_count.set(1);
+                        },
+                        "Pedir otro viaje"
                     }
                 }
             }

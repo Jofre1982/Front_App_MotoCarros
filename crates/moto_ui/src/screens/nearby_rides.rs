@@ -94,7 +94,8 @@ use moto_core::api::{
 };
 use moto_core::location::{LocationError, LocationProvider};
 use moto_core::models::{
-    NearbyRideRequest, Ride, RideStatus, Role, apply_nearby_ride_event, latest_active_ride,
+    NearbyRideRequest, Ride, RideStatus, Role, apply_nearby_ride_event, format_cop,
+    latest_active_ride,
 };
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
@@ -509,9 +510,9 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                         ContactCard { title: "Tu pasajero", counterpart }
                     }
                     if ride.is_pickup_only() {
-                        p { "Precio acordado: {ride.fare_label()}" }
+                        p { "{ride.price_label()}" }
                     } else {
-                        p { "Tarifa estimada: {ride.fare_label()}" }
+                        p { "{ride.price_label()}" }
                     }
                     if ride.awaiting_price_response() {
                         p { class: "upload-status", role: "status",
@@ -554,7 +555,7 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                         div { class: "nearby-ride-completed",
                             p { "Viaje completado." }
                             if let Some(final_fare) = ride.final_fare {
-                                p { "Tarifa final: {ride.currency} {final_fare}" }
+                                p { "Cobrado: {format_cop(final_fare)}" }
                             }
                             if let Some(payment) = &ride.payment {
                                 p {
@@ -567,6 +568,12 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                                         }
                                     }
                                 }
+                            }
+                            button {
+                                r#type: "button",
+                                class: "nearby-ride-done-button",
+                                onclick: move |_| accepted_ride.set(None),
+                                "Listo, volver a la lista"
                             }
                         }
                     }
@@ -595,8 +602,14 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                     }
                 }
                 if requests().is_empty() {
-                    p { class: "nearby-rides-empty",
-                        "No hay solicitudes esperando por ahora. La lista se actualiza sola."
+                    if session.ride_availability() == Some(true) {
+                        p { class: "nearby-rides-empty",
+                            "No hay solicitudes esperando por ahora. La lista se actualiza sola."
+                        }
+                    } else {
+                        p { class: "nearby-rides-empty",
+                            "No estas recibiendo viajes. Enciende \"Recibir viajes\" en Mi perfil para empezar a verlos."
+                        }
                     }
                 } else {
                     ul { class: "nearby-rides-list",

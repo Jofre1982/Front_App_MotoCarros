@@ -45,6 +45,11 @@ pub struct User {
     pub avatar_status: Option<String>,
     #[serde(default)]
     pub avatar_rejection_reason: Option<String>,
+    /// Perfil de conductor (si la cuenta lo tiene), con su disponibilidad
+    /// para viajes y para mandados: asi la app muestra los interruptores en
+    /// su estado real desde que entra.
+    #[serde(default)]
+    pub driver_profile: Option<DriverProfile>,
 }
 
 impl User {
@@ -310,13 +315,20 @@ pub struct UpdateVehiclePayload {
 /// (issue #16, fuera de alcance aca); siempre viajan presentes, aunque valgan
 /// `null`, para que el cliente no distinga "sin ubicacion todavia" de "esta
 /// respuesta no lo trae".
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DriverProfile {
     pub license_number: String,
+    // `default`: algunas respuestas (p. ej. `POST /me/driver-profile`) traen
+    // el perfil recortado.
+    #[serde(default)]
     pub is_available: bool,
+    #[serde(default)]
     pub is_available_for_errands: bool,
+    #[serde(default)]
     pub latitude: Option<f64>,
+    #[serde(default)]
     pub longitude: Option<f64>,
+    #[serde(default)]
     pub location_updated_at: Option<String>,
 }
 
@@ -655,8 +667,17 @@ pub struct Counterpart {
 /// Enlace para escribirle por WhatsApp a un celular guardado como
 /// `+573001234567`. En el shell nativo los enlaces `https://` se abren fuera
 /// del WebView, asi que abre la app de WhatsApp.
+///
+/// Un celular colombiano guardado sin indicativo (`+3108838480`, cuentas
+/// anteriores al backend #110) se completa con 57: si no, WhatsApp lo lee
+/// como un numero de Holanda (+31) y dice que no es valido.
 pub fn whatsapp_url(phone: &str) -> String {
     let digits: String = phone.chars().filter(char::is_ascii_digit).collect();
+    let digits = if digits.len() == 10 && digits.starts_with('3') {
+        format!("57{digits}")
+    } else {
+        digits
+    };
     format!("https://wa.me/{digits}")
 }
 
@@ -823,8 +844,20 @@ impl Ride {
     /// con el conductor.
     pub fn fare_label(&self) -> String {
         match self.fare() {
-            Some(amount) => format!("{} {}", self.currency, amount),
-            None => "A acordar con el conductor".to_string(),
+            Some(amount) => format_cop(amount),
+            None => "Por acordar con el conductor".to_string(),
+        }
+    }
+
+    /// "Precio acordado: $7.000" cuando ya hay precio, "Precio por acordar"
+    /// mientras no (pedido del dueno: se lee mejor que "A acordar").
+    pub fn price_label(&self) -> String {
+        match self.fare() {
+            Some(amount) if self.is_pickup_only() => {
+                format!("Precio acordado: {}", format_cop(amount))
+            }
+            Some(amount) => format!("Precio: {}", format_cop(amount)),
+            None => "Precio por acordar".to_string(),
         }
     }
 }
@@ -912,6 +945,14 @@ pub struct DriverEarningsSummary {
     pub currency: String,
     pub total_earned: i64,
     pub completed_rides: u32,
+    /// Desglose (backend #110): viajes por un lado, mandados y motocargas
+    /// por el otro. `0` con servidores anteriores.
+    #[serde(default)]
+    pub rides_earned: i64,
+    #[serde(default)]
+    pub errands_earned: i64,
+    #[serde(default)]
+    pub completed_errands: u32,
 }
 
 /// Payload del evento `ride.requested`, publicado sobre el canal privado
@@ -988,8 +1029,8 @@ impl NearbyRideRequest {
 
     pub fn fare_label(&self) -> String {
         match self.estimated_fare {
-            Some(amount) if !self.is_pickup_only() => format!("{} {}", self.currency, amount),
-            _ => "Precio a acordar con el pasajero".to_string(),
+            Some(amount) if !self.is_pickup_only() => format_cop(amount),
+            _ => "Precio por acordar con el pasajero".to_string(),
         }
     }
 }
@@ -2041,7 +2082,7 @@ mod tests {
         assert_eq!(ride.destination_label(), "Al hospital");
         assert_eq!(ride.estimated_fare, None);
         assert_eq!(ride.fare(), Some(6000));
-        assert_eq!(ride.fare_label(), "COP 6000");
+        assert_eq!(ride.fare_label(), "$6.000");
     }
 
     #[test]
@@ -2053,7 +2094,7 @@ mod tests {
         ride.estimated_fare = None;
 
         assert_eq!(ride.fare(), None);
-        assert_eq!(ride.fare_label(), "A acordar con el conductor");
+        assert_eq!(ride.fare_label(), "Por acordar con el conductor");
         assert_eq!(ride.destination_label(), "Al puerto");
     }
 
@@ -2063,7 +2104,7 @@ mod tests {
 
         assert!(!ride.is_pickup_only());
         assert_eq!(ride.destination_label(), "Casco urbano");
-        assert_eq!(ride.fare_label(), "COP 8850");
+        assert_eq!(ride.fare_label(), "$8.850");
     }
 
     #[test]
@@ -2088,7 +2129,10 @@ mod tests {
             requests[0].destination_label(),
             "Casa de mi mama, barrio La Esperanza"
         );
-        assert_eq!(requests[0].fare_label(), "Precio a acordar con el pasajero");
+        assert_eq!(
+            requests[0].fare_label(),
+            "Precio por acordar con el pasajero"
+        );
     }
 
     #[test]
@@ -2107,7 +2151,7 @@ mod tests {
 
         assert_eq!(tracking.ride.status, RideStatus::Accepted);
         assert_eq!(tracking.ride.agreed_price, Some(6500));
-        assert_eq!(tracking.ride.fare_label(), "COP 6500");
+        assert_eq!(tracking.ride.fare_label(), "$6.500");
     }
 
     #[test]
@@ -2244,5 +2288,19 @@ mod tests {
         assert_eq!(errand.status, ErrandStatus::Cancelled);
         assert!(!errand.is_open());
         assert_eq!(errand.counterpart.map(|c| c.name).as_deref(), Some("Luis"));
+    }
+
+    #[test]
+    fn whatsapp_url_adds_57_to_a_colombian_number_saved_without_it() {
+        assert_eq!(whatsapp_url("+3108838480"), "https://wa.me/573108838480");
+        assert_eq!(whatsapp_url("+573108838480"), "https://wa.me/573108838480");
+    }
+
+    #[test]
+    fn price_label_reads_agreed_or_pending() {
+        let mut ride = sample_ride(1, RideStatus::Accepted);
+        assert_eq!(ride.price_label(), "Precio por acordar");
+        ride.agreed_price = Some(7000);
+        assert_eq!(ride.price_label(), "Precio acordado: $7.000");
     }
 }

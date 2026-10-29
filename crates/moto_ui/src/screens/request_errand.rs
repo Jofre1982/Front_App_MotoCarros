@@ -30,6 +30,9 @@ use crate::price_offer::{ConfirmCancelButton, ContactCard, PriceOfferCard};
 const DEFAULT_CENTER_LAT: f64 = 3.8653;
 const DEFAULT_CENTER_LNG: f64 = -67.9239;
 
+/// Largo maximo de la descripcion: el mismo `max:500` del backend.
+const DESCRIPTION_MAX: usize = 500;
+
 /// Cada cuanto se vuelve a consultar el pedido mientras sigue abierto.
 const ERRAND_REFRESH_INTERVAL: Duration = Duration::from_secs(8);
 
@@ -435,12 +438,13 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
             textarea {
                 id: "request-errand-description",
                 rows: "3",
-                maxlength: "500",
+                maxlength: "{DESCRIPTION_MAX}",
                 placeholder: "{copy.description_placeholder}",
                 disabled: is_submitting(),
                 value: "{description}",
                 oninput: move |event| description.set(event.value()),
             }
+            p { class: "char-counter", "{description().chars().count()}/{DESCRIPTION_MAX}" }
             if let Some(message) = &description_field_error {
                 p { class: "request-errand-field-error", role: "alert", "{message}" }
             }
