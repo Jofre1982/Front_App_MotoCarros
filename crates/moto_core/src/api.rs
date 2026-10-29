@@ -2499,6 +2499,80 @@ impl ApiClient {
         }
     }
 
+    /// `POST /api/v1/me/avatar` (backend #109): sube o reemplaza la foto de
+    /// perfil. Devuelve la cuenta con `avatar_url`/`avatar_status` nuevos.
+    pub async fn upload_avatar(
+        &self,
+        token: &AuthToken,
+        file_name: &str,
+        content_type: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> Result<AuthenticatedFetch<User>, ServiceActionError> {
+        if let Some(user) = self
+            .post_avatar(&token.access_token, file_name, content_type, bytes.clone())
+            .await?
+        {
+            return Ok(AuthenticatedFetch {
+                data: user,
+                refreshed_token: None,
+            });
+        }
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| ServiceActionError::SessionExpired)?;
+        match self
+            .post_avatar(&renewed.access_token, file_name, content_type, bytes)
+            .await?
+        {
+            Some(user) => Ok(AuthenticatedFetch {
+                data: user,
+                refreshed_token: Some(renewed),
+            }),
+            None => Err(ServiceActionError::SessionExpired),
+        }
+    }
+
+    async fn post_avatar(
+        &self,
+        access_token: &str,
+        file_name: &str,
+        content_type: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> Result<Option<User>, ServiceActionError> {
+        let mut part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_string());
+        if let Some(mime) = content_type {
+            part = part
+                .mime_str(mime)
+                .map_err(|err| ServiceActionError::Network(describe_error(&err)))?;
+        }
+        let form = reqwest::multipart::Form::new().part("photo", part);
+        let response = self
+            .http
+            .post(format!("{}/api/v1/me/avatar", self.base_url))
+            .bearer_auth(access_token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|err| ServiceActionError::Network(describe_error(&err)))?;
+        match response.status().as_u16() {
+            200..=299 => {
+                let envelope: DataEnvelope<User> = decode_json(response)
+                    .await
+                    .map_err(ServiceActionError::Network)?;
+                Ok(Some(envelope.data))
+            }
+            401 => Ok(None),
+            422 => {
+                let body: ApiErrorBody = decode_json(response)
+                    .await
+                    .map_err(ServiceActionError::Network)?;
+                Err(ServiceActionError::Validation(body))
+            }
+            other => Err(ServiceActionError::Unexpected(other)),
+        }
+    }
+
     /// `GET /api/v1/me` — issue #9. Reintenta una vez con refresh de token
     /// (ver `get_authenticated`) antes de forzar `SessionExpired`.
     pub async fn me(
@@ -2820,7 +2894,47 @@ impl ApiClient {
         access_token: &str,
     ) -> Result<GetErrandPhotoOutcome, AuthenticatedRequestError> {
         let url = format!("{}/api/v1/errands/{}/photo", self.base_url, errand_id);
+        self.get_image_with_token(url, access_token).await
+    }
 
+    /// Una imagen protegida por token (foto de perfil, backend #109) a partir
+    /// de la URL absoluta que manda el servidor (`avatar_url`). Mismo
+    /// reintento con refresh que `errand_photo`.
+    pub async fn protected_image(
+        &self,
+        token: &AuthToken,
+        url: &str,
+    ) -> Result<AuthenticatedFetch<ErrandPhoto>, AuthenticatedRequestError> {
+        if let GetErrandPhotoOutcome::Success(photo) = self
+            .get_image_with_token(url.to_string(), &token.access_token)
+            .await?
+        {
+            return Ok(AuthenticatedFetch {
+                data: photo,
+                refreshed_token: None,
+            });
+        }
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| AuthenticatedRequestError::SessionExpired)?;
+        match self
+            .get_image_with_token(url.to_string(), &renewed.access_token)
+            .await?
+        {
+            GetErrandPhotoOutcome::Success(photo) => Ok(AuthenticatedFetch {
+                data: photo,
+                refreshed_token: Some(renewed),
+            }),
+            GetErrandPhotoOutcome::Unauthorized => Err(AuthenticatedRequestError::SessionExpired),
+        }
+    }
+
+    async fn get_image_with_token(
+        &self,
+        url: String,
+        access_token: &str,
+    ) -> Result<GetErrandPhotoOutcome, AuthenticatedRequestError> {
         let response = self
             .http
             .get(url)
@@ -6419,6 +6533,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_avatar_sends_the_photo_and_returns_the_pending_status() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/avatar"))
+            .and(wiremock::matchers::body_string_contains(
+                "name=\"photo\"; filename=\"yo.jpg\"",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": 7, "name": "Luis", "email": "luis@example.com",
+                    "phone": "+573002222222", "phone_verified": false,
+                    "role": "driver", "roles": ["passenger", "driver"],
+                    "avatar_url": "https://motocarroya.com/api/v1/users/7/avatar",
+                    "avatar_status": "pending", "avatar_rejection_reason": null
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let fetch = ApiClient::new(server.uri())
+            .upload_avatar(
+                &sample_token(),
+                "yo.jpg",
+                Some("image/jpeg"),
+                b"jpg".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.data.avatar_status.as_deref(), Some("pending"));
+    }
+
+    #[tokio::test]
+    async fn protected_image_downloads_with_the_token() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/users/7/avatar"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer jwt-token",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "image/png")
+                    .set_body_bytes(b"png".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let url = format!("{}/api/v1/users/7/avatar", server.uri());
+        let fetch = client.protected_image(&sample_token(), &url).await.unwrap();
+
+        assert_eq!(fetch.data.content_type, "image/png");
+        assert_eq!(fetch.data.bytes, b"png".to_vec());
+    }
+
+    #[tokio::test]
     async fn cancel_errand_posts_and_returns_the_cancelled_errand() {
         let server = MockServer::start().await;
 
@@ -9559,6 +9733,7 @@ mod tests {
             Some(crate::models::RideDriver {
                 id: 42,
                 name: "Carlos Perez".to_string(),
+                ..Default::default()
             })
         );
         assert_eq!(fetch.refreshed_token, None);
@@ -9805,6 +9980,7 @@ mod tests {
             Some(crate::models::RideDriver {
                 id: 42,
                 name: "Carlos Perez".to_string(),
+                ..Default::default()
             })
         );
         assert_eq!(fetch.refreshed_token, None);

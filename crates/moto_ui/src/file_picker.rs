@@ -42,6 +42,8 @@ pub enum PickSource {
     /// Abre la camara trasera directamente (si el celular lo permite; si no,
     /// el WebView cae al selector normal).
     Camera,
+    /// Camara frontal, para la foto de perfil.
+    Selfie,
     /// Galeria de fotos del celular. Con `image/*` Android abre su selector
     /// de fotos; con varios tipos (fotos + PDF) abria el gestor de archivos,
     /// que confundia (reportado probando el APK).
@@ -96,7 +98,7 @@ const opts = __OPTS__;
 const input = document.createElement('input');
 input.type = 'file';
 input.accept = opts.accept;
-if (opts.camera) { input.setAttribute('capture', 'environment'); }
+if (opts.capture) { input.setAttribute('capture', opts.capture); }
 input.style.position = 'fixed';
 input.style.left = '-1000px';
 input.style.opacity = '0';
@@ -149,14 +151,15 @@ input.click();
 /// que se cancelo (navegadores viejos), el future simplemente queda
 /// pendiente: por eso las pantallas no deben bloquear la UI mientras tanto.
 pub async fn pick_file(source: PickSource) -> PickOutcome {
-    let (accept, camera) = match source {
-        PickSource::Camera => ("image/*", true),
-        PickSource::Gallery => ("image/*", false),
+    let (accept, capture) = match source {
+        PickSource::Camera => ("image/*", Some("environment")),
+        PickSource::Selfie => ("image/*", Some("user")),
+        PickSource::Gallery => ("image/*", None),
     };
     // Las opciones van dentro del script (y no por `send`) para que el
     // `click()` ocurra sin una ida y vuelta extra: el WebView solo abre el
     // selector mientras dure la "activacion" del toque del usuario.
-    let options = serde_json::json!({ "accept": accept, "camera": camera });
+    let options = serde_json::json!({ "accept": accept, "capture": capture });
     let mut eval = document::eval(&PICK_SCRIPT.replace("__OPTS__", &options.to_string()));
     match eval.recv::<serde_json::Value>().await {
         Ok(value) => parse_pick_message(value),
@@ -183,6 +186,9 @@ pub struct PhotoPickerProps {
     pub selected: Signal<Option<PickedFile>>,
     #[props(default = false)]
     pub disabled: bool,
+    /// Usa la camara frontal (foto de perfil) en vez de la trasera.
+    #[props(default = false)]
+    pub selfie: bool,
 }
 
 /// Los dos botones de foto ("Tomar foto" primero, porque es lo que mas se
@@ -230,7 +236,7 @@ pub fn PhotoPicker(props: PhotoPickerProps) -> Element {
                         r#type: "button",
                         class: "photo-picker-camera",
                         disabled: props.disabled,
-                        onclick: move |_| start_pick(PickSource::Camera),
+                        onclick: move |_| start_pick(if props.selfie { PickSource::Selfie } else { PickSource::Camera }),
                         "📷 Tomar foto"
                     }
                     button {

@@ -6,11 +6,26 @@
 //! y el mandado/motocarga (`RequestErrandScreen`).
 
 use dioxus::prelude::*;
-use moto_core::models::format_cop;
+use moto_core::models::{VehicleType, format_cop};
+
+use crate::avatar::Avatar;
+
+fn vehicle_label(vehicle_type: VehicleType) -> &'static str {
+    match vehicle_type {
+        VehicleType::Motocarro => "🛺 Motocarro",
+        VehicleType::Motocarga => "📦 Motocarga",
+    }
+}
 
 #[derive(Props, Clone, PartialEq)]
 pub struct PriceOfferCardProps {
     pub driver_name: String,
+    /// Foto aprobada del conductor, para reconocerlo antes de aceptar.
+    #[props(default)]
+    pub driver_avatar_url: Option<String>,
+    /// Placa y tipo del vehiculo.
+    #[props(default)]
+    pub vehicle: Option<moto_core::models::DriverVehicle>,
     pub price: i64,
     pub is_responding: bool,
     pub error: Option<String>,
@@ -22,7 +37,18 @@ pub struct PriceOfferCardProps {
 pub fn PriceOfferCard(props: PriceOfferCardProps) -> Element {
     rsx! {
         div { class: "price-offer", role: "alert",
-            p { class: "price-offer-title", "💬 {props.driver_name} te ofrece:" }
+            div { class: "price-offer-driver",
+                Avatar { url: props.driver_avatar_url.clone(), name: props.driver_name.clone(), size: 72 }
+                div {
+                    p { class: "price-offer-title", "{props.driver_name} te ofrece:" }
+                    if let Some(vehicle) = &props.vehicle {
+                        p { class: "price-offer-vehicle",
+                            "{vehicle_label(vehicle.vehicle_type)} · Placa "
+                            strong { "{vehicle.plate}" }
+                        }
+                    }
+                }
+            }
             p { class: "price-offer-amount", "{format_cop(props.price)}" }
             p { class: "price-offer-hint",
                 "Si te parece bien, acéptalo. Si no, recházalo y le llega a otro conductor."
@@ -53,6 +79,9 @@ pub struct ContactCardProps {
     /// "Tu conductor" o "Tu pasajero".
     pub title: &'static str,
     pub counterpart: moto_core::models::Counterpart,
+    /// Vehiculo del conductor, cuando quien mira es el pasajero.
+    #[props(default)]
+    pub vehicle: Option<moto_core::models::DriverVehicle>,
 }
 
 /// Nombre y celular de la otra persona con el boton para escribirle por
@@ -63,8 +92,23 @@ pub fn ContactCard(props: ContactCardProps) -> Element {
     let url = moto_core::models::whatsapp_url(&props.counterpart.phone);
     rsx! {
         div { class: "contact-card",
-            p { class: "contact-card-title", "{props.title}: {props.counterpart.name}" }
-            p { class: "contact-card-phone", "📱 {props.counterpart.phone}" }
+            div { class: "contact-card-person",
+                Avatar {
+                    url: props.counterpart.avatar_url.clone(),
+                    name: props.counterpart.name.clone(),
+                    size: 56,
+                }
+                div {
+                    p { class: "contact-card-title", "{props.title}: {props.counterpart.name}" }
+                    p { class: "contact-card-phone", "📱 {props.counterpart.phone}" }
+                    if let Some(vehicle) = &props.vehicle {
+                        p { class: "price-offer-vehicle",
+                            "{vehicle_label(vehicle.vehicle_type)} · Placa "
+                            strong { "{vehicle.plate}" }
+                        }
+                    }
+                }
+            }
             a {
                 class: "contact-card-whatsapp",
                 href: "{url}",

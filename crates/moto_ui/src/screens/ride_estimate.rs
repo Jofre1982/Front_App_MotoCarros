@@ -376,6 +376,8 @@ pub fn RideEstimateScreen() -> Element {
                     if let (Some(driver), Some(price)) = (&ride.driver, ride.agreed_price) {
                         PriceOfferCard {
                             driver_name: driver.name.clone(),
+                            driver_avatar_url: driver.avatar_url.clone(),
+                            vehicle: driver.vehicle.clone(),
                             price,
                             is_responding: is_responding_price(),
                             error: price_error(),
@@ -385,7 +387,11 @@ pub fn RideEstimateScreen() -> Element {
                     }
                 }
                 if let Some(counterpart) = ride.counterpart.clone() {
-                    ContactCard { title: "Tu conductor", counterpart }
+                    ContactCard {
+                        title: "Tu conductor",
+                        counterpart,
+                        vehicle: ride.driver.as_ref().and_then(|d| d.vehicle.clone()),
+                    }
                 }
                 if rejected_notice() && ride.status == RideStatus::Requested {
                     p { class: "ride-request-status",

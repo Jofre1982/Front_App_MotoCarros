@@ -308,6 +308,8 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
                         if let (Some(driver), Some(price)) = (&errand.driver, errand.agreed_price) {
                             PriceOfferCard {
                                 driver_name: driver.name.clone(),
+                                driver_avatar_url: driver.avatar_url.clone(),
+                                vehicle: driver.vehicle.clone(),
                                 price,
                                 is_responding: is_responding_price(),
                                 error: price_error(),
@@ -334,7 +336,11 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
                     }
                 }
                 if let Some(counterpart) = errand.counterpart.clone() {
-                    ContactCard { title: "Tu conductor", counterpart }
+                    ContactCard {
+                        title: "Tu conductor",
+                        counterpart,
+                        vehicle: errand.driver.as_ref().and_then(|d| d.vehicle.clone()),
+                    }
                 }
                 if errand.is_open() {
                     ConfirmCancelButton {
