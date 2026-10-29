@@ -658,4 +658,38 @@ button.confirm-cancel-start:hover:not(:disabled) { background: var(--color-error
 }
 .confirm-cancel p { margin: 0; font-weight: 600; }
 button.confirm-cancel-yes { background: var(--color-error); }
+
+/* Fotos de perfil. */
+.avatar {
+    border-radius: 50%;
+    object-fit: cover;
+    flex: none;
+    border: 3px solid var(--color-surface);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+}
+.avatar-initials {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-primary);
+    color: #fff;
+    font-weight: 700;
+}
+.profile-photo {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 18px;
+    text-align: center;
+}
+.profile-photo .photo-picker { width: 100%; }
+.price-offer-driver, .contact-card-person {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    text-align: left;
+    margin-bottom: 8px;
+}
+.price-offer-vehicle { margin: 2px 0 0; color: var(--color-text); }
 "#;

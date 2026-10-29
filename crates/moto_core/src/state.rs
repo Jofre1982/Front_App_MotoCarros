@@ -214,6 +214,9 @@ mod tests {
                 phone_verified: false,
                 role: Role::Passenger,
                 roles: vec!["passenger".to_string()],
+                avatar_url: None,
+                avatar_status: None,
+                avatar_rejection_reason: None,
             },
             token: AuthToken {
                 access_token: "jwt-token".to_string(),

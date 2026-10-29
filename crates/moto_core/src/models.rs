@@ -35,6 +35,16 @@ pub struct User {
     /// backend anterior a #99, que no lo manda.
     #[serde(default)]
     pub roles: Vec<String>,
+    /// Foto de perfil propia (aunque este pendiente), o `None` (backend
+    /// #109).
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    /// `pending` / `approved` / `rejected`; la de un conductor la revisa un
+    /// admin antes de que la vean los pasajeros.
+    #[serde(default)]
+    pub avatar_status: Option<String>,
+    #[serde(default)]
+    pub avatar_rejection_reason: Option<String>,
 }
 
 impl User {
@@ -532,10 +542,24 @@ fn ride_destination_label(site: Option<&DestinationSite>, text: Option<&str>) ->
 /// `openapi.yaml#/components/schemas/RideDriver` — el conductor asignado a un
 /// viaje, visto desde el viaje. `None` mientras nadie lo haya aceptado
 /// todavia (historia #17, fuera de alcance de #14).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RideDriver {
     pub id: u64,
     pub name: String,
+    /// Foto de perfil aprobada por el admin, o `None` (backend #109).
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    /// Placa y tipo, para que el pasajero reconozca el vehiculo.
+    #[serde(default)]
+    pub vehicle: Option<DriverVehicle>,
+}
+
+/// El vehiculo del conductor visto por el pasajero (backend #109).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DriverVehicle {
+    pub plate: String,
+    #[serde(rename = "type")]
+    pub vehicle_type: VehicleType,
 }
 
 /// Ciclo de vida de un mandado
@@ -623,6 +647,9 @@ pub fn format_cop(amount: i64) -> String {
 pub struct Counterpart {
     pub name: String,
     pub phone: String,
+    /// Foto de perfil aprobada, o `None` (backend #109).
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 /// Enlace para escribirle por WhatsApp a un celular guardado como
@@ -1097,6 +1124,7 @@ pub fn apply_ride_tracking_event(tracking: &mut RideTracking, event_name: &str, 
                             tracking.ride.driver = Some(RideDriver {
                                 id,
                                 name: String::new(),
+                                ..Default::default()
                             });
                         }
                     }
@@ -1469,6 +1497,7 @@ mod tests {
             Some(RideDriver {
                 id: 42,
                 name: "Carlos Perez".to_string(),
+                ..Default::default()
             })
         );
         assert_eq!(
@@ -1532,6 +1561,7 @@ mod tests {
             Some(RideDriver {
                 id: 42,
                 name: "Carlos Perez".to_string(),
+                ..Default::default()
             })
         );
         assert_eq!(envelope.data[0].agreed_price, Some(8000));
@@ -1847,6 +1877,7 @@ mod tests {
             Some(RideDriver {
                 id: 42,
                 name: String::new(),
+                ..Default::default()
             })
         );
     }
@@ -1858,6 +1889,7 @@ mod tests {
         ride.driver = Some(RideDriver {
             id: 42,
             name: "Carlos Perez".to_string(),
+            ..Default::default()
         });
         let mut tracking = RideTracking::new(ride);
 
@@ -1872,6 +1904,7 @@ mod tests {
             Some(RideDriver {
                 id: 42,
                 name: "Carlos Perez".to_string(),
+                ..Default::default()
             })
         );
     }
@@ -1882,6 +1915,7 @@ mod tests {
         ride.driver = Some(RideDriver {
             id: 42,
             name: "Carlos Perez".to_string(),
+            ..Default::default()
         });
         let mut tracking = RideTracking::new(ride);
 
@@ -1900,6 +1934,7 @@ mod tests {
         ride.driver = Some(RideDriver {
             id: 42,
             name: "Carlos Perez".to_string(),
+            ..Default::default()
         });
         let mut tracking = RideTracking::new(ride);
 
@@ -1924,6 +1959,7 @@ mod tests {
         ride.driver = Some(RideDriver {
             id: 42,
             name: "Carlos Perez".to_string(),
+            ..Default::default()
         });
         let mut tracking = RideTracking::new(ride);
 

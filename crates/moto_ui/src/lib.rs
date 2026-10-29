@@ -6,6 +6,7 @@ use moto_core::models::{Role, VehicleType};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+pub mod avatar;
 pub mod driver_alert;
 pub mod fields;
 pub mod file_picker;

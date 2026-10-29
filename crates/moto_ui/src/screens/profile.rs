@@ -32,11 +32,15 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 use moto_core::api::{
     ApiClient, AuthenticatedRequestError, BecomeDriverError, ConfirmPhoneVerificationError,
-    RequestPhoneVerificationError, UpdateErrandAvailabilityError, UpdateProfileError,
+    RequestPhoneVerificationError, ServiceActionError, UpdateErrandAvailabilityError,
+    UpdateProfileError,
 };
 use moto_core::models::{Role, UpdateProfilePayload, User};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
+
+use crate::avatar::Avatar;
+use crate::file_picker::{PhotoPicker, PickedFile};
 
 /// Como se describe la cuenta (issue #95): con los dos roles, ambos.
 fn roles_label(user: &User) -> &'static str {
@@ -116,6 +120,7 @@ pub fn ProfileScreen() -> Element {
                         on_cancel: move |()| is_editing.set(false),
                     }
                 } else {
+                    ProfilePhotoSection { user: user.clone() }
                     dl {
                         dt { "Nombre" }
                         dd { "{user.name}" }
@@ -150,6 +155,95 @@ pub fn ProfileScreen() -> Element {
                         "Editar perfil"
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Que decirle a la persona sobre su foto segun `avatar_status`: la de un
+/// conductor la revisa el admin antes de que la vean los pasajeros.
+fn avatar_status_message(user: &User) -> Option<(&'static str, &'static str)> {
+    match user.avatar_status.as_deref() {
+        None => Some((
+            if user.can_drive() {
+                "Sube una foto donde se vea bien tu cara: los pasajeros la ven para reconocerte."
+            } else {
+                "Sube una foto tuya: el conductor la ve para reconocerte."
+            },
+            "upload-status",
+        )),
+        Some("pending") => Some((
+            "⏳ Tu foto esta en revision. Los pasajeros la veran cuando el administrador la apruebe.",
+            "upload-status",
+        )),
+        Some("rejected") => Some(("✗ Tu foto fue rechazada.", "price-offer-error")),
+        _ => None,
+    }
+}
+
+/// Foto de perfil (backend #109): se ve la actual y se cambia con la camara
+/// o la galeria.
+#[component]
+fn ProfilePhotoSection(user: User) -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+    let selected = use_signal(|| None::<PickedFile>);
+    let mut is_uploading = use_signal(|| false);
+    let mut upload_error = use_signal(|| None::<String>);
+
+    let mut selected_for_upload = selected;
+    let on_save = move |_| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let Some(file) = selected_for_upload() else {
+            return;
+        };
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+        spawn(async move {
+            is_uploading.set(true);
+            upload_error.set(None);
+            match api_client
+                .upload_avatar(&token, &file.name, file.content_type.as_deref(), file.bytes)
+                .await
+            {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    session.set_user(fetch.data);
+                    selected_for_upload.set(None);
+                }
+                Err(ServiceActionError::SessionExpired) => session.logout(storage.as_ref()),
+                Err(err) => upload_error.set(Some(err.to_string())),
+            }
+            is_uploading.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "profile-photo",
+            Avatar { url: user.avatar_url.clone(), name: user.name.clone(), size: 96 }
+            if let Some((message, class)) = avatar_status_message(&user) {
+                p { class: "{class}", "{message}" }
+            }
+            if let Some(reason) = &user.avatar_rejection_reason {
+                p { class: "price-offer-error", "Motivo: {reason}. Sube otra." }
+            }
+            PhotoPicker { selected, disabled: is_uploading(), selfie: true }
+            if selected().is_some() {
+                button {
+                    r#type: "button",
+                    class: "profile-photo-save",
+                    disabled: is_uploading(),
+                    onclick: on_save,
+                    if is_uploading() { "Subiendo foto..." } else { "Guardar foto de perfil" }
+                }
+            }
+            if let Some(message) = upload_error() {
+                p { class: "price-offer-error", role: "alert", "{message}" }
             }
         }
     }
