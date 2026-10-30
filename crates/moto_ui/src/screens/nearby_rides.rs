@@ -90,11 +90,11 @@ use dioxus::prelude::*;
 use futures_timer::Delay;
 use moto_core::api::{
     AcceptRideError, ApiClient, AuthenticatedRequestError, CancelRideError, CompleteRideError,
-    GetRideError, GetVehicleError, ShareRideLocationError, StartRideError,
+    GetRideError, GetVehicleError, ServiceActionError, ShareRideLocationError, StartRideError,
 };
 use moto_core::location::{LocationError, LocationProvider};
 use moto_core::models::{
-    NearbyRideRequest, Ride, RideStatus, Role, apply_nearby_ride_event, format_cop,
+    NearbyRideRequest, Ride, RideStatus, Role, VehicleType, apply_nearby_ride_event, format_cop,
     latest_active_ride,
 };
 use moto_core::realtime::{
@@ -137,6 +137,7 @@ pub fn NearbyRidesScreen() -> Element {
     let mut load_error = use_signal(|| None::<String>);
     let mut not_registered = use_signal(|| false);
     let mut driver_id = use_signal(|| None::<u64>);
+    let mut drives_motocarga = use_signal(|| false);
     // Misma guarda que `VehicleScreen`/`ProfileScreen`: el efecto lee
     // `session.token()` en su primera corrida, lo que lo suscribe a ese
     // signal, y el fetch puede terminar escribiendo en `session` (refresh de
@@ -193,6 +194,7 @@ pub fn NearbyRidesScreen() -> Element {
                     if let Some(refreshed) = fetch.refreshed_token {
                         session.update_token(refreshed, storage.as_ref());
                     }
+                    drives_motocarga.set(fetch.data.vehicle_type == VehicleType::Motocarga);
                 }
                 Err(GetVehicleError::NotFound) => {
                     not_registered.set(true);
@@ -219,7 +221,7 @@ pub fn NearbyRidesScreen() -> Element {
                 p { class: "nearby-rides-error", role: "alert", "{message}" }
             }
         } else if let Some(id) = driver_id() {
-            NearbyRidesList { driver_id: id }
+            NearbyRidesList { driver_id: id, drives_motocarga: drives_motocarga() }
         }
     }
 }
@@ -239,6 +241,7 @@ enum RealtimeStatus {
 #[derive(Props, Clone, PartialEq)]
 struct NearbyRidesListProps {
     driver_id: u64,
+    drives_motocarga: bool,
 }
 
 #[component]
@@ -360,11 +363,15 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
             let storage = storage.clone();
 
             spawn(async move {
-                let active = api_client
-                    .ride_history(&token, Some(Role::Driver))
-                    .await
-                    .ok()
-                    .and_then(|fetch| latest_active_ride(&fetch.data));
+                let active = match api_client.ride_history(&token, Some(Role::Driver)).await {
+                    Ok(fetch) => {
+                        if let Some(refreshed) = fetch.refreshed_token {
+                            session.update_token(refreshed, storage.as_ref());
+                        }
+                        latest_active_ride(&fetch.data)
+                    }
+                    Err(_) => None,
+                };
                 if active.is_some() {
                     accepted_ride.set(active);
                 }
@@ -598,14 +605,16 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                     }
                 }
                 if requests().is_empty() {
-                    if session.ride_availability() == Some(true) {
+                    if props.drives_motocarga {
+                        p { class: "nearby-rides-empty",
+                            "Tu vehiculo esta registrado como MOTOCARGA, y los viajes de pasajeros son para motocarro. Las motocargas te llegan en \"Mandados cercanos\". Si tu vehiculo es un motocarro, cambialo en \"Mi vehiculo\"."
+                        }
+                    } else if session.ride_availability() == Some(true) {
                         p { class: "nearby-rides-empty",
                             "No hay solicitudes esperando por ahora. La lista se actualiza sola."
                         }
                     } else {
-                        p { class: "nearby-rides-empty",
-                            "No estas recibiendo viajes. Enciende \"Recibir viajes\" en Mi perfil para empezar a verlos."
-                        }
+                        TurnOnRidesPrompt {}
                     }
                 } else {
                     ul { class: "nearby-rides-list",
@@ -1106,6 +1115,62 @@ fn ShareLocationPanel(props: ShareLocationPanelProps) -> Element {
                 SharingStatus::Error(message) => rsx! {
                     p { class: "share-location-error", role: "alert", "{message}" }
                 },
+            }
+        }
+    }
+}
+
+/// Aviso con boton cuando "Recibir viajes" esta apagado: el conductor lo
+/// enciende aca mismo, sin tener que ir a "Mi perfil" (reportado: el
+/// companero no veia viajes y no sabia por que).
+#[component]
+fn TurnOnRidesPrompt() -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+    let mut is_saving = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let turn_on = move |_| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+        spawn(async move {
+            is_saving.set(true);
+            error.set(None);
+            match api_client
+                .update_ride_availability(&token, true, None)
+                .await
+            {
+                Ok(fetch) => {
+                    if let Some(refreshed) = fetch.refreshed_token {
+                        session.update_token(refreshed, storage.as_ref());
+                    }
+                    session.set_ride_availability(fetch.data.is_available);
+                }
+                Err(ServiceActionError::SessionExpired) => session.logout(storage.as_ref()),
+                Err(err) => error.set(Some(err.to_string())),
+            }
+            is_saving.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "turn-on-rides",
+            p { class: "nearby-rides-empty",
+                "Tienes \"Recibir viajes\" APAGADO, por eso no te llegan solicitudes."
+            }
+            button {
+                r#type: "button",
+                class: "turn-on-rides-button",
+                disabled: is_saving(),
+                onclick: turn_on,
+                if is_saving() { "Encendiendo..." } else { "🛺 Encender \"Recibir viajes\"" }
+            }
+            if let Some(message) = error() {
+                p { class: "price-offer-error", role: "alert", "{message}" }
             }
         }
     }

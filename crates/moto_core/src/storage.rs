@@ -47,6 +47,57 @@ impl TokenStorage for InMemoryTokenStorage {
     }
 }
 
+/// Storage en un archivo privado de la app (pedido del dueno: "que no
+/// estemos ingresando las credenciales cada que se cierre la app, solo
+/// cuando yo quiera cerrar sesion").
+///
+/// En Android el archivo vive en el directorio interno de la app
+/// (`/data/data/<paquete>/files`), que el sistema solo deja leer a esta app;
+/// es el mismo nivel de proteccion que `SharedPreferences`, lo habitual para
+/// sesiones en apps moviles. Se guarda el JWT (que el backend renueva solo
+/// durante 14 dias), nunca la contrasena. "Cerrar sesion" borra el archivo.
+#[derive(Debug)]
+pub struct FileTokenStorage {
+    path: std::path::PathBuf,
+}
+
+impl FileTokenStorage {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+impl TokenStorage for FileTokenStorage {
+    fn save(&self, token: &AuthToken) {
+        let Ok(json) = serde_json::to_string(token) else {
+            return;
+        };
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // Se escribe aparte y se renombra: si la app se cierra a mitad de
+        // camino no queda un archivo cortado.
+        let temp = self.path.with_extension("tmp");
+        if std::fs::write(&temp, json).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600));
+            }
+            let _ = std::fs::rename(&temp, &self.path);
+        }
+    }
+
+    fn load(&self) -> Option<AuthToken> {
+        let json = std::fs::read_to_string(&self.path).ok()?;
+        serde_json::from_str(&json).ok()
+    }
+
+    fn clear(&self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +143,29 @@ mod tests {
         storage.clear();
 
         assert_eq!(storage.load(), None);
+    }
+
+    fn temp_session_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join(format!("motoya-test-{}-{name}", std::process::id()))
+            .join("session.json")
+    }
+
+    #[test]
+    fn file_storage_survives_closing_the_app() {
+        let path = temp_session_path("survives");
+        FileTokenStorage::new(&path).save(&sample_token());
+
+        // "Se cierra la app": otra instancia lee el mismo archivo.
+        assert_eq!(FileTokenStorage::new(&path).load(), Some(sample_token()));
+
+        FileTokenStorage::new(&path).clear();
+        assert_eq!(FileTokenStorage::new(&path).load(), None);
+    }
+
+    #[test]
+    fn file_storage_without_a_file_has_no_session() {
+        let path = temp_session_path("empty");
+        assert_eq!(FileTokenStorage::new(path).load(), None);
     }
 }

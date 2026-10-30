@@ -4,6 +4,9 @@
 //! que expone el backend en cada momento (ver `openapi.yaml` de
 //! `Back_App_MotoCarros`).
 
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+
 use crate::models::{
     AcceptErrandPayload, AcceptRidePayload, ApiErrorBody, AuthToken, AuthenticatedUser,
     BecomeDriverPayload, BroadcastAuthPayload, BroadcastAuthResponse, ConfirmPasswordResetPayload,
@@ -22,6 +25,40 @@ use crate::models::{DocumentStatus, ErrandStatus, RideStatus, VerificationStatus
 pub struct ApiClient {
     pub base_url: String,
     http: reqwest::Client,
+    renewals: Arc<Mutex<TokenRenewals>>,
+}
+
+/// Recuerda que tokens ya se canjearon y por cual. El backend pone en lista
+/// negra el token viejo al renovarlo (con 30 s de gracia): si una pantalla
+/// seguia con el viejo y volvia a pedir renovarlo, el servidor respondia 401
+/// y la app cerraba la sesion sola (reportado: "al completar viaje lo saco
+/// de la sesion"). Con esto, quien llegue tarde recibe el token nuevo.
+#[derive(Debug, Default)]
+struct TokenRenewals {
+    superseded: HashSet<String>,
+    latest: Option<AuthToken>,
+}
+
+impl TokenRenewals {
+    const MAX_REMEMBERED: usize = 64;
+
+    fn already_renewed(&self, access_token: &str) -> Option<AuthToken> {
+        let latest = self.latest.as_ref()?;
+        (self.superseded.contains(access_token) && latest.access_token != access_token)
+            .then(|| latest.clone())
+    }
+
+    fn record(&mut self, old_access_token: &str, renewed: &AuthToken) {
+        if self.superseded.len() >= Self::MAX_REMEMBERED {
+            self.superseded.clear();
+        }
+        self.superseded.insert(old_access_token.to_string());
+        if let Some(previous) = self.latest.take() {
+            self.superseded.insert(previous.access_token);
+        }
+        self.superseded.remove(&renewed.access_token);
+        self.latest = Some(renewed.clone());
+    }
 }
 
 /// Fallos posibles de `POST /api/v1/auth/login`.
@@ -1928,6 +1965,7 @@ impl ApiClient {
         Self {
             base_url: base_url.into(),
             http: build_http_client(),
+            renewals: Arc::default(),
         }
     }
 
@@ -2244,6 +2282,22 @@ impl ApiClient {
     /// `openapi.yaml` de `Back_App_MotoCarros`). No manda body, solo el
     /// `Authorization: Bearer` con el token a renovar.
     pub async fn refresh(&self, access_token: &str) -> Result<AuthToken, RefreshError> {
+        if let Some(renewed) = self
+            .renewals
+            .lock()
+            .ok()
+            .and_then(|r| r.already_renewed(access_token))
+        {
+            return Ok(renewed);
+        }
+        let renewed = self.request_refresh(access_token).await?;
+        if let Ok(mut renewals) = self.renewals.lock() {
+            renewals.record(access_token, &renewed);
+        }
+        Ok(renewed)
+    }
+
+    async fn request_refresh(&self, access_token: &str) -> Result<AuthToken, RefreshError> {
         let url = format!("{}/api/v1/auth/refresh", self.base_url);
 
         let response = self
@@ -5174,6 +5228,7 @@ mod tests {
                 std::time::Duration::from_secs(1),
                 std::time::Duration::from_millis(300),
             ),
+            renewals: Arc::default(),
         };
 
         let started = std::time::Instant::now();
@@ -5917,6 +5972,29 @@ mod tests {
             token_type: "bearer".to_string(),
             expires_in: Some(900),
         }
+    }
+
+    #[tokio::test]
+    async fn a_token_already_renewed_gets_the_new_one_without_asking_again() {
+        let server = MockServer::start().await;
+
+        // El backend solo acepta renovar cada token una vez (lista negra).
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "access_token": "new-jwt-token", "token_type": "bearer", "expires_in": 900 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let first = client.refresh("jwt-token").await.unwrap();
+        // Otra pantalla que seguia con el token viejo (o una copia del cliente).
+        let late = client.clone().refresh("jwt-token").await.unwrap();
+
+        assert_eq!(first.access_token, "new-jwt-token");
+        assert_eq!(late.access_token, "new-jwt-token");
     }
 
     #[tokio::test]
