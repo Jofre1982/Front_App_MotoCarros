@@ -114,6 +114,10 @@ pub fn NearbyErrandsScreen() -> Element {
             // (backend #106, `GET /me/errands?as=driver`): antes se perdian
             // al cerrar la app o cambiar de pantalla.
             if let Ok(fetch) = api_client.my_errands(&current_token, Role::Driver).await {
+                if let Some(refreshed) = fetch.refreshed_token {
+                    session.update_token(refreshed.clone(), storage.as_ref());
+                    current_token = refreshed;
+                }
                 let pending: Vec<Errand> = fetch
                     .data
                     .into_iter()

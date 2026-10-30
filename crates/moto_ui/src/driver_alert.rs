@@ -82,7 +82,12 @@ pub fn DriverServiceAlert(props: DriverServiceAlertProps) -> Element {
                 // `GET /errands` ya devuelve vacio si el conductor no esta
                 // disponible para mandados, asi que no hay que filtrar aca.
                 let errands = match api_client.list_errands(&token).await {
-                    Ok(fetch) => fetch.data.len(),
+                    Ok(fetch) => {
+                        if let Some(refreshed) = fetch.refreshed_token {
+                            session.update_token(refreshed, storage.as_ref());
+                        }
+                        fetch.data.len()
+                    }
                     Err(_) => counts.peek().1,
                 };
                 if *counts.peek() != (rides, errands) {

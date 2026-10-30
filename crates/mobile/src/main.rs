@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 use moto_core::api::ApiClient;
 use moto_core::location::LocationProvider;
 use moto_core::realtime::RealtimeConfig;
-use moto_core::storage::{InMemoryTokenStorage, TokenStorage};
+use moto_core::storage::{FileTokenStorage, InMemoryTokenStorage, TokenStorage};
 use moto_ui::App;
 
 mod location;
@@ -33,15 +33,15 @@ fn main() {
                 ws_url: ws_url.clone(),
             })
         })
-        // TODO(issue de seguimiento): esto deberia usar el keychain de iOS /
-        // el keystore de Android en vez de memoria. Todavia no hay puente
-        // nativo (proyecto Xcode/Gradle) en este esqueleto para exponer esas
-        // APIs a Rust — ver issue #3, "movil" en la seccion de storage.
-        // `InMemoryTokenStorage` es una eleccion explicita y documentada, no
-        // un descuido: no persiste, igual que el comportamiento actual, pero
-        // tampoco guarda el token en texto plano en disco.
+        // La sesion se guarda en el directorio privado de la app para no
+        // pedir el login cada vez que se abre (ver `FileTokenStorage`). Si
+        // no se encuentra ese directorio, queda en memoria como antes.
         .with_context_provider(|| {
-            Box::new(Arc::new(InMemoryTokenStorage::new()) as Arc<dyn TokenStorage>)
+            let storage: Arc<dyn TokenStorage> = match session_file() {
+                Some(path) => Arc::new(FileTokenStorage::new(path)),
+                None => Arc::new(InMemoryTokenStorage::new()),
+            };
+            Box::new(storage)
         })
         // TODO(issue de seguimiento): reemplazar por un `LocationProvider`
         // que use la API de ubicacion nativa cuando exista el puente
@@ -50,4 +50,28 @@ fn main() {
             Box::new(Arc::new(NativeLocationProvider::new()) as Arc<dyn LocationProvider>)
         })
         .launch(App);
+}
+
+/// Archivo de sesion dentro del almacenamiento interno de la app.
+///
+/// En Android: `/data/data/<paquete>/files/motoya_session.json`; el nombre
+/// del paquete sale de `/proc/self/cmdline` (el proceso de la app se llama
+/// igual que su paquete). En iOS/escritorio: bajo `$HOME`.
+fn session_file() -> Option<std::path::PathBuf> {
+    const FILE_NAME: &str = "motoya_session.json";
+    if cfg!(target_os = "android") {
+        let cmdline = std::fs::read("/proc/self/cmdline").ok()?;
+        let name = String::from_utf8_lossy(&cmdline);
+        let package = name.split(['\0', ':']).next()?.trim();
+        if package.is_empty() || package.contains('/') {
+            return None;
+        }
+        let dir = std::path::Path::new("/data/data")
+            .join(package)
+            .join("files");
+        std::fs::create_dir_all(&dir).ok()?;
+        return Some(dir.join(FILE_NAME));
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(std::path::Path::new(&home).join(".motoya").join(FILE_NAME))
 }

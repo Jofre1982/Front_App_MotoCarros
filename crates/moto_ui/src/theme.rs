@@ -713,4 +713,6 @@ button.confirm-cancel-yes { background: var(--color-error); }
 .ride-history-price { font-weight: 700; color: var(--color-primary-dark); }
 .driver-earnings-total { font-size: 1.6rem; font-weight: 800; color: var(--color-primary-dark); }
 .driver-errand-history { margin-top: 18px; }
+.turn-on-rides { text-align: center; }
+.turn-on-rides-button { width: 100%; margin-top: 8px; }
 "#;
