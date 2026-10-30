@@ -625,7 +625,6 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                         },
                         ReofferBox {
                             target: ReofferTarget::Ride(ride.id),
-                            previous: ride.agreed_price,
                             on_sent: move |sent: Reoffered| {
                                 if let Reoffered::Ride(offered) = sent {
                                     let offered_id = offered.id;
@@ -639,6 +638,14 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                                 requests.with_mut(|list| list.retain(|r| Some(r.ride_id) != gone));
                                 rejected_ride.set(None);
                             },
+                        }
+                        div { class: "reoffer-details",
+                            if ride.is_pickup_only() {
+                                p { class: "nearby-ride-mode-badge", "Solo recogida · precio a acordar" }
+                            }
+                            PickupLocation { lat: ride.origin.latitude, lng: ride.origin.longitude }
+                            p { "Destino: {ride.destination_label()}" }
+                            p { "Pasajeros: {ride.passenger_count}" }
                         }
                         button {
                             r#type: "button",

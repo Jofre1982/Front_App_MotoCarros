@@ -1,7 +1,6 @@
 //! Recuadro "Ofrecer otro precio" dentro de la ventana de precio rechazado
 //! (pedido del dueno: antes se mostraba la fila entera con el mapa y la
-//! casilla de precio quedaba escondida abajo). Letra grande y botones de
-//! +/- para quien ve poco.
+//! casilla de precio quedaba escondida abajo). Letra grande para quien ve poco.
 
 use std::sync::Arc;
 
@@ -25,24 +24,9 @@ pub enum Reoffered {
     Errand(Errand),
 }
 
-/// Paso de los botones +/-.
-const STEP: i64 = 1000;
-
-/// Precio sugerido al abrir: el anterior, o vacio.
-pub fn start_price(previous: Option<i64>) -> String {
-    previous.map(|p| p.to_string()).unwrap_or_default()
-}
-
-/// Suma `delta` al precio escrito, sin bajar de `STEP`.
-pub fn bump(current: &str, delta: i64) -> String {
-    let value = current.trim().parse::<i64>().unwrap_or(0);
-    (value + delta).max(STEP).to_string()
-}
-
 #[derive(Props, Clone, PartialEq)]
 pub struct ReofferBoxProps {
     pub target: ReofferTarget,
-    pub previous: Option<i64>,
     pub on_sent: EventHandler<Reoffered>,
     /// Otro conductor lo tomo mientras tanto.
     pub on_unavailable: EventHandler<()>,
@@ -53,8 +37,7 @@ pub fn ReofferBox(props: ReofferBoxProps) -> Element {
     let api_client = use_context::<ApiClient>();
     let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context::<SessionState>();
-    let previous = props.previous;
-    let mut price = use_signal(move || start_price(previous));
+    let mut price = use_signal(String::new);
     let mut is_sending = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
     let target = props.target;
@@ -107,35 +90,17 @@ pub fn ReofferBox(props: ReofferBoxProps) -> Element {
 
     rsx! {
         div { class: "reoffer-box",
-            label { class: "reoffer-label", r#for: "reoffer-price", "💵 Tu nuevo precio" }
-            div { class: "reoffer-row",
-                button {
-                    r#type: "button",
-                    class: "reoffer-step",
-                    aria_label: "Bajar 1.000",
-                    disabled: is_sending(),
-                    onclick: move |_| price.set(bump(&price(), -STEP)),
-                    "−"
-                }
-                input {
-                    id: "reoffer-price",
-                    class: "reoffer-input",
-                    r#type: "number",
-                    inputmode: "numeric",
-                    min: "1",
-                    placeholder: "Ej: 5000",
-                    disabled: is_sending(),
-                    value: "{price}",
-                    oninput: move |event| price.set(event.value()),
-                }
-                button {
-                    r#type: "button",
-                    class: "reoffer-step",
-                    aria_label: "Subir 1.000",
-                    disabled: is_sending(),
-                    onclick: move |_| price.set(bump(&price(), STEP)),
-                    "+"
-                }
+            label { class: "reoffer-label", r#for: "reoffer-price", "👇 Oferta de nuevo aquí" }
+            input {
+                id: "reoffer-price",
+                class: "reoffer-input",
+                r#type: "number",
+                inputmode: "numeric",
+                min: "1",
+                placeholder: "Escribe el precio",
+                disabled: is_sending(),
+                value: "{price}",
+                oninput: move |event| price.set(event.value()),
             }
             if let Some(amount) = parsed {
                 p { class: "reoffer-preview", "{format_cop(amount)}" }
@@ -151,24 +116,5 @@ pub fn ReofferBox(props: ReofferBoxProps) -> Element {
                 p { class: "reoffer-error", role: "alert", "{message}" }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn starts_with_the_rejected_price() {
-        assert_eq!(start_price(Some(4000)), "4000");
-        assert_eq!(start_price(None), "");
-    }
-
-    #[test]
-    fn buttons_move_by_a_thousand_and_never_below() {
-        assert_eq!(bump("4000", STEP), "5000");
-        assert_eq!(bump("4000", -STEP), "3000");
-        assert_eq!(bump("1000", -STEP), "1000");
-        assert_eq!(bump("", STEP), "1000");
     }
 }

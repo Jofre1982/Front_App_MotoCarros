@@ -777,26 +777,15 @@ button.confirm-cancel-yes { background: var(--color-error); }
     text-align: center;
 }
 .reoffer-label { display: block; font-size: 1.4rem; font-weight: 800; margin-bottom: 10px; }
-.reoffer-row { display: flex; align-items: center; gap: 8px; }
 .reoffer-input {
-    flex: 1;
-    min-width: 0;
+    width: 100%;
     font-size: 1.8rem !important;
     font-weight: 800;
     text-align: center;
     padding: 10px 6px !important;
 }
-.reoffer-step {
-    flex: none;
-    width: 58px;
-    height: 58px;
-    margin: 0;
-    font-size: 2rem;
-    font-weight: 900;
-    padding: 0;
-    border-radius: 14px;
-}
 .reoffer-preview { font-size: 1.5rem; font-weight: 800; margin: 10px 0; color: var(--color-primary-dark); }
 .reoffer-box .big-notice-button { margin-top: 6px; }
 .reoffer-error { color: var(--color-error); font-size: 1.15rem; font-weight: 700; }
+.reoffer-details { background: #fff; color: var(--color-text); border-radius: 14px; padding: 12px; text-align: left; font-size: 1.15rem; }
 "#;

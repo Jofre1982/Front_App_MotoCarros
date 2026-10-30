@@ -200,7 +200,6 @@ pub fn NearbyErrandsScreen() -> Element {
                     },
                     ReofferBox {
                         target: ReofferTarget::Errand(rejected.id),
-                        previous: rejected.agreed_price,
                         on_sent: move |sent: Reoffered| {
                             if let Reoffered::Errand(accepted) = sent {
                                 let accepted_id = accepted.id;
@@ -216,6 +215,16 @@ pub fn NearbyErrandsScreen() -> Element {
                             unavailable_notice
                                 .set(Some("Este mandado ya no esta disponible: otro conductor lo tomo.".to_string()));
                         },
+                    }
+                    div { class: "reoffer-details",
+                        if rejected.is_motocarga() {
+                            p { class: "errand-kind-badge", "📦 Motocarga" }
+                        }
+                        p { "{rejected.description}" }
+                        if let Some(destination) = rejected.destination_label() {
+                            p { "Destino: {destination}" }
+                        }
+                        PickupLocation { lat: rejected.origin.latitude, lng: rejected.origin.longitude }
                     }
                     button {
                         r#type: "button",
