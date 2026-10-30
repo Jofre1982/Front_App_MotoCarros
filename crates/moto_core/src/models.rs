@@ -354,6 +354,52 @@ pub struct Coordinates {
     pub longitude: f64,
 }
 
+/// `Ride.driver_location` (backend #111).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DriverLocation {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub updated_at: String,
+}
+
+impl DriverLocation {
+    pub fn coordinates(&self) -> Coordinates {
+        Coordinates {
+            latitude: self.latitude,
+            longitude: self.longitude,
+        }
+    }
+}
+
+/// Distancia en linea recta (km), formula de haversine.
+pub fn distance_km(a: Coordinates, b: Coordinates) -> f64 {
+    const EARTH_RADIUS_KM: f64 = 6371.0;
+    let (lat1, lat2) = (a.latitude.to_radians(), b.latitude.to_radians());
+    let d_lat = lat2 - lat1;
+    let d_lng = (b.longitude - a.longitude).to_radians();
+    let h = (d_lat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (d_lng / 2.0).sin().powi(2);
+    2.0 * EARTH_RADIUS_KM * h.sqrt().asin()
+}
+
+/// Minutos aproximados para recorrer `km` en motocarro por el pueblo, sin
+/// Google: las calles alargan la linea recta ~40 % y un motocarro anda a
+/// unos 20 km/h en promedio. Nunca menos de 1 minuto.
+pub fn eta_minutes(km: f64) -> u32 {
+    const STREET_FACTOR: f64 = 1.4;
+    const SPEED_KMH: f64 = 20.0;
+    let minutes = (km * STREET_FACTOR / SPEED_KMH * 60.0).ceil();
+    minutes.max(1.0) as u32
+}
+
+/// "350 m" o "1,8 km".
+pub fn distance_label(km: f64) -> String {
+    if km < 1.0 {
+        format!("{} m", ((km * 1000.0) / 10.0).round() as u32 * 10)
+    } else {
+        format!("{:.1} km", km).replace('.', ",")
+    }
+}
+
 /// Unidad de cobro de un `SiteFare` (`openapi.yaml#/components/schemas/SiteFare.pricing_unit`,
 /// historia #85 del backend). `PerPerson` se cobra por cada pasajero;
 /// `PerTrip` es un monto unico sin importar cuantos vayan. Un mandado (issue
@@ -797,6 +843,10 @@ pub struct Ride {
     #[serde(default)]
     pub counterpart: Option<Counterpart>,
     pub driver: Option<RideDriver>,
+    /// Ultima posicion del conductor (backend #111) mientras va a recoger
+    /// o en el viaje; `None` si no hay una reciente.
+    #[serde(default)]
+    pub driver_location: Option<DriverLocation>,
     pub requested_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
@@ -1888,6 +1938,7 @@ mod tests {
             price_confirmed: true,
             counterpart: None,
             driver: None,
+            driver_location: None,
             requested_at: "2026-07-31T14:03:21+00:00".to_string(),
             started_at: None,
             completed_at: None,
@@ -2313,5 +2364,37 @@ mod tests {
             ride.price_label(),
             "Precio propuesto: $7.000 (esperando que el pasajero acepte)"
         );
+    }
+
+    #[test]
+    fn eta_for_a_short_ride_in_town() {
+        let plaza = Coordinates {
+            latitude: 3.8653,
+            longitude: -67.9239,
+        };
+        let near = Coordinates {
+            latitude: 3.8743,
+            longitude: -67.9239,
+        };
+        let km = distance_km(plaza, near);
+        assert!((km - 1.0).abs() < 0.01, "{km}");
+        assert_eq!(eta_minutes(km), 5);
+        assert_eq!(eta_minutes(0.0), 1);
+        assert_eq!(distance_label(km), "1,0 km");
+        assert_eq!(distance_label(0.347), "350 m");
+    }
+
+    #[test]
+    fn rides_read_the_driver_location() {
+        let ride: Ride = serde_json::from_value(serde_json::json!({
+            "id": 1, "status": "accepted", "origin": {"latitude": 3.86, "longitude": -67.92},
+            "destination": null, "passenger_count": 1, "currency": "COP",
+            "estimated_fare": null, "agreed_price": 5000, "driver": null,
+            "driver_location": {"latitude": 3.87, "longitude": -67.93, "updated_at": "2026-10-30T20:00:00+00:00"},
+            "requested_at": "2026-10-30T19:58:00+00:00", "started_at": null,
+            "completed_at": null, "final_fare": null, "payment": null
+        }))
+        .unwrap();
+        assert_eq!(ride.driver_location.unwrap().latitude, 3.87);
     }
 }

@@ -7,11 +7,14 @@ use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
 pub mod avatar;
+pub mod big_notice;
 pub mod driver_alert;
 pub mod fields;
 pub mod file_picker;
+pub mod geolocation;
 pub mod map;
 pub mod price_offer;
+pub mod reoffer;
 pub mod screens;
 mod theme;
 

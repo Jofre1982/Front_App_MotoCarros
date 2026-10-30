@@ -45,6 +45,9 @@ jobs:
     name: Compilar APK
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # `contents: write` solo para publicar la APK como Release (abajo).
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -137,6 +140,12 @@ jobs:
           xml = open(path, encoding="utf-8").read()
           if "android.permission.CAMERA" not in xml:
               xml = re.sub(r"(<manifest[^>]*>)", r'\1\n    <uses-permission android:name="android.permission.CAMERA" />', xml, count=1)
+          # Ubicacion (GPS): el WebView de wry la pide con
+          # onGeolocationPermissionsShowPrompt, pero Android solo la concede
+          # si el manifest la declara.
+          for perm in ("ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"):
+              if f"android.permission.{perm}" not in xml:
+                  xml = re.sub(r"(<manifest[^>]*>)", rf'\1\n    <uses-permission android:name="android.permission.{perm}" />', xml, count=1)
           if "android.media.action.IMAGE_CAPTURE" not in xml:
               xml = xml.replace("<application", '<queries><intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent></queries>\n    <application', 1)
           if "FileProvider" not in xml:
@@ -185,6 +194,7 @@ jobs:
           unzip -l MotoYa.apk | grep -q "ic_launcher_background.png" || { echo "::error::La APK no trae el icono de MotoYa"; exit 1; }
           echo "$PERMS" | grep -q "android.permission.INTERNET" || { echo "::error::La APK no tiene permiso INTERNET"; exit 1; }
           echo "$PERMS" | grep -q "android.permission.CAMERA" || { echo "::error::La APK no tiene permiso CAMERA (Tomar foto)"; exit 1; }
+          echo "$PERMS" | grep -q "android.permission.ACCESS_FINE_LOCATION" || { echo "::error::La APK no tiene permiso de ubicacion (GPS)"; exit 1; }
           "$BT/aapt" dump xmltree MotoYa.apk AndroidManifest.xml | grep -q "FileProvider" || { echo "::error::La APK no declara el FileProvider de la camara"; exit 1; }
 
       - uses: actions/upload-artifact@v4
@@ -192,3 +202,17 @@ jobs:
           name: MotoYa-apk
           path: MotoYa.apk
           retention-days: 30
+
+      # Link fijo para bajar la APK desde el celular, sin entrar a GitHub ni
+      # descomprimir un .zip (los Artifacts a veces fallan con "Egress is
+      # over the account limit"). Siempre reemplaza la anterior.
+      - name: Publicar APK (link fijo)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete apk-ultima --cleanup-tag --yes -R "$GITHUB_REPOSITORY" || true
+          gh release create apk-ultima MotoYa.apk -R "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "MotoYa APK (rama ${GITHUB_REF_NAME})" \
+            --notes "APK de prueba compilada de ${GITHUB_REF_NAME} (${GITHUB_SHA::7})."

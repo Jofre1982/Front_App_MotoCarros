@@ -76,7 +76,8 @@ use moto_core::api::{
 };
 use moto_core::models::{
     Coordinates, PaymentStatus, Ride, RideCancellation, RideStatus, RideTracking, Role,
-    VehicleType, apply_ride_tracking_event, latest_active_ride,
+    VehicleType, apply_ride_tracking_event, distance_km, distance_label, eta_minutes, format_cop,
+    latest_active_ride,
 };
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
@@ -85,6 +86,7 @@ use moto_core::realtime::{
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+use crate::big_notice::{BigNotice, StatusBanner, Tone};
 use crate::map::{MapMarker, MapView};
 use crate::price_offer::{ContactCard, PriceOfferCard};
 use crate::screens::request_errand::RequestErrandScreen;
@@ -224,6 +226,8 @@ pub fn RideEstimateScreen() -> Element {
     let mut is_responding_price = use_signal(|| false);
     let mut price_error = use_signal(|| None::<String>);
     let mut rejected_notice = use_signal(|| false);
+    // Ventana grande cuando el viaje empieza o termina.
+    let mut ride_popup = use_signal(|| None::<RideStatus>);
     let respond_api_client = api_client.clone();
     let respond_storage = storage.clone();
     let respond_to_price = use_callback(move |accept: bool| {
@@ -371,7 +375,28 @@ pub fn RideEstimateScreen() -> Element {
         return rsx! {
             div { class: "ride-estimate-screen",
                 h2 { "Tu motocarro" }
-                p { class: "ride-request-status", "{ride_status_label(ride.status)}" }
+                {
+                    let (tone, emoji, title, detail) = ride_banner(&ride);
+                    rsx! { StatusBanner { tone, emoji, title, detail } }
+                }
+                if let Some(status) = ride_popup() {
+                    BigNotice {
+                        tone: if status == RideStatus::Completed { Tone::Done } else { Tone::Go },
+                        emoji: if status == RideStatus::Completed { "🎉" } else { "🛺" },
+                        title: if status == RideStatus::Completed { "¡Llegaste! Viaje terminado" } else { "¡Tu viaje comenzó!" },
+                        detail: if status == RideStatus::Completed {
+                            ride.fare().map(|amount| format!("Valor del viaje: {}. ¡Gracias por viajar con MotoYa!", format_cop(amount)))
+                        } else {
+                            Some("Tu conductor ya te recogió. Buen viaje.".to_string())
+                        },
+                        button {
+                            r#type: "button",
+                            class: "big-notice-button",
+                            onclick: move |_| ride_popup.set(None),
+                            "Entendido"
+                        }
+                    }
+                }
                 if ride.awaiting_price_response() {
                     if let (Some(driver), Some(price)) = (&ride.driver, ride.agreed_price) {
                         PriceOfferCard {
@@ -426,6 +451,12 @@ pub fn RideEstimateScreen() -> Element {
                     RideTrackingPanel {
                         initial_ride: ride.clone(),
                         on_ride_updated: move |updated: Ride| {
+                            let before = requested_ride.peek().as_ref().map(|r| r.status);
+                            if before != Some(updated.status)
+                                && matches!(updated.status, RideStatus::InProgress | RideStatus::Completed)
+                            {
+                                ride_popup.set(Some(updated.status));
+                            }
                             requested_ride.set(Some(updated));
                         },
                     }
@@ -458,6 +489,7 @@ pub fn RideEstimateScreen() -> Element {
                             ride_error.set(None);
                             cancel_error.set(None);
                             rejected_notice.set(false);
+                            ride_popup.set(None);
                             origin.set(None);
                             destination_text.set(String::new());
                             passenger_count.set(1);
@@ -659,7 +691,12 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
                             }
                             let still_active = fetch.data.status.is_active();
                             if tracking.peek().ride != fetch.data {
-                                tracking.with_mut(|t| t.ride = fetch.data.clone());
+                                tracking.with_mut(|t| {
+                                    if let Some(location) = &fetch.data.driver_location {
+                                        t.driver_location = Some(location.coordinates());
+                                    }
+                                    t.ride = fetch.data.clone();
+                                });
                                 on_ride_updated.call(fetch.data);
                             }
                             if !still_active {
@@ -703,7 +740,12 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
                         session.update_token(refreshed.clone(), storage.as_ref());
                         current_token = refreshed;
                     }
-                    tracking.with_mut(|t| t.ride = fetch.data.clone());
+                    tracking.with_mut(|t| {
+                        if let Some(location) = &fetch.data.driver_location {
+                            t.driver_location = Some(location.coordinates());
+                        }
+                        t.ride = fetch.data.clone();
+                    });
                     on_ride_updated.call(fetch.data);
                 }
                 Err(GetRideError::SessionExpired) => {
@@ -811,6 +853,15 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
     // aceptacion del issue). Sin ubicacion todavia (viaje `requested`, o
     // recien `accepted` antes del primer `location.updated`), centra en el
     // origen.
+    // "Tu conductor llega en unos X min": distancia del conductor al punto
+    // de recogida mientras viene (sin Google, ver `eta_minutes`).
+    let arrival = match (current.ride.status, current.driver_location) {
+        (RideStatus::Accepted, Some(location)) if !current.ride.awaiting_price_response() => {
+            let km = distance_km(location, current.ride.origin);
+            Some((eta_minutes(km), distance_label(km)))
+        }
+        _ => None,
+    };
     let (center_lat, center_lng) = if let Some(location) = current.driver_location {
         markers.push(MapMarker {
             lat: location.latitude,
@@ -825,6 +876,14 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
 
     rsx! {
         div { class: "ride-tracking-panel",
+            if let Some((minutes, distance)) = arrival {
+                StatusBanner {
+                    tone: Tone::Go,
+                    emoji: "⏱️",
+                    title: format!("Llega en unos {minutes} min"),
+                    detail: format!("Tu conductor está a {distance}"),
+                }
+            }
             p { class: "ride-tracking-destination", "Destino: {destination_name}" }
             match status() {
                 RideRealtimeStatus::Connecting => rsx! {
@@ -861,17 +920,41 @@ fn cancellation_fee_message(fee_applies: Option<bool>) -> &'static str {
     }
 }
 
-/// Texto para el pasajero segun el estado del viaje recien solicitado
-/// (`Ride::status`). Justo despues de `POST /api/v1/rides` el viaje siempre
-/// nace `requested`; los demas casos son los que reporta `RideTrackingPanel`
-/// (issue #20) a medida que el viaje avanza.
-fn ride_status_label(status: RideStatus) -> &'static str {
-    match status {
-        RideStatus::Requested => "Esperando a que un conductor lo acepte.",
-        RideStatus::Accepted => "Un conductor acepto tu viaje.",
-        RideStatus::InProgress => "Tu viaje esta en curso.",
-        RideStatus::Completed => "Tu viaje ya se completo.",
-        RideStatus::Cancelled => "Este viaje fue cancelado.",
+/// Tarjeta grande con el estado del viaje para el pasajero.
+fn ride_banner(ride: &Ride) -> (Tone, &'static str, &'static str, Option<String>) {
+    match ride.status {
+        RideStatus::Requested => (
+            Tone::Wait,
+            "⏳",
+            "Buscando conductor...",
+            Some("Te avisamos apenas uno acepte.".to_string()),
+        ),
+        RideStatus::Accepted if ride.awaiting_price_response() => (
+            Tone::Wait,
+            "💬",
+            "Un conductor te ofrece un precio",
+            Some("Acéptalo o recházalo abajo.".to_string()),
+        ),
+        RideStatus::Accepted => (
+            Tone::Go,
+            "🛺",
+            "¡Tu conductor va en camino!",
+            Some("Espéralo en el punto de recogida.".to_string()),
+        ),
+        RideStatus::InProgress => (
+            Tone::Go,
+            "🚀",
+            "¡Tu viaje comenzó!",
+            Some("Vas en camino a tu destino.".to_string()),
+        ),
+        RideStatus::Completed => (
+            Tone::Done,
+            "🎉",
+            "¡Viaje terminado!",
+            ride.fare()
+                .map(|amount| format!("Valor: {}", format_cop(amount))),
+        ),
+        RideStatus::Cancelled => (Tone::Bad, "❌", "Este viaje fue cancelado", None),
     }
 }
 

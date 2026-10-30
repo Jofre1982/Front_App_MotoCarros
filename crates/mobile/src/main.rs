@@ -7,9 +7,7 @@ use moto_core::realtime::RealtimeConfig;
 use moto_core::storage::{FileTokenStorage, InMemoryTokenStorage, TokenStorage};
 use moto_ui::App;
 
-mod location;
-
-use location::NativeLocationProvider;
+use moto_ui::geolocation::WebViewLocationProvider;
 
 /// Fallback de desarrollo local. La URL real del backend se inyecta en build
 /// time via la variable de entorno `MOTOYA_API_BASE_URL` (nunca hardcodeada
@@ -43,11 +41,9 @@ fn main() {
             };
             Box::new(storage)
         })
-        // TODO(issue de seguimiento): reemplazar por un `LocationProvider`
-        // que use la API de ubicacion nativa cuando exista el puente
-        // Xcode/Gradle — ver `crates/mobile/src/location.rs`.
+        // GPS del celular a traves del WebView (ver `moto_ui::geolocation`).
         .with_context_provider(|| {
-            Box::new(Arc::new(NativeLocationProvider::new()) as Arc<dyn LocationProvider>)
+            Box::new(Arc::new(WebViewLocationProvider::new()) as Arc<dyn LocationProvider>)
         })
         .launch(App);
 }
