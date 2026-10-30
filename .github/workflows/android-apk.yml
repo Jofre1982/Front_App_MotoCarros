@@ -45,6 +45,9 @@ jobs:
     name: Compilar APK
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # `contents: write` solo para publicar la APK como Release (abajo).
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -192,3 +195,17 @@ jobs:
           name: MotoYa-apk
           path: MotoYa.apk
           retention-days: 30
+
+      # Link fijo para bajar la APK desde el celular, sin entrar a GitHub ni
+      # descomprimir un .zip (los Artifacts a veces fallan con "Egress is
+      # over the account limit"). Siempre reemplaza la anterior.
+      - name: Publicar APK (link fijo)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete apk-ultima --cleanup-tag --yes -R "$GITHUB_REPOSITORY" || true
+          gh release create apk-ultima MotoYa.apk -R "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "MotoYa APK (rama ${GITHUB_REF_NAME})" \
+            --notes "APK de prueba compilada de ${GITHUB_REF_NAME} (${GITHUB_SHA::7})."
