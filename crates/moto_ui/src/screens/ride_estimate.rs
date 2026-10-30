@@ -76,7 +76,8 @@ use moto_core::api::{
 };
 use moto_core::models::{
     Coordinates, PaymentStatus, Ride, RideCancellation, RideStatus, RideTracking, Role,
-    VehicleType, apply_ride_tracking_event, format_cop, latest_active_ride,
+    VehicleType, apply_ride_tracking_event, distance_km, distance_label, eta_minutes, format_cop,
+    latest_active_ride,
 };
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
@@ -690,7 +691,12 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
                             }
                             let still_active = fetch.data.status.is_active();
                             if tracking.peek().ride != fetch.data {
-                                tracking.with_mut(|t| t.ride = fetch.data.clone());
+                                tracking.with_mut(|t| {
+                                    if let Some(location) = &fetch.data.driver_location {
+                                        t.driver_location = Some(location.coordinates());
+                                    }
+                                    t.ride = fetch.data.clone();
+                                });
                                 on_ride_updated.call(fetch.data);
                             }
                             if !still_active {
@@ -734,7 +740,12 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
                         session.update_token(refreshed.clone(), storage.as_ref());
                         current_token = refreshed;
                     }
-                    tracking.with_mut(|t| t.ride = fetch.data.clone());
+                    tracking.with_mut(|t| {
+                        if let Some(location) = &fetch.data.driver_location {
+                            t.driver_location = Some(location.coordinates());
+                        }
+                        t.ride = fetch.data.clone();
+                    });
                     on_ride_updated.call(fetch.data);
                 }
                 Err(GetRideError::SessionExpired) => {
@@ -842,6 +853,15 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
     // aceptacion del issue). Sin ubicacion todavia (viaje `requested`, o
     // recien `accepted` antes del primer `location.updated`), centra en el
     // origen.
+    // "Tu conductor llega en unos X min": distancia del conductor al punto
+    // de recogida mientras viene (sin Google, ver `eta_minutes`).
+    let arrival = match (current.ride.status, current.driver_location) {
+        (RideStatus::Accepted, Some(location)) if !current.ride.awaiting_price_response() => {
+            let km = distance_km(location, current.ride.origin);
+            Some((eta_minutes(km), distance_label(km)))
+        }
+        _ => None,
+    };
     let (center_lat, center_lng) = if let Some(location) = current.driver_location {
         markers.push(MapMarker {
             lat: location.latitude,
@@ -856,6 +876,14 @@ fn RideTrackingPanel(props: RideTrackingPanelProps) -> Element {
 
     rsx! {
         div { class: "ride-tracking-panel",
+            if let Some((minutes, distance)) = arrival {
+                StatusBanner {
+                    tone: Tone::Go,
+                    emoji: "⏱️",
+                    title: format!("Llega en unos {minutes} min"),
+                    detail: format!("Tu conductor está a {distance}"),
+                }
+            }
             p { class: "ride-tracking-destination", "Destino: {destination_name}" }
             match status() {
                 RideRealtimeStatus::Connecting => rsx! {

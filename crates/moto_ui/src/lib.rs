@@ -11,6 +11,7 @@ pub mod big_notice;
 pub mod driver_alert;
 pub mod fields;
 pub mod file_picker;
+pub mod geolocation;
 pub mod map;
 pub mod price_offer;
 pub mod reoffer;

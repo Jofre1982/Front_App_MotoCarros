@@ -94,8 +94,8 @@ use moto_core::api::{
 };
 use moto_core::location::{LocationError, LocationProvider};
 use moto_core::models::{
-    NearbyRideRequest, Ride, RideStatus, Role, VehicleType, apply_nearby_ride_event, format_cop,
-    latest_active_ride,
+    Coordinates, NearbyRideRequest, Ride, RideStatus, Role, VehicleType, apply_nearby_ride_event,
+    distance_km, distance_label, eta_minutes, format_cop, latest_active_ride,
 };
 use moto_core::realtime::{
     ConnectionState, PollAction, RealtimeClient, RealtimeConfig, SubscribeFailureAction,
@@ -270,6 +270,8 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
     // `GET /rides/available`: desde ahi se muestra aunque el tiempo real no
     // conecte.
     let mut list_loaded = use_signal(|| false);
+    // Donde esta este conductor (GPS), para ordenar la lista por cercania.
+    let mut my_position = use_signal(|| None::<Coordinates>);
     // El viaje cuyo precio rechazo el pasajero: se muestra en una ventana
     // grande con la opcion de ofrecer otro precio.
     let mut rejected_ride = use_signal(|| None::<Ride>);
@@ -368,6 +370,7 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
     {
         let api_client = api_client.clone();
         let storage = storage.clone();
+        let location_provider = use_context::<Arc<dyn LocationProvider>>();
         use_effect(move || {
             if list_started() {
                 return;
@@ -378,8 +381,10 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
             list_started.set(true);
             let api_client = api_client.clone();
             let storage = storage.clone();
+            let location_provider = location_provider.clone();
 
             spawn(async move {
+                let mut round: u32 = 0;
                 let active = match api_client.ride_history(&token, Some(Role::Driver)).await {
                     Ok(fetch) => {
                         if let Some(refreshed) = fetch.refreshed_token {
@@ -393,6 +398,25 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                     accepted_ride.set(active);
                 }
                 loop {
+                    // Cada ~30 s: posicion del conductor para ordenar la lista
+                    // y, si esta recibiendo viajes, guardarla en el servidor
+                    // (asi le llega el aviso de los viajes cercanos).
+                    if accepted_ride().is_none()
+                        && round.is_multiple_of(4)
+                        && let Ok(point) = location_provider.current_position().await
+                    {
+                        my_position.set(Some(point));
+                        if session.ride_availability() == Some(true)
+                            && let Some(current) = session.token()
+                            && let Ok(fetch) = api_client
+                                .update_ride_availability(&current, true, Some(point))
+                                .await
+                            && let Some(refreshed) = fetch.refreshed_token
+                        {
+                            session.update_token(refreshed, storage.as_ref());
+                        }
+                    }
+                    round = round.wrapping_add(1);
                     if accepted_ride().is_none() {
                         let current = session.token().unwrap_or_else(|| token.clone());
                         match api_client.available_rides(&current).await {
@@ -520,6 +544,9 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
         });
     });
 
+    // Los mas cercanos primero, con su distancia (si hay GPS).
+    let sorted_requests = sort_by_distance(requests(), my_position());
+
     rsx! {
         div { class: "nearby-rides-screen",
             h2 { "Solicitudes cercanas" }
@@ -559,6 +586,9 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                             },
                         }
                     } else if ride.status == RideStatus::Accepted {
+                        // Camino a recoger: comparte la ubicacion para que el
+                        // pasajero vea "llega en X min" (backend #111).
+                        ShareLocationPanel { ride_id: ride.id }
                         StartRideButton {
                             ride_id: ride.id,
                             on_started: move |started: Ride| {
@@ -669,10 +699,11 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                     }
                 } else {
                     ul { class: "nearby-rides-list",
-                        for request in requests() {
+                        for (request, km) in sorted_requests.clone() {
                             NearbyRideRow {
                                 key: "{request.ride_id}",
                                 request: request.clone(),
+                                distance_km: km,
                                 on_accepted: move |ride: Ride| {
                                     let ride_id = ride.id;
                                     requests.with_mut(|list| list.retain(|r| r.ride_id != ride_id));
@@ -701,10 +732,11 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                             p { class: "nearby-rides-empty", "No hay solicitudes disponibles por el momento." }
                         } else {
                             ul { class: "nearby-rides-list",
-                                for request in requests() {
+                                for (request, km) in sorted_requests.clone() {
                                     NearbyRideRow {
                                         key: "{request.ride_id}",
                                         request: request.clone(),
+                                        distance_km: km,
                                         on_accepted: move |ride: Ride| {
                                             let ride_id = ride.id;
                                             requests.with_mut(|list| list.retain(|r| r.ride_id != ride_id));
@@ -727,6 +759,9 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
 #[derive(Props, Clone, PartialEq)]
 struct NearbyRideRowProps {
     request: NearbyRideRequest,
+    /// Distancia desde el conductor (si se conoce su GPS).
+    #[props(default)]
+    distance_km: Option<f64>,
     on_accepted: EventHandler<Ride>,
     on_unavailable: EventHandler<u64>,
 }
@@ -809,6 +844,11 @@ fn NearbyRideRow(props: NearbyRideRowProps) -> Element {
             PickupLocation { lat: props.request.origin.latitude, lng: props.request.origin.longitude }
             p { "Destino: {props.request.destination_label()}" }
             p { "Pasajeros: {props.request.passenger_count}" }
+            if let Some(km) = props.distance_km {
+                p { class: "nearby-ride-distance",
+                    "📍 A {distance_label(km)} de ti · unos {eta_minutes(km)} min"
+                }
+            }
             if is_pickup_only {
                 label { r#for: "ride-{ride_id}-price", "Precio a acordar ({props.request.currency})" }
                 input {
@@ -1153,7 +1193,6 @@ fn ShareLocationPanel(props: ShareLocationPanelProps) -> Element {
 
     rsx! {
         div { class: "share-location-panel",
-            p { "Viaje en curso." }
             match status() {
                 SharingStatus::Sharing => rsx! {
                     p { class: "share-location-status", "Compartiendo tu ubicacion..." }
@@ -1258,5 +1297,64 @@ fn driver_ride_banner(ride: &Ride) -> (Tone, &'static str, &'static str, Option<
                 .map(|amount| format!("Cobrado: {}", format_cop(amount))),
         ),
         RideStatus::Cancelled => (Tone::Bad, "❌", "El viaje fue cancelado", None),
+    }
+}
+
+/// Ordena las solicitudes por distancia al conductor y le pega la
+/// distancia a cada una; sin posicion, deja el orden del servidor.
+fn sort_by_distance(
+    requests: Vec<NearbyRideRequest>,
+    position: Option<Coordinates>,
+) -> Vec<(NearbyRideRequest, Option<f64>)> {
+    let mut with_distance: Vec<(NearbyRideRequest, Option<f64>)> = requests
+        .into_iter()
+        .map(|request| {
+            let km = position.map(|point| distance_km(point, request.origin));
+            (request, km)
+        })
+        .collect();
+    if position.is_some() {
+        with_distance.sort_by(|a, b| a.1.unwrap_or(f64::MAX).total_cmp(&b.1.unwrap_or(f64::MAX)));
+    }
+    with_distance
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moto_core::models::RideMode;
+
+    fn request(id: u64, latitude: f64) -> NearbyRideRequest {
+        NearbyRideRequest {
+            ride_id: id,
+            mode: RideMode::default(),
+            origin: Coordinates {
+                latitude,
+                longitude: -67.92,
+            },
+            destination: None,
+            destination_text: None,
+            passenger_count: 1,
+            currency: "COP".to_string(),
+            estimated_fare: None,
+        }
+    }
+
+    #[test]
+    fn the_nearest_ride_goes_first() {
+        let me = Coordinates {
+            latitude: 3.86,
+            longitude: -67.92,
+        };
+        let sorted = sort_by_distance(vec![request(1, 3.90), request(2, 3.861)], Some(me));
+        assert_eq!(sorted[0].0.ride_id, 2);
+        assert!(sorted[0].1.unwrap() < sorted[1].1.unwrap());
+    }
+
+    #[test]
+    fn without_gps_keeps_the_server_order() {
+        let sorted = sort_by_distance(vec![request(1, 3.90), request(2, 3.861)], None);
+        assert_eq!(sorted[0].0.ride_id, 1);
+        assert_eq!(sorted[0].1, None);
     }
 }

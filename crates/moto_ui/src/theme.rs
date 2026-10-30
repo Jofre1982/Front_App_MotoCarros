@@ -788,4 +788,5 @@ button.confirm-cancel-yes { background: var(--color-error); }
 .reoffer-box .big-notice-button { margin-top: 6px; }
 .reoffer-error { color: var(--color-error); font-size: 1.15rem; font-weight: 700; }
 .reoffer-details { background: #fff; color: var(--color-text); border-radius: 14px; padding: 12px; text-align: left; font-size: 1.15rem; }
+.nearby-ride-distance { font-size: 1.15rem; font-weight: 800; color: var(--color-primary-dark); }
 "#;
