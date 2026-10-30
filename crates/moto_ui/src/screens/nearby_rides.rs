@@ -108,6 +108,7 @@ use super::register_vehicle::RegisterVehicleScreen;
 use crate::big_notice::{BigNotice, StatusBanner, Tone};
 use crate::map::PickupLocation;
 use crate::price_offer::ContactCard;
+use crate::reoffer::{ReofferBox, ReofferTarget, Reoffered};
 
 /// Intervalo entre sondeos de `RealtimeClient::poll_events` — no hay forma de
 /// que el transporte avise por si solo cuando llega un frame nuevo (ver
@@ -622,20 +623,22 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                             Some(price) => format!("Ofreciste {}. Puedes ofrecer otro precio:", format_cop(price)),
                             None => "Puedes ofrecer otro precio:".to_string(),
                         },
-                        ul { class: "nearby-rides-list big-notice-reoffer",
-                            NearbyRideRow {
-                                request: NearbyRideRequest::from(&ride),
-                                on_accepted: move |offered: Ride| {
+                        ReofferBox {
+                            target: ReofferTarget::Ride(ride.id),
+                            previous: ride.agreed_price,
+                            on_sent: move |sent: Reoffered| {
+                                if let Reoffered::Ride(offered) = sent {
                                     let offered_id = offered.id;
                                     requests.with_mut(|list| list.retain(|r| r.ride_id != offered_id));
-                                    rejected_ride.set(None);
                                     accepted_ride.set(Some(offered));
-                                },
-                                on_unavailable: move |ride_id: u64| {
-                                    requests.with_mut(|list| list.retain(|r| r.ride_id != ride_id));
-                                    rejected_ride.set(None);
-                                },
-                            }
+                                }
+                                rejected_ride.set(None);
+                            },
+                            on_unavailable: move |_| {
+                                let gone = rejected_ride.peek().as_ref().map(|r| r.id);
+                                requests.with_mut(|list| list.retain(|r| Some(r.ride_id) != gone));
+                                rejected_ride.set(None);
+                            },
                         }
                         button {
                             r#type: "button",

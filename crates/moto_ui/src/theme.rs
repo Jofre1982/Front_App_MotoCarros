@@ -729,7 +729,7 @@ button.confirm-cancel-yes { background: var(--color-error); }
 .status-banner p { margin: 0; }
 .status-banner-emoji { font-size: 2.6rem; line-height: 1; }
 .status-banner-title { font-size: 1.25rem; font-weight: 800; }
-.status-banner-detail { font-size: 0.98rem; margin-top: 4px !important; opacity: 0.9; }
+.status-banner-detail { font-size: 1.15rem; font-weight: 600; margin-top: 4px !important; }
 .tone-wait { background: #fff4d6; color: #7a5200; border-color: #f5b300; }
 .tone-go { background: #e3efff; color: #0b3d91; border-color: #2f7bf5; }
 .tone-done { background: #e2f8e9; color: #0d6b32; border-color: #22b35e; }
@@ -759,7 +759,7 @@ button.confirm-cancel-yes { background: var(--color-error); }
 }
 .big-notice-emoji { font-size: 4.5rem; line-height: 1; margin-bottom: 10px; animation: notice-bounce 1s ease 0.35s 2; }
 .big-notice-title { font-size: 1.6rem; font-weight: 900; margin: 0 0 8px; }
-.big-notice-detail { font-size: 1.05rem; margin: 0 0 14px; }
+.big-notice-detail { font-size: 1.35rem; font-weight: 700; margin: 0 0 16px; }
 .big-notice-actions { display: flex; flex-direction: column; gap: 10px; text-align: left; }
 .big-notice-button { width: 100%; font-size: 1.15rem; padding: 14px; font-weight: 800; }
 .big-notice-button-secondary { background: #ffffff; color: #333; border: 2px solid #ccc; }
@@ -768,4 +768,35 @@ button.confirm-cancel-yes { background: var(--color-error); }
 @keyframes notice-pop { from { transform: scale(0.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 @keyframes notice-bounce { 0%, 100% { transform: translateY(0); } 40% { transform: translateY(-14px); } }
 @keyframes notice-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+.reoffer-box {
+    background: #ffffff;
+    color: var(--color-text);
+    border: 3px solid #e04848;
+    border-radius: 18px;
+    padding: 16px;
+    text-align: center;
+}
+.reoffer-label { display: block; font-size: 1.4rem; font-weight: 800; margin-bottom: 10px; }
+.reoffer-row { display: flex; align-items: center; gap: 8px; }
+.reoffer-input {
+    flex: 1;
+    min-width: 0;
+    font-size: 1.8rem !important;
+    font-weight: 800;
+    text-align: center;
+    padding: 10px 6px !important;
+}
+.reoffer-step {
+    flex: none;
+    width: 58px;
+    height: 58px;
+    margin: 0;
+    font-size: 2rem;
+    font-weight: 900;
+    padding: 0;
+    border-radius: 14px;
+}
+.reoffer-preview { font-size: 1.5rem; font-weight: 800; margin: 10px 0; color: var(--color-primary-dark); }
+.reoffer-box .big-notice-button { margin-top: 6px; }
+.reoffer-error { color: var(--color-error); font-size: 1.15rem; font-weight: 700; }
 "#;

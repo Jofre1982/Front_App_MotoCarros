@@ -63,6 +63,7 @@ use moto_core::storage::TokenStorage;
 use crate::big_notice::{BigNotice, Tone};
 use crate::map::PickupLocation;
 use crate::price_offer::{ConfirmCancelButton, ContactCard};
+use crate::reoffer::{ReofferBox, ReofferTarget, Reoffered};
 
 /// Intervalo entre sondeos de `GET /api/v1/errands`. Antes eran 700 ms
 /// (copiado del loop del socket de tiempo real), que en un celular con
@@ -197,22 +198,24 @@ pub fn NearbyErrandsScreen() -> Element {
                         Some(price) => format!("Ofreciste {}. Puedes ofrecer otro precio:", format_cop(price)),
                         None => "Puedes ofrecer otro precio:".to_string(),
                     },
-                    ul { class: "nearby-errands-list big-notice-reoffer",
-                        NearbyErrandRow {
-                            errand: Errand { agreed_price: None, driver: None, ..rejected.clone() },
-                            on_accepted: move |accepted: Errand| {
+                    ReofferBox {
+                        target: ReofferTarget::Errand(rejected.id),
+                        previous: rejected.agreed_price,
+                        on_sent: move |sent: Reoffered| {
+                            if let Reoffered::Errand(accepted) = sent {
                                 let accepted_id = accepted.id;
                                 errands.with_mut(|list| list.retain(|e| e.id != accepted_id));
                                 accepted_errands.with_mut(|list| list.push(accepted));
-                                rejected_errand.set(None);
-                            },
-                            on_unavailable: move |errand_id: u64| {
-                                errands.with_mut(|list| list.retain(|e| e.id != errand_id));
-                                rejected_errand.set(None);
-                                unavailable_notice
-                                    .set(Some("Este mandado ya no esta disponible.".to_string()));
-                            },
-                        }
+                            }
+                            rejected_errand.set(None);
+                        },
+                        on_unavailable: move |_| {
+                            let gone = rejected_errand.peek().as_ref().map(|e| e.id);
+                            errands.with_mut(|list| list.retain(|e| Some(e.id) != gone));
+                            rejected_errand.set(None);
+                            unavailable_notice
+                                .set(Some("Este mandado ya no esta disponible: otro conductor lo tomo.".to_string()));
+                        },
                     }
                     button {
                         r#type: "button",

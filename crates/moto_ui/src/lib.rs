@@ -13,6 +13,7 @@ pub mod fields;
 pub mod file_picker;
 pub mod map;
 pub mod price_offer;
+pub mod reoffer;
 pub mod screens;
 mod theme;
 
