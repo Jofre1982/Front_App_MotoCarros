@@ -8,7 +8,7 @@
 use dioxus::prelude::*;
 use moto_core::models::{VehicleType, format_cop};
 
-use crate::avatar::Avatar;
+use crate::avatar::{Avatar, VehiclePhoto};
 
 fn vehicle_label(vehicle_type: VehicleType) -> &'static str {
     match vehicle_type {
@@ -48,6 +48,9 @@ pub fn PriceOfferCard(props: PriceOfferCardProps) -> Element {
                         }
                     }
                 }
+            }
+            if let Some(vehicle) = &props.vehicle {
+                VehiclePhoto { url: vehicle.photo_url.clone() }
             }
             p { class: "price-offer-amount", "{format_cop(props.price)}" }
             p { class: "price-offer-hint",
@@ -108,6 +111,9 @@ pub fn ContactCard(props: ContactCardProps) -> Element {
                         }
                     }
                 }
+            }
+            if let Some(vehicle) = &props.vehicle {
+                VehiclePhoto { url: vehicle.photo_url.clone() }
             }
             a {
                 class: "contact-card-whatsapp",

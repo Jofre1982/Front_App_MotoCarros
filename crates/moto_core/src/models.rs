@@ -618,6 +618,9 @@ pub struct DriverVehicle {
     pub plate: String,
     #[serde(rename = "type")]
     pub vehicle_type: VehicleType,
+    /// Foto del vehiculo aprobada (backend #112), protegida por token.
+    #[serde(default)]
+    pub photo_url: Option<String>,
 }
 
 /// Ciclo de vida de un mandado
