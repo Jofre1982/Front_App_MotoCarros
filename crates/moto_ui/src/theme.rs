@@ -789,4 +789,7 @@ button.confirm-cancel-yes { background: var(--color-error); }
 .reoffer-error { color: var(--color-error); font-size: 1.15rem; font-weight: 700; }
 .reoffer-details { background: #fff; color: var(--color-text); border-radius: 14px; padding: 12px; text-align: left; font-size: 1.15rem; }
 .nearby-ride-distance { font-size: 1.15rem; font-weight: 800; color: var(--color-primary-dark); }
+.vehicle-photo { margin: 10px 0; text-align: center; }
+.vehicle-photo img { width: 100%; max-height: 220px; object-fit: cover; border-radius: 14px; border: 2px solid var(--color-border); }
+.vehicle-photo figcaption { font-size: 1.05rem; font-weight: 700; margin-top: 4px; }
 "#;
