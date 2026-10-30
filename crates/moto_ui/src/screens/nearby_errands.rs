@@ -60,6 +60,7 @@ use moto_core::models::{Errand, ErrandStatus, Role, format_cop};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+use crate::big_notice::{BigNotice, Tone};
 use crate::map::PickupLocation;
 use crate::price_offer::{ConfirmCancelButton, ContactCard};
 
@@ -85,6 +86,8 @@ pub fn NearbyErrandsScreen() -> Element {
     // pero a diferencia de esa pantalla el criterio de aceptacion de esta
     // historia pide un mensaje explicito, no solo que la fila se esfume.
     let mut unavailable_notice = use_signal(|| None::<String>);
+    // Mandado cuyo precio rechazo el pasajero: ventana con "ofrecer otro".
+    let mut rejected_errand = use_signal(|| None::<Errand>);
     // Mismo criterio que los loops de sondeo de `NearbyRidesList`: evita
     // levantar un segundo loop si el efecto se vuelve a disparar. Dioxus
     // cancela la tarea al desmontar el componente (`Home`, al cambiar de
@@ -152,6 +155,9 @@ pub fn NearbyErrandsScreen() -> Element {
                     if let Some(message) = outcome.notice {
                         unavailable_notice.set(Some(message.to_string()));
                     }
+                    if let Some(errand) = outcome.rejected {
+                        rejected_errand.set(Some(errand));
+                    }
                 }
 
                 match api_client.list_errands(&current_token).await {
@@ -182,6 +188,40 @@ pub fn NearbyErrandsScreen() -> Element {
     rsx! {
         div { class: "nearby-errands-screen",
             h2 { "Mandados cercanos" }
+            if let Some(rejected) = rejected_errand() {
+                BigNotice {
+                    tone: Tone::Bad,
+                    emoji: "😕",
+                    title: "El pasajero no aceptó tu precio",
+                    detail: match rejected.agreed_price {
+                        Some(price) => format!("Ofreciste {}. Puedes ofrecer otro precio:", format_cop(price)),
+                        None => "Puedes ofrecer otro precio:".to_string(),
+                    },
+                    ul { class: "nearby-errands-list big-notice-reoffer",
+                        NearbyErrandRow {
+                            errand: Errand { agreed_price: None, driver: None, ..rejected.clone() },
+                            on_accepted: move |accepted: Errand| {
+                                let accepted_id = accepted.id;
+                                errands.with_mut(|list| list.retain(|e| e.id != accepted_id));
+                                accepted_errands.with_mut(|list| list.push(accepted));
+                                rejected_errand.set(None);
+                            },
+                            on_unavailable: move |errand_id: u64| {
+                                errands.with_mut(|list| list.retain(|e| e.id != errand_id));
+                                rejected_errand.set(None);
+                                unavailable_notice
+                                    .set(Some("Este mandado ya no esta disponible.".to_string()));
+                            },
+                        }
+                    }
+                    button {
+                        r#type: "button",
+                        class: "big-notice-button big-notice-button-secondary",
+                        onclick: move |_| rejected_errand.set(None),
+                        "No, buscar otro mandado"
+                    }
+                }
+            }
             if let Some(message) = unavailable_notice() {
                 p { class: "nearby-errands-unavailable-notice", role: "alert",
                     "{message}"
@@ -436,6 +476,8 @@ fn NearbyErrandRow(props: NearbyErrandRowProps) -> Element {
 struct Reconciled {
     kept: Vec<Errand>,
     notice: Option<&'static str>,
+    /// El mandado cuyo precio rechazo el pasajero, para ofrecer otro.
+    rejected: Option<Errand>,
 }
 
 /// Se quedan los que siguen siendo del conductor (actualizados); salen los
@@ -444,6 +486,7 @@ struct Reconciled {
 fn reconcile_accepted(local: &[Errand], server: &[Errand]) -> Reconciled {
     let mut kept = Vec::new();
     let mut notice = None;
+    let mut rejected = None;
     for errand in local {
         match server.iter().find(|fresh| fresh.id == errand.id) {
             Some(fresh) if fresh.status == ErrandStatus::Cancelled => {
@@ -451,12 +494,16 @@ fn reconcile_accepted(local: &[Errand], server: &[Errand]) -> Reconciled {
             }
             Some(fresh) => kept.push(fresh.clone()),
             None if errand.status == ErrandStatus::Accepted => {
-                notice = Some("El pasajero no acepto tu precio. El mandado volvio a la lista.");
+                rejected = Some(errand.clone());
             }
             None => kept.push(errand.clone()),
         }
     }
-    Reconciled { kept, notice }
+    Reconciled {
+        kept,
+        notice,
+        rejected,
+    }
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -644,7 +691,7 @@ mod reconcile_tests {
     fn drops_an_errand_whose_price_was_rejected() {
         let out = reconcile_accepted(&[errand(1, ErrandStatus::Accepted)], &[]);
         assert!(out.kept.is_empty());
-        assert!(out.notice.unwrap().contains("no acepto tu precio"));
+        assert_eq!(out.rejected.map(|e| e.id), Some(1));
     }
 
     #[test]

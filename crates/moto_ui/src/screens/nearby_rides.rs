@@ -105,6 +105,7 @@ use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
 use super::register_vehicle::RegisterVehicleScreen;
+use crate::big_notice::{BigNotice, StatusBanner, Tone};
 use crate::map::PickupLocation;
 use crate::price_offer::ContactCard;
 
@@ -268,8 +269,11 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
     // `GET /rides/available`: desde ahi se muestra aunque el tiempo real no
     // conecte.
     let mut list_loaded = use_signal(|| false);
-    // Aviso cuando el pasajero rechaza el precio que propuso este conductor.
-    let mut rejected_notice = use_signal(|| false);
+    // El viaje cuyo precio rechazo el pasajero: se muestra en una ventana
+    // grande con la opcion de ofrecer otro precio.
+    let mut rejected_ride = use_signal(|| None::<Ride>);
+    // Ventana "¡El pasajero acepto tu precio!".
+    let mut price_accepted_popup = use_signal(|| false);
     // Aviso cuando el pasajero cancela un viaje que este conductor ya tenia.
     let mut cancelled_notice = use_signal(|| false);
     let mut offer_watch_started = use_signal(|| false);
@@ -319,17 +323,29 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                                 accepted_ride.set(None);
                                 cancelled_notice.set(true);
                             } else if still_mine {
+                                let was_waiting = accepted_ride
+                                    .peek()
+                                    .as_ref()
+                                    .is_some_and(Ride::awaiting_price_response);
+                                if was_waiting
+                                    && !fetch.data.awaiting_price_response()
+                                    && fetch.data.status == RideStatus::Accepted
+                                {
+                                    price_accepted_popup.set(true);
+                                }
                                 if accepted_ride.peek().as_ref() != Some(&fetch.data) {
                                     accepted_ride.set(Some(fetch.data));
                                 }
                             } else {
+                                let previous = accepted_ride.peek().clone();
                                 accepted_ride.set(None);
-                                rejected_notice.set(true);
+                                rejected_ride.set(previous);
                             }
                         }
                         Err(GetRideError::Forbidden | GetRideError::NotFound) => {
+                            let previous = accepted_ride.peek().clone();
                             accepted_ride.set(None);
-                            rejected_notice.set(true);
+                            rejected_ride.set(previous);
                         }
                         Err(GetRideError::SessionExpired) => {
                             session.logout(storage.as_ref());
@@ -508,7 +524,24 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
             h2 { "Solicitudes cercanas" }
             if let Some(ride) = accepted_ride() {
                 div { class: "nearby-ride-accepted",
-                    p { "Aceptaste el viaje." }
+                    {
+                        let (tone, emoji, title, detail) = driver_ride_banner(&ride);
+                        rsx! { StatusBanner { tone, emoji, title, detail } }
+                    }
+                    if price_accepted_popup() {
+                        BigNotice {
+                            tone: Tone::Done,
+                            emoji: "✅",
+                            title: "¡El pasajero aceptó tu precio!",
+                            detail: ride.agreed_price.map(|price| format!("Precio acordado: {}. Ve a recogerlo.", format_cop(price))),
+                            button {
+                                r#type: "button",
+                                class: "big-notice-button",
+                                onclick: move |_| price_accepted_popup.set(false),
+                                "¡Voy en camino!"
+                            }
+                        }
+                    }
                     if ride.status == RideStatus::Accepted {
                         PickupLocation { lat: ride.origin.latitude, lng: ride.origin.longitude }
                     }
@@ -518,10 +551,6 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                     }
                     p { "{ride.price_label()}" }
                     if ride.awaiting_price_response() {
-                        p { class: "upload-status", role: "status",
-                            span { class: "upload-spinner" }
-                            "Esperando que el pasajero acepte tu precio..."
-                        }
                         CancelAcceptedRideButton {
                             ride_id: ride.id,
                             on_cancelled: move |_| {
@@ -529,11 +558,6 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                             },
                         }
                     } else if ride.status == RideStatus::Accepted {
-                        if ride.is_pickup_only() {
-                            p { class: "upload-status upload-status-done", role: "status",
-                                "✓ El pasajero acepto el precio. Ve a recogerlo."
-                            }
-                        }
                         StartRideButton {
                             ride_id: ride.id,
                             on_started: move |started: Ride| {
@@ -556,10 +580,6 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                         }
                     } else if ride.status == RideStatus::Completed {
                         div { class: "nearby-ride-completed",
-                            p { "Viaje completado." }
-                            if let Some(final_fare) = ride.final_fare {
-                                p { "Cobrado: {format_cop(final_fare)}" }
-                            }
                             if let Some(payment) = &ride.payment {
                                 p {
                                     "Pago: "
@@ -593,14 +613,35 @@ fn NearbyRidesList(props: NearbyRidesListProps) -> Element {
                         }
                     }
                 }
-                if rejected_notice() {
-                    p { class: "nearby-rides-error", role: "alert",
-                        "El pasajero no acepto tu precio. El viaje volvio a la lista."
+                if let Some(ride) = rejected_ride() {
+                    BigNotice {
+                        tone: Tone::Bad,
+                        emoji: "😕",
+                        title: "El pasajero no aceptó tu precio",
+                        detail: match ride.agreed_price {
+                            Some(price) => format!("Ofreciste {}. Puedes ofrecer otro precio:", format_cop(price)),
+                            None => "Puedes ofrecer otro precio:".to_string(),
+                        },
+                        ul { class: "nearby-rides-list big-notice-reoffer",
+                            NearbyRideRow {
+                                request: NearbyRideRequest::from(&ride),
+                                on_accepted: move |offered: Ride| {
+                                    let offered_id = offered.id;
+                                    requests.with_mut(|list| list.retain(|r| r.ride_id != offered_id));
+                                    rejected_ride.set(None);
+                                    accepted_ride.set(Some(offered));
+                                },
+                                on_unavailable: move |ride_id: u64| {
+                                    requests.with_mut(|list| list.retain(|r| r.ride_id != ride_id));
+                                    rejected_ride.set(None);
+                                },
+                            }
+                        }
                         button {
                             r#type: "button",
-                            class: "nearby-rides-dismiss-link",
-                            onclick: move |_| rejected_notice.set(false),
-                            "Entendido"
+                            class: "big-notice-button big-notice-button-secondary",
+                            onclick: move |_| rejected_ride.set(None),
+                            "No, buscar otro viaje"
                         }
                     }
                 }
@@ -1173,5 +1214,39 @@ fn TurnOnRidesPrompt() -> Element {
                 p { class: "price-offer-error", role: "alert", "{message}" }
             }
         }
+    }
+}
+
+/// Tarjeta grande con el estado del viaje para el conductor.
+fn driver_ride_banner(ride: &Ride) -> (Tone, &'static str, &'static str, Option<String>) {
+    match ride.status {
+        RideStatus::Accepted if ride.awaiting_price_response() => (
+            Tone::Wait,
+            "⏳",
+            "Esperando que el pasajero acepte tu precio",
+            ride.agreed_price
+                .map(|price| format!("Ofreciste {}", format_cop(price))),
+        ),
+        RideStatus::Accepted | RideStatus::Requested => (
+            Tone::Go,
+            "🛺",
+            "¡Ve a recoger al pasajero!",
+            Some("Cuando lo recojas, toca \"Iniciar viaje\".".to_string()),
+        ),
+        RideStatus::InProgress => (
+            Tone::Go,
+            "🚀",
+            "Viaje en curso",
+            Some("Al llegar al destino, toca \"Completar viaje\".".to_string()),
+        ),
+        RideStatus::Completed => (
+            Tone::Done,
+            "🎉",
+            "¡Viaje terminado!",
+            ride.final_fare
+                .or(ride.fare())
+                .map(|amount| format!("Cobrado: {}", format_cop(amount))),
+        ),
+        RideStatus::Cancelled => (Tone::Bad, "❌", "El viaje fue cancelado", None),
     }
 }

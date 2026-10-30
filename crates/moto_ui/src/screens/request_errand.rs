@@ -22,6 +22,7 @@ use moto_core::models::{
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+use crate::big_notice::{BigNotice, StatusBanner, Tone};
 use crate::file_picker::{PhotoPicker, PickedFile};
 use crate::map::{MapMarker, MapView};
 use crate::price_offer::{ConfirmCancelButton, ContactCard, PriceOfferCard};
@@ -92,6 +93,8 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
     let mut is_submitting = use_signal(|| false);
     let mut submit_error = use_signal(|| None::<CreateErrandError>);
     let mut created_errand = use_signal(|| None::<Errand>);
+    // Ventana grande cuando el conductor completa el pedido.
+    let mut completed_popup = use_signal(|| false);
     let mut tracking_started = use_signal(|| false);
 
     // Seguimiento del pedido (backend #106, `GET /me/errands`): al abrir la
@@ -134,6 +137,13 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
                                 if let Some(errand) = found
                                     .filter(|errand| created_errand.peek().as_ref() != Some(errand))
                                 {
+                                    let before = created_errand.peek().as_ref().map(|e| e.status);
+                                    if before.is_some()
+                                        && before != Some(errand.status)
+                                        && errand.status == ErrandStatus::Completed
+                                    {
+                                        completed_popup.set(true);
+                                    }
                                     created_errand.set(Some(errand));
                                 }
                             }
@@ -303,7 +313,24 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
                             "✓ {copy.created_title}"
                         }
                     }
-                    p { class: "request-errand-status", "{errand_status_label(errand.status)}" }
+                    {
+                        let (tone, emoji, title) = errand_banner(&errand);
+                        rsx! { StatusBanner { tone, emoji, title } }
+                    }
+                    if completed_popup() {
+                        BigNotice {
+                            tone: Tone::Done,
+                            emoji: "🎉",
+                            title: if errand.is_motocarga() { "¡Tu motocarga llegó!" } else { "¡Tu mandado está listo!" },
+                            detail: errand.agreed_price.map(|price| format!("Valor: {}. ¡Gracias por usar MotoYa!", format_cop(price))),
+                            button {
+                                r#type: "button",
+                                class: "big-notice-button",
+                                onclick: move |_| completed_popup.set(false),
+                                "Entendido"
+                            }
+                        }
+                    }
                     if let Some(driver) = &errand.driver {
                         p { class: "request-errand-done-detail", "Conductor: {driver.name}" }
                     }
@@ -512,6 +539,20 @@ fn open_errand_of_kind(errands: Vec<Errand>, vehicle_type: VehicleType) -> Optio
 /// Texto del estado de un pedido recien creado (`Errand::status`). Justo
 /// despues de `POST /api/v1/errands` siempre nace `requested`; los demas
 /// valores se cubren igual porque el tipo los admite.
+/// Tarjeta grande con el estado del mandado o motocarga para el pasajero.
+fn errand_banner(errand: &Errand) -> (Tone, &'static str, &'static str) {
+    match errand.status {
+        ErrandStatus::Requested => (Tone::Wait, "⏳", "Buscando conductor..."),
+        ErrandStatus::Accepted if errand.awaiting_price_response() => {
+            (Tone::Wait, "💬", "Un conductor te ofrece un precio")
+        }
+        ErrandStatus::Accepted => (Tone::Go, "🛺", "¡Un conductor va con tu pedido!"),
+        ErrandStatus::Completed => (Tone::Done, "🎉", "¡Pedido completado!"),
+        ErrandStatus::Cancelled => (Tone::Bad, "❌", "Pedido cancelado"),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn errand_status_label(status: ErrandStatus) -> &'static str {
     match status {
         ErrandStatus::Requested => "Esperando a que un conductor lo acepte.",
