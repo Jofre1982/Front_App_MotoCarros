@@ -2620,6 +2620,23 @@ impl ApiClient {
         }
     }
 
+    /// `POST /api/v1/me/device-token` (historia #67): registra el token push
+    /// de este celular para que el servidor le mande notificaciones (backend
+    /// #113). Volver a mandarlo es inofensivo.
+    pub async fn register_device_token(
+        &self,
+        token: &AuthToken,
+        device_token: &str,
+        platform: &str,
+    ) -> Result<AuthenticatedFetch<serde_json::Value>, ServiceActionError> {
+        self.post_service_action(
+            "/api/v1/me/device-token",
+            token,
+            &serde_json::json!({ "token": device_token, "platform": platform }),
+        )
+        .await
+    }
+
     /// `POST /api/v1/me/avatar` (backend #109): sube o reemplaza la foto de
     /// perfil. Devuelve la cuenta con `avatar_url`/`avatar_status` nuevos.
     pub async fn upload_avatar(
@@ -6761,6 +6778,28 @@ mod tests {
 
         assert!(!fetch.data.is_available);
         assert!(fetch.data.is_available_for_errands);
+    }
+
+    #[tokio::test]
+    async fn register_device_token_posts_the_token_and_platform() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/device-token"))
+            .and(body_json(
+                serde_json::json!({ "token": "fcm-1", "platform": "android" }),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "id": 3, "platform": "android" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        ApiClient::new(server.uri())
+            .register_device_token(&sample_token(), "fcm-1", "android")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
