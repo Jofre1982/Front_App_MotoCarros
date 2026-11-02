@@ -30,15 +30,16 @@ pub struct AvatarProps {
     pub size: u32,
 }
 
-#[component]
-pub fn Avatar(props: AvatarProps) -> Element {
+/// Descarga una imagen protegida por token y la devuelve como `data:` URL
+/// (`None` mientras carga, si no hay o si falla). La usan la foto de perfil
+/// y la del vehiculo.
+pub fn use_protected_image(url: Option<String>) -> Signal<Option<String>> {
     let api_client = use_context::<ApiClient>();
     let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context::<SessionState>();
     let mut image = use_signal(|| None::<String>);
     let mut loaded_url = use_signal(|| None::<String>);
 
-    let url = props.url.clone();
     use_effect(use_reactive!(|url| {
         if *loaded_url.peek() == url {
             return;
@@ -63,6 +64,12 @@ pub fn Avatar(props: AvatarProps) -> Element {
             }
         });
     }));
+    image
+}
+
+#[component]
+pub fn Avatar(props: AvatarProps) -> Element {
+    let image = use_protected_image(props.url.clone());
 
     let style = format!(
         "width: {0}px; height: {0}px; font-size: {1}px;",
@@ -74,6 +81,26 @@ pub fn Avatar(props: AvatarProps) -> Element {
             img { class: "avatar", style: "{style}", src: "{src}", alt: "Foto de {props.name}" }
         } else {
             div { class: "avatar avatar-initials", style: "{style}", "{initials(&props.name)}" }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+pub struct VehiclePhotoProps {
+    pub url: Option<String>,
+}
+
+/// Foto del vehiculo del conductor (backend #112), ancha, para reconocer el
+/// motocarro por su color. Sin foto aprobada no muestra nada.
+#[component]
+pub fn VehiclePhoto(props: VehiclePhotoProps) -> Element {
+    let image = use_protected_image(props.url.clone());
+    rsx! {
+        if let Some(src) = image() {
+            figure { class: "vehicle-photo",
+                img { src: "{src}", alt: "Foto del vehiculo" }
+                figcaption { "🛺 Así es su vehículo" }
+            }
         }
     }
 }

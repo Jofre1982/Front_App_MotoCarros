@@ -3,6 +3,7 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 use moto_core::api::ApiClient;
 use moto_core::location::LocationProvider;
+use moto_core::push::{FilePushTokenSource, PushTokenSource};
 use moto_core::realtime::RealtimeConfig;
 use moto_core::storage::{FileTokenStorage, InMemoryTokenStorage, TokenStorage};
 use moto_ui::App;
@@ -40,6 +41,14 @@ fn main() {
                 None => Arc::new(InMemoryTokenStorage::new()),
             };
             Box::new(storage)
+        })
+        // Token push de Firebase: lo escribe el codigo nativo de Android
+        // (`MotoYaPush.kt`) junto al archivo de sesion.
+        .with_context_provider(|| {
+            let path = session_file()
+                .and_then(|file| file.parent().map(|dir| dir.join("motoya_push_token.txt")))
+                .unwrap_or_else(|| std::env::temp_dir().join("motoya_push_token.txt"));
+            Box::new(Arc::new(FilePushTokenSource::new(path)) as Arc<dyn PushTokenSource>)
         })
         // GPS del celular a traves del WebView (ver `moto_ui::geolocation`).
         .with_context_provider(|| {

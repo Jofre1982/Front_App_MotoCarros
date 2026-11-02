@@ -13,7 +13,9 @@ pub mod fields;
 pub mod file_picker;
 pub mod geolocation;
 pub mod map;
+mod passenger_offer;
 pub mod price_offer;
+mod push_registration;
 pub mod reoffer;
 pub mod screens;
 mod theme;
@@ -65,6 +67,7 @@ pub fn App() -> Element {
     rsx! {
         document::Style { "{theme::STYLES}" }
         if session.is_authenticated() {
+            push_registration::PushRegistration {}
             Home {}
         } else {
             match auth_screen() {
@@ -357,6 +360,13 @@ fn Home() -> Element {
                         "Mi perfil"
                     }
                 }
+            }
+            // Pasajero: la oferta de precio sale en cualquier pantalla. En
+            // las de pedir ya se muestra dentro del pedido.
+            if !is_driver && section() != HomeSection::RideEstimate
+                && section() != HomeSection::RequestErrand
+            {
+                passenger_offer::PassengerOfferAlert {}
             }
             if is_driver && section() != HomeSection::NearbyRides
                 && section() != HomeSection::NearbyErrands
