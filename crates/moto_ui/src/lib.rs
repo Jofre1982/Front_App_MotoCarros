@@ -14,6 +14,7 @@ pub mod file_picker;
 pub mod geolocation;
 pub mod map;
 pub mod price_offer;
+mod push_registration;
 pub mod reoffer;
 pub mod screens;
 mod theme;
@@ -65,6 +66,7 @@ pub fn App() -> Element {
     rsx! {
         document::Style { "{theme::STYLES}" }
         if session.is_authenticated() {
+            push_registration::PushRegistration {}
             Home {}
         } else {
             match auth_screen() {
