@@ -21,6 +21,7 @@ use moto_core::models::AuthToken;
 use moto_core::storage::TokenStorage;
 
 const STORAGE_KEY: &str = "motoya.auth_token";
+const EMAIL_KEY: &str = "motoya.last_email";
 
 #[derive(Debug, Default)]
 pub struct WebTokenStorage;
@@ -55,5 +56,22 @@ impl TokenStorage for WebTokenStorage {
         if let Some(storage) = self.session_storage() {
             let _ = storage.remove_item(STORAGE_KEY);
         }
+    }
+
+    // El correo (nunca la contrasena) va en localStorage para que sobreviva
+    // a cerrar la pestana.
+    fn save_last_email(&self, email: &str) {
+        if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+            let _ = storage.set_item(EMAIL_KEY, email.trim());
+        }
+    }
+
+    fn load_last_email(&self) -> Option<String> {
+        let storage = web_sys::window()?.local_storage().ok().flatten()?;
+        storage
+            .get_item(EMAIL_KEY)
+            .ok()
+            .flatten()
+            .filter(|e| !e.is_empty())
     }
 }

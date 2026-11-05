@@ -16,6 +16,15 @@ pub trait TokenStorage: std::fmt::Debug {
     fn save(&self, token: &AuthToken);
     fn load(&self) -> Option<AuthToken>;
     fn clear(&self);
+
+    /// Ultimo correo con el que se entro, para no escribirlo otra vez
+    /// (pedido del dueno: "es canson... un correo bastante extenso"). Solo
+    /// el correo, nunca la contrasena; sobrevive a "Cerrar sesion".
+    fn save_last_email(&self, _email: &str) {}
+
+    fn load_last_email(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Storage en memoria: no sobrevive a cerrar la app. Sirve de base para
@@ -96,6 +105,22 @@ impl TokenStorage for FileTokenStorage {
     fn clear(&self) {
         let _ = std::fs::remove_file(&self.path);
     }
+
+    fn save_last_email(&self, email: &str) {
+        let _ = std::fs::write(self.email_path(), email.trim());
+    }
+
+    fn load_last_email(&self) -> Option<String> {
+        let email = std::fs::read_to_string(self.email_path()).ok()?;
+        let email = email.trim();
+        (!email.is_empty()).then(|| email.to_string())
+    }
+}
+
+impl FileTokenStorage {
+    fn email_path(&self) -> std::path::PathBuf {
+        self.path.with_file_name("motoya_last_email.txt")
+    }
 }
 
 #[cfg(test)]
@@ -161,6 +186,22 @@ mod tests {
 
         FileTokenStorage::new(&path).clear();
         assert_eq!(FileTokenStorage::new(&path).load(), None);
+    }
+
+    #[test]
+    fn the_email_is_remembered_after_logging_out() {
+        let path = temp_session_path("email");
+        let storage = FileTokenStorage::new(&path);
+        assert_eq!(storage.load_last_email(), None);
+
+        storage.save(&sample_token());
+        storage.save_last_email(" jofre@example.com ");
+        storage.clear();
+
+        assert_eq!(
+            FileTokenStorage::new(&path).load_last_email().as_deref(),
+            Some("jofre@example.com")
+        );
     }
 
     #[test]
