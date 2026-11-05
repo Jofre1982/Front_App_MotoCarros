@@ -28,7 +28,9 @@ pub fn LoginScreen(props: LoginScreenProps) -> Element {
     let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context::<SessionState>();
 
-    let mut email = use_signal(String::new);
+    // Se llena con el ultimo correo usado en este celular.
+    let remembered = storage.load_last_email();
+    let mut email = use_signal(move || remembered.unwrap_or_default());
     let mut password = use_signal(String::new);
     let mut error_message = use_signal(|| None::<String>);
     let mut is_loading = use_signal(|| false);
@@ -47,6 +49,7 @@ pub fn LoginScreen(props: LoginScreenProps) -> Element {
 
             match api_client.login(&email_value, &password_value).await {
                 Ok(authenticated) => {
+                    storage.save_last_email(&email_value);
                     session.authenticate(authenticated, storage.as_ref());
                 }
                 Err(err) => {
