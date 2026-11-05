@@ -327,10 +327,15 @@ fn Home() -> Element {
                     // la pestana igual invitaba a un 403 confuso en vez de
                     // que la opcion ni aparezca.
                     //
-                    // Va primero y se llama por lo que el pasajero quiere
-                    // hacer ("pedir un motocarro"), no por el primer paso
-                    // del flujo ("ver tarifa estimada"): el estimado sigue
-                    // estando adentro de la pantalla.
+                    // Mismo orden que el conductor: primero "Mi perfil"
+                    // (pedido del dueno), despues pedir motocarro, motocarga
+                    // y el historial. La app igual abre en "Pedir motocarro".
+                    button {
+                        r#type: "button",
+                        disabled: section() == HomeSection::Profile,
+                        onclick: move |_| go_to(HomeSection::Profile),
+                        "Mi perfil"
+                    }
                     button {
                         r#type: "button",
                         class: "home-nav-primary",
@@ -352,12 +357,6 @@ fn Home() -> Element {
                         disabled: section() == HomeSection::RideHistory,
                         onclick: move |_| go_to(HomeSection::RideHistory),
                         "Mis viajes"
-                    }
-                    button {
-                        r#type: "button",
-                        disabled: section() == HomeSection::Profile,
-                        onclick: move |_| go_to(HomeSection::Profile),
-                        "Mi perfil"
                     }
                 }
             }
