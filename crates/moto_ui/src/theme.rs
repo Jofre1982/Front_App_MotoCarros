@@ -792,4 +792,9 @@ button.confirm-cancel-yes { background: var(--color-error); }
 .vehicle-photo { margin: 10px 0; text-align: center; }
 .vehicle-photo img { width: 100%; max-height: 220px; object-fit: cover; border-radius: 14px; border: 2px solid var(--color-border); }
 .vehicle-photo figcaption { font-size: 1.05rem; font-weight: 700; margin-top: 4px; }
+.delete-account { margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--color-border); }
+.delete-account-link { background: none; border: none; color: var(--color-muted); text-decoration: underline; width: 100%; font-size: 0.95rem; box-shadow: none; }
+.delete-account h3 { color: var(--color-error); }
+.delete-account-confirm { width: 100%; margin-top: 10px; background: var(--color-error); }
+.delete-account-cancel { width: 100%; margin-top: 8px; background: var(--color-surface); color: var(--color-text); border: 2px solid var(--color-border); }
 "#;
