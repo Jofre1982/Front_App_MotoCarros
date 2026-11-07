@@ -2620,6 +2620,61 @@ impl ApiClient {
         }
     }
 
+    /// `DELETE /api/v1/me` (backend #115): borra la cuenta y sus datos.
+    /// Pide la contrasena otra vez; 422 si no es correcta o si hay un
+    /// servicio sin terminar (`ServiceActionError::Validation` con el mensaje).
+    pub async fn delete_account(
+        &self,
+        token: &AuthToken,
+        password: &str,
+    ) -> Result<(), ServiceActionError> {
+        if self
+            .send_delete_account(&token.access_token, password)
+            .await?
+        {
+            return Ok(());
+        }
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| ServiceActionError::SessionExpired)?;
+        if self
+            .send_delete_account(&renewed.access_token, password)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(ServiceActionError::SessionExpired)
+        }
+    }
+
+    /// `Ok(false)` = 401 (hay que renovar el token y reintentar).
+    async fn send_delete_account(
+        &self,
+        access_token: &str,
+        password: &str,
+    ) -> Result<bool, ServiceActionError> {
+        let response = self
+            .http
+            .delete(format!("{}/api/v1/me", self.base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "password": password }))
+            .send()
+            .await
+            .map_err(|err| ServiceActionError::Network(describe_error(&err)))?;
+        match response.status().as_u16() {
+            200..=299 => Ok(true),
+            401 => Ok(false),
+            422 | 429 => {
+                let body: ApiErrorBody = decode_json(response)
+                    .await
+                    .map_err(ServiceActionError::Network)?;
+                Err(ServiceActionError::Validation(body))
+            }
+            other => Err(ServiceActionError::Unexpected(other)),
+        }
+    }
+
     /// `POST /api/v1/me/device-token` (historia #67): registra el token push
     /// de este celular para que el servidor le mande notificaciones (backend
     /// #113). Volver a mandarlo es inofensivo.
@@ -6778,6 +6833,38 @@ mod tests {
 
         assert!(!fetch.data.is_available);
         assert!(fetch.data.is_available_for_errands);
+    }
+
+    #[tokio::test]
+    async fn delete_account_sends_the_password_and_reports_a_wrong_one() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/me"))
+            .and(body_json(serde_json::json!({ "password": "secreto123" })))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/me"))
+            .and(body_json(serde_json::json!({ "password": "mala" })))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "La contraseña no es correcta.",
+                "errors": { "password": ["La contraseña no es correcta."] }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        client
+            .delete_account(&sample_token(), "secreto123")
+            .await
+            .unwrap();
+        let err = client
+            .delete_account(&sample_token(), "mala")
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "La contraseña no es correcta.");
     }
 
     #[tokio::test]
