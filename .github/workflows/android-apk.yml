@@ -93,6 +93,10 @@ jobs:
         env:
           # Opcional: sin este secreto la APK sale sin notificaciones push.
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          # Llave de subida a Play (upload key). Con ella se arma tambien el
+          # .aab para la Play Store y la APK sale siempre con la misma firma.
+          ANDROID_UPLOAD_KEYSTORE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE }}
+          ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
         # dx 0.7 siempre escribe su icono por defecto en el proyecto Gradle que
         # genera (no lee `bundle.icon` para Android). Se reemplaza aca por el
         # de crates/mobile/icons y se vuelve a empaquetar con el mismo Gradle.
@@ -167,12 +171,39 @@ jobs:
           APP_GRADLE="$PROJ/app/build.gradle.kts"
           sed -i 's/applicationId = "[^"]*"/applicationId = "com.motocarroya.app"/' "$APP_GRADLE"
           grep -q 'applicationId = "com.motocarroya.app"' "$APP_GRADLE"
+          # Play Store exige targetSdk reciente (API 36 para apps nuevas desde
+          # agosto de 2026); dx deja 34. AGP 8.7 compila 36 con este aviso
+          # suprimido.
+          echo y | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" > /dev/null
+          sed -i 's/compileSdk = [0-9]*/compileSdk = 36/; s/targetSdk = [0-9]*/targetSdk = 36/' "$APP_GRADLE"
+          echo "android.suppressUnsupportedCompileSdk=36" >> "$PROJ/gradle.properties"
+          # Cada compilacion es una version nueva para la tienda.
+          VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))
+          sed -i "s/versionCode = [0-9]*/versionCode = $VERSION_CODE/; s/versionName = \"[^\"]*\"/versionName = \"1.0.$GITHUB_RUN_NUMBER\"/" "$APP_GRADLE"
+          grep -q "versionCode = $VERSION_CODE" "$APP_GRADLE"
+          # Release sin ofuscar: R8 puede borrar las clases Kotlin de wry que
+          # Rust llama por JNI con su nombre.
+          sed -i 's/isMinifyEnabled = true/isMinifyEnabled = false/' "$APP_GRADLE"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          # Borde a borde (targetSdk 35+): MotoYaWindow evita que el contenido
+          # quede debajo de la barra de estado.
+          ACTIVITY=$(find "$PROJ/app/src/main" -name MainActivity.kt | head -n 1)
+          test -n "$ACTIVITY"
+          cp crates/mobile/android/MotoYaWindow.kt "$(dirname "$ACTIVITY")/MotoYaWindow.kt"
+          python3 - "$ACTIVITY" <<'PY'
+          import re, sys
+          activity = sys.argv[1]
+          s = open(activity).read()
+          if "MotoYaWindow" not in s:
+              s = re.sub(r"class MainActivity : WryActivity\(\)\s*(\{\s*\})?",
+                         "class MainActivity : WryActivity() {\n    override fun onCreate(savedInstanceState: android.os.Bundle?) {\n        super.onCreate(savedInstanceState)\n        MotoYaWindow.start(this)\n    }\n}\n", s, count=1)
+          assert "MotoYaWindow.start" in s, "No se pudo enganchar MotoYaWindow en MainActivity"
+          open(activity, "w").write(s)
+          PY
           # Notificaciones push (Firebase), solo si hay google-services.json.
           if [ -n "${GOOGLE_SERVICES_JSON:-}" ]; then
             printf '%s' "$GOOGLE_SERVICES_JSON" > "$PROJ/app/google-services.json"
             python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert any(c["client_info"]["android_client_info"]["package_name"]=="com.motocarroya.app" for c in d["client"]), "google-services.json no es de com.motocarroya.app"' "$PROJ/app/google-services.json"
-            ACTIVITY=$(find "$PROJ/app/src/main" -name MainActivity.kt | head -n 1)
-            test -n "$ACTIVITY"
             cp crates/mobile/android/MotoYaPush.kt "$(dirname "$ACTIVITY")/MotoYaPush.kt"
             python3 - "$PROJ" "$ACTIVITY" "$MANIFEST" <<'PY'
           import re, sys
@@ -190,8 +221,7 @@ jobs:
           open(app, "w").write(s)
           s = open(activity).read()
           if "MotoYaPush" not in s:
-              s = re.sub(r"class MainActivity : WryActivity\(\)\s*(\{\s*\})?",
-                         "class MainActivity : WryActivity() {\n    override fun onCreate(savedInstanceState: android.os.Bundle?) {\n        super.onCreate(savedInstanceState)\n        MotoYaPush.start(this)\n    }\n}\n", s, count=1)
+              s = s.replace("MotoYaWindow.start(this)", "MotoYaWindow.start(this)\n        MotoYaPush.start(this)", 1)
           assert "MotoYaPush.start" in s, "No se pudo enganchar MotoYaPush en MainActivity"
           open(activity, "w").write(s)
           s = open(manifest).read()
@@ -211,27 +241,54 @@ jobs:
           fi
           chmod +x "$PROJ/gradlew"
           set +e
-          (cd "$PROJ" && ./gradlew assembleDebug --no-daemon -q) > gradle.log 2>&1
+          if [ -n "${ANDROID_UPLOAD_KEYSTORE:-}" ]; then
+            (cd "$PROJ" && ./gradlew bundleRelease --no-daemon -q) > gradle.log 2>&1
+          else
+            (cd "$PROJ" && ./gradlew assembleDebug --no-daemon -q) > gradle.log 2>&1
+          fi
           rc=$?
           set -e
           if [ "$rc" -ne 0 ]; then echo "::error title=gradle::$(tail -n 30 gradle.log | tr '\n' ' ')"; exit 1; fi
+          if [ -n "${ANDROID_UPLOAD_KEYSTORE:-}" ]; then
+            # .aab para la Play Store, firmado con la llave de subida, y la
+            # APK de prueba sacada de ese mismo .aab (misma firma siempre:
+            # se instala encima de la anterior sin desinstalar).
+            printf '%s' "$ANDROID_UPLOAD_KEYSTORE" | base64 -d > upload.jks
+            AAB=$(find "$PROJ" -name "*-release.aab" -path "*outputs*" | head -n 1)
+            test -n "$AAB"
+            cp "$AAB" MotoYa.aab
+            jarsigner -keystore upload.jks -storepass "$ANDROID_UPLOAD_KEYSTORE_PASSWORD" \
+              -sigalg SHA256withRSA -digestalg SHA-256 MotoYa.aab motoya > /dev/null
+            jarsigner -verify MotoYa.aab | grep -q "jar verified"
+            curl -fsSL -o bundletool.jar https://github.com/google/bundletool/releases/download/1.17.2/bundletool-all-1.17.2.jar
+            java -jar bundletool.jar build-apks --bundle=MotoYa.aab --output=motoya.apks --mode=universal \
+              --ks=upload.jks --ks-pass="pass:$ANDROID_UPLOAD_KEYSTORE_PASSWORD" --ks-key-alias=motoya \
+              --key-pass="pass:$ANDROID_UPLOAD_KEYSTORE_PASSWORD"
+            unzip -p motoya.apks universal.apk > MotoYa.apk
+            rm -f upload.jks
+            echo "::notice title=Play Store::MotoYa.aab firmado (versionCode $VERSION_CODE)"
+          else
+            echo "::warning title=Play Store::sin secreto ANDROID_UPLOAD_KEYSTORE: no se genera el .aab y la APK sale con una firma de prueba"
+          fi
 
       - name: Firmar APK
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
           set -euo pipefail
-          echo "APKs generadas:"
-          find target -name "*.apk" -not -path "*/intermediates/*" -print
-          APK=$(find target -name "*.apk" -not -path "*/intermediates/*" -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)
-          test -n "$APK"
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
-          keytool -genkeypair -keystore motoya.jks -alias motoya -storepass motoya123 -keypass motoya123 \
-            -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=MotoYa Pruebas"
-          "$BT/zipalign" -f -p 4 "$APK" aligned.apk
-          "$BT/apksigner" sign --ks motoya.jks --ks-pass pass:motoya123 --key-pass pass:motoya123 \
-            --out MotoYa.apk aligned.apk
+          if [ ! -f MotoYa.apk ]; then
+            # Sin llave de subida: APK de prueba con una firma desechable.
+            APK=$(find target -name "*.apk" -not -path "*/intermediates/*" -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)
+            test -n "$APK"
+            keytool -genkeypair -keystore motoya.jks -alias motoya -storepass motoya123 -keypass motoya123 \
+              -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=MotoYa Pruebas"
+            "$BT/zipalign" -f -p 4 "$APK" aligned.apk
+            "$BT/apksigner" sign --ks motoya.jks --ks-pass pass:motoya123 --key-pass pass:motoya123 \
+              --out MotoYa.apk aligned.apk
+          fi
           "$BT/apksigner" verify MotoYa.apk
+          "$BT/aapt" dump badging MotoYa.apk | grep -q "targetSdkVersion:'36'" || { echo "::error::La APK no apunta a targetSdk 36 (Play Store)"; exit 1; }
           PERMS=$("$BT/aapt" dump permissions MotoYa.apk | grep -o "android.permission.[A-Z_]*" | sort -u | tr '\n' ' ')
           URL_HITS=$(unzip -p MotoYa.apk 'lib/*' | strings -n 10 | grep -c "$MOTOYA_API_BASE_URL" || true)
           WS_HITS=$(unzip -p MotoYa.apk 'lib/*' | strings -n 10 | grep -cF "$MOTOYA_WS_URL" || true)
@@ -258,7 +315,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: MotoYa-apk
-          path: MotoYa.apk
+          path: |
+            MotoYa.apk
+            MotoYa.aab
+          if-no-files-found: warn
           retention-days: 30
 
       # Link fijo para bajar la APK desde el celular, sin entrar a GitHub ni
@@ -270,7 +330,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete apk-ultima --cleanup-tag --yes -R "$GITHUB_REPOSITORY" || true
-          gh release create apk-ultima MotoYa.apk -R "$GITHUB_REPOSITORY" \
+          FILES="MotoYa.apk"
+          [ -f MotoYa.aab ] && FILES="$FILES MotoYa.aab"
+          gh release create apk-ultima $FILES -R "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" --prerelease \
             --title "MotoYa APK (rama ${GITHUB_REF_NAME})" \
             --notes "APK de prueba compilada de ${GITHUB_REF_NAME} (${GITHUB_SHA::7})."
