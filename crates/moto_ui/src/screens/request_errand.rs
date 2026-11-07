@@ -22,6 +22,7 @@ use moto_core::models::{
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+use crate::auto_locate::{pickup_hint, use_auto_locate};
 use crate::big_notice::{BigNotice, StatusBanner, Tone};
 use crate::file_picker::{PhotoPicker, PickedFile};
 use crate::map::{MapMarker, MapView};
@@ -161,8 +162,13 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
         });
     }
 
+    // El punto de recogida se pone solo con el GPS (ver `auto_locate`).
+    let picking = use_memo(move || created_errand().is_none());
+    let auto_locate = use_auto_locate(origin, picking, (DEFAULT_CENTER_LAT, DEFAULT_CENTER_LNG));
+
     let on_map_click = move |(lat, lng): (f64, f64)| {
         origin.set(Some((lat, lng)));
+        auto_locate.mark_manual();
     };
 
     let on_submit_click = move |_| {
@@ -444,16 +450,12 @@ pub fn RequestErrandScreen(props: RequestErrandScreenProps) -> Element {
             }
             p { class: "ride-step-title", "{copy.pickup_step}" }
             p { class: "ride-estimate-instructions",
-                if origin().is_some() {
-                    "Listo, ya marcamos el punto. Puedes tocar otro lugar para cambiarlo."
-                } else {
-                    "Toca el mapa en el lugar."
-                }
+                "{pickup_hint((auto_locate.state)(), origin().is_some())}"
             }
             div { class: "request-errand-map", style: "height: 300px;",
                 MapView {
-                    center_lat: DEFAULT_CENTER_LAT,
-                    center_lng: DEFAULT_CENTER_LNG,
+                    center_lat: (auto_locate.center)().0,
+                    center_lng: (auto_locate.center)().1,
                     markers,
                     on_click: on_map_click,
                 }

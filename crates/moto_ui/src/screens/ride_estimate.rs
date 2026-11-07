@@ -86,6 +86,7 @@ use moto_core::realtime::{
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+use crate::auto_locate::{pickup_hint, use_auto_locate};
 use crate::big_notice::{BigNotice, StatusBanner, Tone};
 use crate::map::{MapMarker, MapView};
 use crate::price_offer::{ContactCard, PriceOfferCard};
@@ -167,8 +168,15 @@ pub fn RideEstimateScreen() -> Element {
         });
     }
 
+    // El punto de recogida se pone solo con el GPS (ver `auto_locate`).
+    let picking = use_memo(move || {
+        !is_restoring() && requested_ride().is_none() && service() == Service::Ride
+    });
+    let auto_locate = use_auto_locate(origin, picking, (DEFAULT_CENTER_LAT, DEFAULT_CENTER_LNG));
+
     let on_map_click = move |(lat, lng): (f64, f64)| {
         origin.set(Some((lat, lng)));
+        auto_locate.mark_manual();
     };
 
     // Siempre "solo recogida": sin precio fijo ni estimado (pedido del dueno,
@@ -538,16 +546,12 @@ pub fn RideEstimateScreen() -> Element {
             } else {
                 p { class: "ride-step-title", "1. ¿Donde te recogemos?" }
                 p { class: "ride-estimate-instructions",
-                    if origin().is_some() {
-                        "Listo, marcamos tu punto de recogida. Puedes tocar otro lugar para cambiarlo."
-                    } else {
-                        "Toca el mapa en el lugar donde estas."
-                    }
+                    "{pickup_hint((auto_locate.state)(), origin().is_some())}"
                 }
                 div { class: "ride-estimate-map", style: "height: 320px;",
                     MapView {
-                        center_lat: DEFAULT_CENTER_LAT,
-                        center_lng: DEFAULT_CENTER_LNG,
+                        center_lat: (auto_locate.center)().0,
+                        center_lng: (auto_locate.center)().1,
                         markers,
                         on_click: on_map_click,
                     }
