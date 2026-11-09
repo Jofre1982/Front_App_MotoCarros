@@ -25,7 +25,7 @@ use moto_core::models::{Ride, RideStatus, Role};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
-use super::errand_history::{ErrandHistoryList, short_date};
+use super::errand_history::{ErrandHistoryList, ServiceParties, short_date};
 use super::ride_receipt::RideReceiptScreen;
 
 #[component]
@@ -135,8 +135,11 @@ fn RideHistoryRow(props: RideHistoryRowProps) -> Element {
             p { "Fecha: {short_date(&ride.requested_at)}" }
             p { "Destino: {ride.destination_label()}" }
             p { class: "ride-history-price", "Valor: {fare}" }
-            if let Some(driver) = &ride.driver {
-                p { "Conductor: {driver.name}" }
+            ServiceParties {
+                role: Role::Passenger,
+                driver: ride.driver.clone(),
+                vehicle: ride.driver_vehicle.clone(),
+                passenger_name: None,
             }
             if ride.status == RideStatus::Completed {
                 button {
