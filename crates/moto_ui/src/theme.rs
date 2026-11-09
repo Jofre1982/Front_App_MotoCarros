@@ -711,6 +711,10 @@ button.confirm-cancel-yes { background: var(--color-error); }
 .char-counter { text-align: right; color: var(--color-muted); font-size: 0.85rem; margin: 4px 0 0; }
 .ride-request-again-button, .nearby-ride-done-button { width: 100%; margin-top: 12px; }
 .ride-history-price { font-weight: 700; color: var(--color-primary-dark); }
+.service-parties { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--color-border); }
+.service-parties p { margin: 4px 0; }
+.service-parties-driver { display: flex; align-items: center; gap: 10px; }
+.service-parties-vehicle { font-size: 1.05rem; }
 .driver-earnings-total { font-size: 1.6rem; font-weight: 800; color: var(--color-primary-dark); }
 .driver-errand-history { margin-top: 18px; }
 .turn-on-rides { text-align: center; }

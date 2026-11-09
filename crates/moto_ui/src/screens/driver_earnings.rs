@@ -27,7 +27,7 @@ use moto_core::models::{DriverEarningsSummary, Ride, Role, format_cop};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
-use super::errand_history::{ErrandHistoryList, short_date};
+use super::errand_history::{ErrandHistoryList, ServiceParties, short_date};
 use super::ride_history::ride_status_label;
 
 #[component]
@@ -135,6 +135,12 @@ fn DriverRideHistoryRow(props: DriverRideHistoryRowProps) -> Element {
             p { "Fecha: {short_date(&ride.requested_at)}" }
             p { "Destino: {ride.destination_label()}" }
             p { class: "ride-history-price", "Valor: {fare}" }
+            ServiceParties {
+                role: Role::Driver,
+                driver: ride.driver.clone(),
+                vehicle: ride.driver_vehicle.clone(),
+                passenger_name: ride.passenger_name.clone(),
+            }
         }
     }
 }

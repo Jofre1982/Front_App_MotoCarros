@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use moto_core::api::{ApiClient, AuthenticatedRequestError};
-use moto_core::models::{Errand, ErrandStatus, Role, format_cop};
+use moto_core::models::{DriverVehicle, Errand, ErrandStatus, RideDriver, Role, format_cop};
+
+use crate::avatar::Avatar;
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
@@ -160,12 +162,53 @@ pub fn ErrandHistoryList(props: ErrandHistoryListProps) -> Element {
                         if let Some(price) = errand.agreed_price {
                             p { class: "ride-history-price", "Valor: {format_cop(price)}" }
                         }
-                        if role == Role::Passenger {
-                            if let Some(driver) = &errand.driver {
-                                p { "Conductor: {driver.name}" }
-                            }
+                        ServiceParties {
+                            role,
+                            driver: errand.driver.clone(),
+                            vehicle: errand.driver_vehicle.clone(),
+                            passenger_name: errand.passenger_name.clone(),
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+pub(crate) struct ServicePartiesProps {
+    pub role: Role,
+    pub driver: Option<RideDriver>,
+    /// La placa con la que se hizo; si no vino, la actual del conductor.
+    pub vehicle: Option<DriverVehicle>,
+    pub passenger_name: Option<String>,
+}
+
+/// Quien hizo el servicio y con que vehiculo (pedido del dueno: "en caso de
+/// alguna eventualidad"). Al pasajero: foto, nombre, tipo y placa. Al
+/// conductor: el nombre del pasajero y la placa que uso.
+#[component]
+pub(crate) fn ServiceParties(props: ServicePartiesProps) -> Element {
+    let vehicle = props
+        .vehicle
+        .clone()
+        .or_else(|| props.driver.as_ref().and_then(|d| d.vehicle.clone()));
+    rsx! {
+        div { class: "service-parties",
+            if props.role == Role::Passenger {
+                if let Some(driver) = &props.driver {
+                    div { class: "service-parties-driver",
+                        Avatar { url: driver.avatar_url.clone(), name: driver.name.clone(), size: 40 }
+                        p { strong { "Conductor: " } "{driver.name}" }
+                    }
+                }
+            } else if let Some(name) = &props.passenger_name {
+                p { strong { "Pasajero: " } "{name}" }
+            }
+            if let Some(vehicle) = &vehicle {
+                p { class: "service-parties-vehicle",
+                    "🛺 {vehicle.vehicle_type.label()} · Placa "
+                    strong { "{vehicle.plate}" }
                 }
             }
         }
