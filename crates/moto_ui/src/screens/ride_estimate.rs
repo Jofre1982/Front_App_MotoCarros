@@ -87,6 +87,7 @@ use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
 use crate::big_notice::{BigNotice, StatusBanner, Tone};
+use crate::favorites::FavoritePicker;
 use crate::map::{MapMarker, MapView};
 use crate::price_offer::{ContactCard, PriceOfferCard};
 use crate::screens::request_errand::RequestErrandScreen;
@@ -119,6 +120,8 @@ pub fn RideEstimateScreen() -> Element {
     let mut origin = use_signal(|| None::<(f64, f64)>);
     let mut destination_text = use_signal(String::new);
     let mut passenger_count = use_signal(|| 1u8);
+    // Pedirle primero a un conductor favorito (backend #118).
+    let mut preferred_driver = use_signal(|| None::<u64>);
     let mut ride_error = use_signal(|| None::<RequestRideError>);
     let mut requested_ride = use_signal(|| None::<Ride>);
     let mut is_requesting = use_signal(|| false);
@@ -187,6 +190,7 @@ pub fn RideEstimateScreen() -> Element {
             };
             let text = destination_text();
             let count = passenger_count();
+            let preferred = preferred_driver();
             let api_client = api_client.clone();
             let storage = storage.clone();
 
@@ -200,7 +204,7 @@ pub fn RideEstimateScreen() -> Element {
                 };
 
                 match api_client
-                    .request_pickup_only_ride(&token, origin_coords, &text, count)
+                    .request_pickup_only_ride_to(&token, origin_coords, &text, count, preferred)
                     .await
                 {
                     Ok(fetch) => {
@@ -304,6 +308,7 @@ pub fn RideEstimateScreen() -> Element {
         origin.set(None);
         destination_text.set(String::new());
         passenger_count.set(1);
+        preferred_driver.set(None);
     };
 
     // Solo el origen tiene marcador propio: desde la historia #87 del
@@ -418,6 +423,13 @@ pub fn RideEstimateScreen() -> Element {
                         vehicle: ride.driver.as_ref().and_then(|d| d.vehicle.clone()),
                     }
                 }
+                if ride.status == RideStatus::Requested && ride.driver.is_none() {
+                    if let Some(favorite) = ride.preferred_driver.as_ref() {
+                        p { class: "favorite-waiting-note",
+                            "⭐ Le pedimos el viaje primero a {favorite.name}. Si no lo toma en 2 minutos, le avisamos a todos los conductores."
+                        }
+                    }
+                }
                 if rejected_notice() && ride.status == RideStatus::Requested {
                     p { class: "ride-request-status",
                         "Rechazaste el precio. Tu viaje quedo libre para otro conductor."
@@ -493,6 +505,7 @@ pub fn RideEstimateScreen() -> Element {
                             origin.set(None);
                             destination_text.set(String::new());
                             passenger_count.set(1);
+                            preferred_driver.set(None);
                         },
                         "Pedir otro viaje"
                     }
@@ -577,6 +590,7 @@ pub fn RideEstimateScreen() -> Element {
                     option { value: "2", "2 personas" }
                     option { value: "3", "3 personas" }
                 }
+                FavoritePicker { selected: preferred_driver }
                 p { class: "ride-pickup-only-price-note",
                     "Precio: lo acuerdas con el conductor cuando acepte tu viaje."
                 }

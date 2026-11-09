@@ -10,6 +10,7 @@ use moto_core::api::{ApiClient, AuthenticatedRequestError};
 use moto_core::models::{DriverVehicle, Errand, ErrandStatus, RideDriver, Role, format_cop};
 
 use crate::avatar::Avatar;
+use crate::favorites::FavoriteToggle;
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
@@ -201,6 +202,7 @@ pub(crate) fn ServiceParties(props: ServicePartiesProps) -> Element {
                         Avatar { url: driver.avatar_url.clone(), name: driver.name.clone(), size: 40 }
                         p { strong { "Conductor: " } "{driver.name}" }
                     }
+                    FavoriteToggle { driver_id: driver.id }
                 }
             } else if let Some(name) = &props.passenger_name {
                 p { strong { "Pasajero: " } "{name}" }
