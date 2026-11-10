@@ -711,6 +711,21 @@ button.confirm-cancel-yes { background: var(--color-error); }
 .char-counter { text-align: right; color: var(--color-muted); font-size: 0.85rem; margin: 4px 0 0; }
 .ride-request-again-button, .nearby-ride-done-button { width: 100%; margin-top: 12px; }
 .ride-history-price { font-weight: 700; color: var(--color-primary-dark); }
+.favorite-toggle { margin-top: 8px; padding: 8px 14px; border-radius: 999px; border: 1px solid var(--color-border); background: var(--color-surface); color: var(--color-text); font-size: 1rem; }
+.favorite-toggle-on { background: var(--color-primary-light); border-color: var(--color-primary); color: var(--color-primary-dark); font-weight: 600; }
+.favorite-picker { margin: 12px 0; padding: 12px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); }
+.favorite-option { display: flex; align-items: center; gap: 10px; padding: 10px 4px; font-size: 1.05rem; }
+.favorite-option input { width: 22px; height: 22px; }
+.favorite-option-off { color: var(--color-muted); }
+.favorite-picker-note { margin: 6px 0 0; font-size: 0.95rem; color: var(--color-muted); }
+.favorite-waiting-note { margin: 10px 0; padding: 12px; border-radius: 12px; background: var(--color-primary-light); color: var(--color-primary-dark); font-size: 1.05rem; font-weight: 600; }
+.favorite-drivers-section { margin: 16px 0; }
+.favorite-drivers-list { list-style: none; padding: 0; margin: 0; }
+.favorite-driver-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--color-border); font-size: 1.05rem; }
+.service-parties { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--color-border); }
+.service-parties p { margin: 4px 0; }
+.service-parties-driver { display: flex; align-items: center; gap: 10px; }
+.service-parties-vehicle { font-size: 1.05rem; }
 .driver-earnings-total { font-size: 1.6rem; font-weight: 800; color: var(--color-primary-dark); }
 .driver-errand-history { margin-top: 18px; }
 .turn-on-rides { text-align: center; }

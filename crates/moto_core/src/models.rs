@@ -262,6 +262,16 @@ pub enum VehicleType {
     Motocarga,
 }
 
+impl VehicleType {
+    /// "Motocarro" / "Motocarga", para mostrar.
+    pub fn label(self) -> &'static str {
+        match self {
+            VehicleType::Motocarro => "Motocarro",
+            VehicleType::Motocarga => "Motocarga",
+        }
+    }
+}
+
 /// Body de `POST /api/v1/me/vehicle`
 /// (`openapi.yaml#/components/schemas/VehicleRegistrationRequest`).
 ///
@@ -352,6 +362,28 @@ pub struct UpdateErrandAvailabilityPayload {
 pub struct Coordinates {
     pub latitude: f64,
     pub longitude: f64,
+}
+
+/// `Ride.preferred_driver` (backend #118).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreferredDriver {
+    pub id: u64,
+    pub name: String,
+}
+
+/// Un conductor favorito del pasajero (`GET /me/favorite-drivers`,
+/// backend #118).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FavoriteDriver {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub vehicle: Option<DriverVehicle>,
+    /// Se le puede pedir un viaje ya ("Recibir viajes" encendido).
+    #[serde(default)]
+    pub receiving_rides: bool,
 }
 
 /// `Ride.driver_location` (backend #111).
@@ -549,6 +581,9 @@ pub struct RideRequestPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_text: Option<String>,
     pub passenger_count: u8,
+    /// Pedirselo primero a un conductor favorito (backend #118).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_driver_id: Option<u64>,
 }
 
 impl RideRequestPayload {
@@ -560,6 +595,7 @@ impl RideRequestPayload {
             destination_site_id: Some(destination_site_id),
             destination_text: None,
             passenger_count,
+            preferred_driver_id: None,
         }
     }
 
@@ -573,6 +609,7 @@ impl RideRequestPayload {
             destination_text: Some(destination_text.trim().to_string())
                 .filter(|text| !text.is_empty()),
             passenger_count,
+            preferred_driver_id: None,
         }
     }
 }
@@ -675,6 +712,12 @@ pub struct Errand {
     /// A donde llevarlo, en texto libre, si el pasajero lo escribio.
     #[serde(default)]
     pub destination_text: Option<String>,
+    /// Placa y tipo con los que se acepto (backend #116).
+    #[serde(default)]
+    pub driver_vehicle: Option<DriverVehicle>,
+    /// Nombre del pasajero; solo le llega al conductor asignado.
+    #[serde(default)]
+    pub passenger_name: Option<String>,
     pub driver: Option<RideDriver>,
     pub agreed_price: Option<i64>,
     /// Si el pasajero ya acepto el precio (backend #107). `true` por
@@ -850,6 +893,19 @@ pub struct Ride {
     /// o en el viaje; `None` si no hay una reciente.
     #[serde(default)]
     pub driver_location: Option<DriverLocation>,
+    /// Placa y tipo con los que se acepto este viaje (backend #116), para el
+    /// historial aunque el conductor cambie de vehiculo.
+    #[serde(default)]
+    pub driver_vehicle: Option<DriverVehicle>,
+    /// Nombre del pasajero; solo le llega al conductor asignado.
+    #[serde(default)]
+    pub passenger_name: Option<String>,
+    /// Conductor favorito al que se le pidio primero (backend #118).
+    #[serde(default)]
+    pub preferred_driver: Option<PreferredDriver>,
+    /// Hasta cuando solo el favorito puede tomarlo.
+    #[serde(default)]
+    pub preferred_until: Option<String>,
     pub requested_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
@@ -1942,6 +1998,10 @@ mod tests {
             counterpart: None,
             driver: None,
             driver_location: None,
+            driver_vehicle: None,
+            passenger_name: None,
+            preferred_driver: None,
+            preferred_until: None,
             requested_at: "2026-07-31T14:03:21+00:00".to_string(),
             started_at: None,
             completed_at: None,
@@ -2399,5 +2459,23 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(ride.driver_location.unwrap().latitude, 3.87);
+    }
+
+    #[test]
+    fn history_reads_the_vehicle_used_and_the_passenger_name() {
+        let ride: Ride = serde_json::from_value(serde_json::json!({
+            "id": 1, "status": "completed", "origin": {"latitude": 3.86, "longitude": -67.92},
+            "destination": null, "passenger_count": 1, "currency": "COP",
+            "estimated_fare": null, "agreed_price": 5000, "driver": null,
+            "driver_vehicle": {"plate": "ABC12D", "type": "motocarro"},
+            "passenger_name": "María Pérez",
+            "requested_at": "2026-10-30T19:58:00+00:00", "started_at": null,
+            "completed_at": null, "final_fare": null, "payment": null
+        }))
+        .unwrap();
+        let vehicle = ride.driver_vehicle.unwrap();
+        assert_eq!(vehicle.plate, "ABC12D");
+        assert_eq!(vehicle.vehicle_type.label(), "Motocarro");
+        assert_eq!(ride.passenger_name.as_deref(), Some("María Pérez"));
     }
 }

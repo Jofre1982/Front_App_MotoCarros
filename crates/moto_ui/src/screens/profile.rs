@@ -41,6 +41,7 @@ use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
 use crate::avatar::Avatar;
+use crate::favorites::FavoriteDriversSection;
 use crate::file_picker::{PhotoPicker, PickedFile};
 
 /// Como se describe la cuenta (issue #95): con los dos roles, ambos.
@@ -145,6 +146,9 @@ pub fn ProfileScreen() -> Element {
                     }
                     if session.active_mode() == Some(Role::Driver) {
                         AvailabilitySection {}
+                    }
+                    if session.active_mode() != Some(Role::Driver) {
+                        FavoriteDriversSection {}
                     }
                     if !user.can_drive() {
                         BecomeDriverSection {}

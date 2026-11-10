@@ -11,7 +11,7 @@ use crate::models::{
     AcceptErrandPayload, AcceptRidePayload, ApiErrorBody, AuthToken, AuthenticatedUser,
     BecomeDriverPayload, BroadcastAuthPayload, BroadcastAuthResponse, ConfirmPasswordResetPayload,
     ConfirmPhoneVerificationPayload, Coordinates, CreateErrandPayload, DataEnvelope, DocumentType,
-    DriverEarningsSummary, DriverProfile, DriverVerification, Errand, LoginPayload,
+    DriverEarningsSummary, DriverProfile, DriverVerification, Errand, FavoriteDriver, LoginPayload,
     RateDriverPayload, RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload,
     RequestPasswordResetPayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
     RideRating, RideReceipt, RideRequestPayload, Role, Site, UpdateErrandAvailabilityPayload,
@@ -4398,8 +4398,95 @@ impl ApiClient {
         destination_text: &str,
         passenger_count: u8,
     ) -> Result<AuthenticatedFetch<Ride>, RequestRideError> {
-        let payload = RideRequestPayload::pickup_only(origin, destination_text, passenger_count);
+        self.request_pickup_only_ride_to(token, origin, destination_text, passenger_count, None)
+            .await
+    }
+
+    /// Igual que `request_pickup_only_ride`, pero con la opcion de
+    /// pedirselo primero a un conductor favorito (backend #118).
+    pub async fn request_pickup_only_ride_to(
+        &self,
+        token: &AuthToken,
+        origin: Coordinates,
+        destination_text: &str,
+        passenger_count: u8,
+        preferred_driver_id: Option<u64>,
+    ) -> Result<AuthenticatedFetch<Ride>, RequestRideError> {
+        let mut payload =
+            RideRequestPayload::pickup_only(origin, destination_text, passenger_count);
+        payload.preferred_driver_id = preferred_driver_id;
         self.send_ride_request(token, &payload).await
+    }
+
+    /// `GET /api/v1/me/favorite-drivers` (backend #118).
+    pub async fn favorite_drivers(
+        &self,
+        token: &AuthToken,
+    ) -> Result<AuthenticatedFetch<Vec<FavoriteDriver>>, AuthenticatedRequestError> {
+        self.get_authenticated::<Vec<FavoriteDriver>>("/api/v1/me/favorite-drivers", token)
+            .await
+    }
+
+    /// `POST /api/v1/me/favorite-drivers`: guarda al conductor como favorito.
+    pub async fn add_favorite_driver(
+        &self,
+        token: &AuthToken,
+        driver_id: u64,
+    ) -> Result<AuthenticatedFetch<FavoriteDriver>, ServiceActionError> {
+        self.post_service_action(
+            "/api/v1/me/favorite-drivers",
+            token,
+            &serde_json::json!({ "driver_id": driver_id }),
+        )
+        .await
+    }
+
+    /// `DELETE /api/v1/me/favorite-drivers/{id}`.
+    pub async fn remove_favorite_driver(
+        &self,
+        token: &AuthToken,
+        driver_id: u64,
+    ) -> Result<(), ServiceActionError> {
+        if self
+            .send_remove_favorite(&token.access_token, driver_id)
+            .await?
+        {
+            return Ok(());
+        }
+        let renewed = self
+            .refresh(&token.access_token)
+            .await
+            .map_err(|_| ServiceActionError::SessionExpired)?;
+        if self
+            .send_remove_favorite(&renewed.access_token, driver_id)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(ServiceActionError::SessionExpired)
+        }
+    }
+
+    async fn send_remove_favorite(
+        &self,
+        access_token: &str,
+        driver_id: u64,
+    ) -> Result<bool, ServiceActionError> {
+        let response = self
+            .http
+            .delete(format!(
+                "{}/api/v1/me/favorite-drivers/{driver_id}",
+                self.base_url
+            ))
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|err| ServiceActionError::Network(describe_error(&err)))?;
+        match response.status().as_u16() {
+            200..=299 => Ok(true),
+            401 => Ok(false),
+            other => Err(ServiceActionError::Unexpected(other)),
+        }
     }
 
     async fn send_ride_request(
@@ -6865,6 +6952,61 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.to_string(), "La contraseña no es correcta.");
+    }
+
+    #[tokio::test]
+    async fn favorites_list_add_remove_and_preferred_ride() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/favorite-drivers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "id": 7, "name": "Jofre", "avatar_url": null,
+                           "vehicle": { "plate": "ABC12D", "type": "motocarro" },
+                           "receiving_rides": true }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/me/favorite-drivers"))
+            .and(body_json(serde_json::json!({ "driver_id": 7 })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": { "id": 7, "name": "Jofre", "avatar_url": null, "vehicle": null, "receiving_rides": false }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/me/favorite-drivers/7"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let list = client.favorite_drivers(&sample_token()).await.unwrap().data;
+        assert_eq!(list[0].vehicle.as_ref().unwrap().plate, "ABC12D");
+        assert!(list[0].receiving_rides);
+        assert_eq!(
+            client
+                .add_favorite_driver(&sample_token(), 7)
+                .await
+                .unwrap()
+                .data
+                .id,
+            7
+        );
+        client
+            .remove_favorite_driver(&sample_token(), 7)
+            .await
+            .unwrap();
+
+        let payload = {
+            let mut p = RideRequestPayload::pickup_only(sample_origin(), "", 1);
+            p.preferred_driver_id = Some(7);
+            serde_json::to_value(&p).unwrap()
+        };
+        assert_eq!(payload["preferred_driver_id"], 7);
+        let without =
+            serde_json::to_value(RideRequestPayload::pickup_only(sample_origin(), "", 1)).unwrap();
+        assert!(without.get("preferred_driver_id").is_none());
     }
 
     #[tokio::test]

@@ -6,9 +6,11 @@ use moto_core::models::{Role, VehicleType};
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+pub mod auto_locate;
 pub mod avatar;
 pub mod big_notice;
 pub mod driver_alert;
+pub mod favorites;
 pub mod fields;
 pub mod file_picker;
 pub mod geolocation;
@@ -131,6 +133,7 @@ enum HomeSection {
 /// (encontrar y aceptar, no pedir).
 #[component]
 fn Home() -> Element {
+    favorites::provide_favorites();
     let api_client = use_context::<ApiClient>();
     let storage = use_context::<Arc<dyn TokenStorage>>();
     let mut session = use_context::<SessionState>();
