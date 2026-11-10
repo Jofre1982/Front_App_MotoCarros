@@ -364,6 +364,28 @@ pub struct Coordinates {
     pub longitude: f64,
 }
 
+/// `Ride.preferred_driver` (backend #118).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreferredDriver {
+    pub id: u64,
+    pub name: String,
+}
+
+/// Un conductor favorito del pasajero (`GET /me/favorite-drivers`,
+/// backend #118).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FavoriteDriver {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub vehicle: Option<DriverVehicle>,
+    /// Se le puede pedir un viaje ya ("Recibir viajes" encendido).
+    #[serde(default)]
+    pub receiving_rides: bool,
+}
+
 /// `Ride.driver_location` (backend #111).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DriverLocation {
@@ -559,6 +581,9 @@ pub struct RideRequestPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_text: Option<String>,
     pub passenger_count: u8,
+    /// Pedirselo primero a un conductor favorito (backend #118).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_driver_id: Option<u64>,
 }
 
 impl RideRequestPayload {
@@ -570,6 +595,7 @@ impl RideRequestPayload {
             destination_site_id: Some(destination_site_id),
             destination_text: None,
             passenger_count,
+            preferred_driver_id: None,
         }
     }
 
@@ -583,6 +609,7 @@ impl RideRequestPayload {
             destination_text: Some(destination_text.trim().to_string())
                 .filter(|text| !text.is_empty()),
             passenger_count,
+            preferred_driver_id: None,
         }
     }
 }
@@ -873,6 +900,12 @@ pub struct Ride {
     /// Nombre del pasajero; solo le llega al conductor asignado.
     #[serde(default)]
     pub passenger_name: Option<String>,
+    /// Conductor favorito al que se le pidio primero (backend #118).
+    #[serde(default)]
+    pub preferred_driver: Option<PreferredDriver>,
+    /// Hasta cuando solo el favorito puede tomarlo.
+    #[serde(default)]
+    pub preferred_until: Option<String>,
     pub requested_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
@@ -1967,6 +2000,8 @@ mod tests {
             driver_location: None,
             driver_vehicle: None,
             passenger_name: None,
+            preferred_driver: None,
+            preferred_until: None,
             requested_at: "2026-07-31T14:03:21+00:00".to_string(),
             started_at: None,
             completed_at: None,
