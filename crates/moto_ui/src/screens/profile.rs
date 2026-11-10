@@ -159,6 +159,7 @@ pub fn ProfileScreen() -> Element {
                         onclick: move |_| is_editing.set(true),
                         "Editar perfil"
                     }
+                    DeleteAccountSection {}
                 }
             }
         }
@@ -771,6 +772,94 @@ fn AvailabilitySection() -> Element {
             }
             if let Some(message) = error() {
                 p { class: "price-offer-error", role: "alert", "{message}" }
+            }
+        }
+    }
+}
+
+/// "Eliminar mi cuenta" (requisito de Google Play). Escondido detras de un
+/// enlace discreto; al abrirlo explica que se borra y vuelve a pedir la
+/// contrasena antes de borrar.
+#[component]
+fn DeleteAccountSection() -> Element {
+    let api_client = use_context::<ApiClient>();
+    let storage = use_context::<Arc<dyn TokenStorage>>();
+    let mut session = use_context::<SessionState>();
+    let mut is_open = use_signal(|| false);
+    let mut password = use_signal(String::new);
+    let mut is_deleting = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let delete = move |_| {
+        let Some(token) = session.token() else {
+            return;
+        };
+        let password_value = password();
+        if password_value.is_empty() {
+            error.set(Some("Escribe tu contrasena para confirmar.".to_string()));
+            return;
+        }
+        let api_client = api_client.clone();
+        let storage = storage.clone();
+        spawn(async move {
+            is_deleting.set(true);
+            error.set(None);
+            match api_client.delete_account(&token, &password_value).await {
+                Ok(()) => {
+                    storage.save_last_email("");
+                    session.logout(storage.as_ref());
+                }
+                Err(ServiceActionError::SessionExpired) => session.logout(storage.as_ref()),
+                Err(err) => error.set(Some(err.to_string())),
+            }
+            is_deleting.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "delete-account",
+            if !is_open() {
+                button {
+                    r#type: "button",
+                    class: "delete-account-link",
+                    onclick: move |_| is_open.set(true),
+                    "Eliminar mi cuenta"
+                }
+            } else {
+                h3 { "Eliminar mi cuenta" }
+                p {
+                    "Se borran para siempre tu cuenta, tu foto, tus documentos y vehiculo (si eres conductor) y los viajes y pedidos que pediste. No se puede deshacer."
+                }
+                label { r#for: "delete-account-password", "Escribe tu contrasena para confirmar" }
+                input {
+                    id: "delete-account-password",
+                    r#type: "password",
+                    autocomplete: "current-password",
+                    disabled: is_deleting(),
+                    value: "{password}",
+                    oninput: move |event| password.set(event.value()),
+                }
+                if let Some(message) = error() {
+                    p { class: "profile-error", role: "alert", "{message}" }
+                }
+                button {
+                    r#type: "button",
+                    class: "delete-account-confirm",
+                    disabled: is_deleting(),
+                    onclick: delete,
+                    if is_deleting() { "Eliminando..." } else { "Si, eliminar mi cuenta" }
+                }
+                button {
+                    r#type: "button",
+                    class: "delete-account-cancel",
+                    disabled: is_deleting(),
+                    onclick: move |_| {
+                        is_open.set(false);
+                        password.set(String::new());
+                        error.set(None);
+                    },
+                    "No, volver"
+                }
             }
         }
     }
