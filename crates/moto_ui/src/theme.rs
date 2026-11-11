@@ -719,6 +719,16 @@ button.confirm-cancel-yes { background: var(--color-error); }
 .favorite-option-off { color: var(--color-muted); }
 .favorite-picker-note { margin: 6px 0 0; font-size: 0.95rem; color: var(--color-muted); }
 .favorite-waiting-note { margin: 10px 0; padding: 12px; border-radius: 12px; background: var(--color-primary-light); color: var(--color-primary-dark); font-size: 1.05rem; font-weight: 600; }
+.ad-card { position: relative; margin: 14px 0; border: 1px solid var(--color-border); border-radius: 14px; background: var(--color-surface); overflow: hidden; }
+.ad-label { position: absolute; top: 8px; right: 8px; padding: 2px 8px; border-radius: 999px; background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 0.75rem; }
+.ad-image { display: block; width: 100%; max-height: 180px; object-fit: cover; }
+.ad-body { padding: 12px 14px; }
+.ad-business { margin: 0 0 4px; font-size: 1.1rem; font-weight: 700; }
+.ad-message { margin: 0 0 10px; font-size: 1.05rem; }
+a.ad-whatsapp { display: inline-block; padding: 10px 16px; border-radius: 999px; background: #25d366; color: #fff; font-weight: 600; font-size: 1rem; text-decoration: none; }
+.ad-dots { display: flex; justify-content: center; gap: 6px; padding: 0 0 10px; }
+.ad-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-border); }
+.ad-dot-on { background: var(--color-primary); }
 .favorite-drivers-section { margin: 16px 0; }
 .favorite-drivers-list { list-style: none; padding: 0; margin: 0; }
 .favorite-driver-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--color-border); font-size: 1.05rem; }
