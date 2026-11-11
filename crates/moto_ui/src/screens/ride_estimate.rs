@@ -86,6 +86,7 @@ use moto_core::realtime::{
 use moto_core::state::SessionState;
 use moto_core::storage::TokenStorage;
 
+use crate::ads::AdCarousel;
 use crate::auto_locate::{pickup_hint, use_auto_locate};
 use crate::big_notice::{BigNotice, StatusBanner, Tone};
 use crate::favorites::FavoritePicker;
@@ -450,6 +451,10 @@ pub fn RideEstimateScreen() -> Element {
                     dd { "{ride.passenger_count}" }
                     dt { if ride.is_pickup_only() && ride.agreed_price.is_some() && ride.price_confirmed { "Precio acordado" } else { "Precio" } }
                     dd { class: "ride-request-agreed-price", "{ride.fare_label()}" }
+                }
+                // Mientras espera que llegue el motocarro.
+                if matches!(ride.status, RideStatus::Requested | RideStatus::Accepted) {
+                    AdCarousel {}
                 }
                 if is_cancellable {
                     button {
