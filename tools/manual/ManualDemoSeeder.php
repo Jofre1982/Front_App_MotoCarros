@@ -52,9 +52,9 @@ class ManualDemoSeeder extends Seeder
             'type' => VehicleType::Motocarro,
         ]);
 
-        $foto = file_get_contents(base_path('demo/moto.jpg'));
+        $foto = file_get_contents(base_path('demo/moto.png'));
         foreach (DocumentType::cases() as $tipo) {
-            $path = "driver-documents/{$perfil->id}/{$tipo->value}.jpg";
+            $path = "driver-documents/{$perfil->id}/{$tipo->value}.png";
             Storage::disk('local')->put($path, $foto);
             DriverDocument::factory()->create([
                 'driver_profile_id' => $perfil->id,
