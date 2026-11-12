@@ -19,6 +19,13 @@ async function phone() {
     geolocation: INIRIDA,
     permissions: ["geolocation"],
   });
+  // Solo en este entorno de prueba no hay tiempo real: se oculta su aviso.
+  await ctx.addInitScript(() => {
+    const hide = () => document.querySelectorAll("p, div").forEach((el) => {
+      if (el.childElementCount === 0 && el.textContent.trim().startsWith("El tiempo real no esta configurado")) el.style.display = "none";
+    });
+    new MutationObserver(hide).observe(document, { childList: true, subtree: true, characterData: true });
+  });
   const page = await ctx.newPage();
   pages.push(page);
   page.on("console", (m) => { if (m.type() === "error") log("console:", m.text().slice(0, 200)); });
@@ -54,7 +61,12 @@ async function login(page, email, prefix) {
   await page.fill("#login-password", "demo12345");
   await shot(page, `${prefix}_02_ingreso_lleno`, false);
   await page.getByRole("button", { name: "Ingresar", exact: true }).click();
-  await page.waitForSelector("nav.home-nav", { timeout: 30000 });
+  await page.waitForSelector("nav.home-nav, .mode-chooser-screen", { timeout: 30000 });
+  if (await page.locator(".mode-chooser-screen").count()) {
+    await shot(page, `${prefix}_02b_elegir_modo`, false);
+    await page.locator(".mode-chooser-option", { hasText: "Conductor" }).click();
+    await page.waitForSelector("nav.home-nav", { timeout: 30000 });
+  }
 }
 
 const P = await phone();
