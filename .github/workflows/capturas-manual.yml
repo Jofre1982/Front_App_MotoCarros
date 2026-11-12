@@ -1,0 +1,75 @@
+name: capturas-manual
+on:
+  push:
+    branches: [chore/capturas-manual]
+jobs:
+  capturas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Jofre1982/Back_App_MotoCarros
+          ref: feat/anuncios
+          path: backend
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: sqlite3, pdo_sqlite
+      - name: Imagenes de ejemplo
+        run: |
+          sudo apt-get install -y librsvg2-bin >/dev/null
+          mkdir -p backend/demo
+          rsvg-convert tools/manual/moto.svg -o backend/demo/moto.png
+          convert backend/demo/moto.png -quality 90 backend/demo/moto.jpg
+          rsvg-convert tools/manual/anuncio.svg -o backend/demo/anuncio.png
+      - name: Backend con datos de ejemplo
+        working-directory: backend
+        run: |
+          composer install --no-interaction --prefer-dist --no-scripts -q
+          cp .env.example .env
+          sed -i 's#^APP_URL=.*#APP_URL=http://localhost:8000#' .env
+          echo "PUSH_PROVIDER=null" >> .env
+          echo "MAIL_MAILER=log" >> .env
+          echo "QUEUE_CONNECTION=sync" >> .env
+          echo "BROADCAST_CONNECTION=log" >> .env
+          php artisan key:generate -q
+          php artisan jwt:secret --force -q
+          touch database/database.sqlite
+          php artisan migrate --force -q
+          cp ../tools/manual/ManualDemoSeeder.php database/seeders/
+          composer dump-autoload -q
+          php artisan db:seed --class=ManualDemoSeeder --force
+          nohup php artisan serve --port=8000 > ../serve.log 2>&1 &
+          sleep 3 && curl -s -o /dev/null -w "backend %{http_code}\n" http://localhost:8000/api/v1/ads
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: App web
+        env:
+          MOTOYA_API_BASE_URL: http://localhost:8000
+        run: |
+          cargo build --release --package web --target wasm32-unknown-unknown
+          V=$(grep -A1 'name = "wasm-bindgen"' Cargo.lock | grep version | cut -d'"' -f2)
+          curl -sSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$V/wasm-bindgen-$V-x86_64-unknown-linux-musl.tar.gz" | tar xz
+          ./wasm-bindgen-$V-x86_64-unknown-linux-musl/wasm-bindgen --target web --no-typescript --out-dir site --out-name web target/wasm32-unknown-unknown/release/web.wasm
+          cat > site/index.html <<'HTML'
+          <!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>MotoYa</title></head>
+          <body><div id="main"></div><script type="module">import init from "./web.js"; init();</script></body></html>
+          HTML
+          nohup python3 -m http.server 8080 --directory site > web.log 2>&1 &
+      - name: Pantallazos
+        run: |
+          npm init -y >/dev/null
+          npm i playwright@1 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          node tools/manual/capturas.mjs
+      - if: always()
+        run: tail -40 serve.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: capturas
+          path: capturas

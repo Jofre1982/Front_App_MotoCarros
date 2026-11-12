@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420">
+  <rect width="900" height="420" fill="#2b8a3e"/>
+  <circle cx="190" cy="210" r="130" fill="#ffffff"/>
+  <rect x="160" y="120" width="60" height="180" fill="#2b8a3e"/>
+  <rect x="100" y="180" width="180" height="60" fill="#2b8a3e"/>
+  <text x="370" y="190" font-family="DejaVu Sans, Arial" font-size="64" font-weight="bold" fill="#ffffff">Droguería</text>
+  <text x="370" y="270" font-family="DejaVu Sans, Arial" font-size="64" font-weight="bold" fill="#ffffff">La 14</text>
+</svg>
