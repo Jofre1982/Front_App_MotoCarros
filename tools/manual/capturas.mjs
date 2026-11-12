@@ -20,6 +20,7 @@ async function phone() {
     permissions: ["geolocation"],
   });
   const page = await ctx.newPage();
+  pages.push(page);
   page.on("console", (m) => { if (m.type() === "error") log("console:", m.text().slice(0, 200)); });
   page.on("pageerror", (e) => log("pageerror:", String(e).slice(0, 200)));
   return page;
@@ -31,8 +32,18 @@ async function shot(page, name, full = true) {
   log("📸", name);
 }
 
+const pages = [];
 async function step(name, fn) {
-  try { await fn(); } catch (e) { log("✗", name, String(e).split("\n")[0]); }
+  try { await fn(); } catch (e) {
+    log("✗", name, String(e).split("\n")[0]);
+    const slug = name.replace(/[^a-z0-9]+/gi, "_");
+    for (const [i, pg] of pages.entries()) {
+      try {
+        await pg.screenshot({ path: `${OUT}/zz_error_${slug}_${i}.png`, fullPage: true });
+        log("   texto:", (await pg.innerText("body")).replace(/\s+/g, " ").slice(0, 300));
+      } catch {}
+    }
+  }
 }
 
 async function login(page, email, prefix) {

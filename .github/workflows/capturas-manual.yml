@@ -2,6 +2,8 @@ name: capturas-manual
 on:
   push:
     branches: [chore/capturas-manual]
+permissions:
+  contents: write
 jobs:
   capturas:
     runs-on: ubuntu-latest
@@ -67,8 +69,11 @@ jobs:
           node tools/manual/capturas.mjs
       - if: always()
         run: tail -40 serve.log || true
-      - uses: actions/upload-artifact@v4
+      - name: Guardar pantallazos en la rama
         if: always()
-        with:
-          name: capturas
-          path: capturas
+        run: |
+          rm -rf tools/manual/capturas && mkdir -p tools/manual && mv capturas tools/manual/capturas
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add tools/manual/capturas
+          git commit -qm "chore: pantallazos del manual" && git push
