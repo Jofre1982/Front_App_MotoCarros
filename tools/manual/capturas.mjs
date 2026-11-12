@@ -134,20 +134,34 @@ await step("oferta", async () => {
   await shot(P, "p_07_aceptado_vista", false);
 });
 
+async function tapIf(page, name) {
+  const b = page.getByRole("button", { name, exact: true });
+  if (await b.count()) { await b.first().click(); await page.waitForTimeout(2000); return true; }
+  return false;
+}
+
 await step("conductor viaje", async () => {
-  await D.waitForTimeout(8000);
+  await D.waitForTimeout(3000);
   await shot(D, "c_08_aceptado");
+  await shot(D, "c_08_aceptado_vista", false);
+  await tapIf(D, "¡Voy en camino!");
+  await shot(D, "c_08b_yendo");
   await D.getByRole("button", { name: "Iniciar viaje" }).first().click();
   await D.waitForTimeout(3000);
   await shot(D, "c_09_en_viaje");
   await D.getByRole("button", { name: "Completar viaje" }).first().click();
   await D.waitForTimeout(3000);
   await shot(D, "c_10_completado");
+  await shot(D, "c_10_completado_vista", false);
+  for (const n of ["Listo, volver a la lista", "Entendido"]) await tapIf(D, n);
 });
 
 await step("pasajera fin", async () => {
   await P.waitForTimeout(8000);
   await shot(P, "p_08_terminado");
+  await shot(P, "p_08_terminado_vista", false);
+  for (const n of ["Entendido", "Pedir otro viaje", "Solicitar otro viaje"]) await tapIf(P, n);
+  await P.waitForTimeout(2000);
 });
 
 await step("mis viajes", async () => {
