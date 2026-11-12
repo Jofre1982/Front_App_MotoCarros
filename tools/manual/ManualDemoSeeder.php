@@ -26,7 +26,7 @@ class ManualDemoSeeder extends Seeder
             'phone' => '+573101112233',
             'password' => Hash::make('demo12345'),
         ]);
-        $pasajera->forceFill(['phone_verified_at' => now(), 'email_verified_at' => now()])->save();
+        $pasajera->forceFill(['phone_verified_at' => now()])->save();
 
         $conductor = User::factory()->driver()->create([
             'name' => 'Carlos Gaitán',
@@ -34,7 +34,7 @@ class ManualDemoSeeder extends Seeder
             'phone' => '+573204445566',
             'password' => Hash::make('demo12345'),
         ]);
-        $conductor->forceFill(['phone_verified_at' => now(), 'email_verified_at' => now()])->save();
+        $conductor->forceFill(['phone_verified_at' => now()])->save();
 
         $perfil = DriverProfile::factory()->create([
             'user_id' => $conductor->id,
