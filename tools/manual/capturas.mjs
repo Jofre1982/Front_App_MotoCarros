@@ -103,6 +103,9 @@ await step("login conductor", async () => {
 });
 
 await step("encender", async () => {
+  await D.getByRole("button", { name: "Solicitudes cercanas", exact: true }).click();
+  await D.waitForTimeout(4000);
+  await shot(D, "c_03b_solicitudes_apagado");
   const btn = D.getByRole("button", { name: /Encender/ });
   if (await btn.count()) {
     await btn.first().click();
