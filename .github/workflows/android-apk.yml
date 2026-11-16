@@ -253,16 +253,20 @@ jobs:
             # .aab para la Play Store, firmado con la llave de subida, y la
             # APK de prueba sacada de ese mismo .aab (misma firma siempre:
             # se instala encima de la anterior sin desinstalar).
-            printf '%s' "$ANDROID_UPLOAD_KEYSTORE" | base64 -d > upload.jks
+            printf '%s' "$ANDROID_UPLOAD_KEYSTORE" | tr -d '\r\n ' | base64 -d > upload.jks
+            # La llave puede venir de keytool (alias "motoya") o de PowerShell
+            # en Windows (alias con un codigo largo): se usa el de la clave.
+            KEY_ALIAS=$(keytool -list -keystore upload.jks -storepass "$ANDROID_UPLOAD_KEYSTORE_PASSWORD" | grep -m1 PrivateKeyEntry | cut -d, -f1)
+            test -n "$KEY_ALIAS" || { echo "::error title=Play Store::No se pudo abrir la llave: revisa el secreto ANDROID_UPLOAD_KEYSTORE_PASSWORD"; exit 1; }
             AAB=$(find "$PROJ" -name "*-release.aab" -path "*outputs*" | head -n 1)
             test -n "$AAB"
             cp "$AAB" MotoYa.aab
             jarsigner -keystore upload.jks -storepass "$ANDROID_UPLOAD_KEYSTORE_PASSWORD" \
-              -sigalg SHA256withRSA -digestalg SHA-256 MotoYa.aab motoya > /dev/null
+              -sigalg SHA256withRSA -digestalg SHA-256 MotoYa.aab "$KEY_ALIAS" > /dev/null
             jarsigner -verify MotoYa.aab | grep -q "jar verified"
             curl -fsSL -o bundletool.jar https://github.com/google/bundletool/releases/download/1.17.2/bundletool-all-1.17.2.jar
             java -jar bundletool.jar build-apks --bundle=MotoYa.aab --output=motoya.apks --mode=universal \
-              --ks=upload.jks --ks-pass="pass:$ANDROID_UPLOAD_KEYSTORE_PASSWORD" --ks-key-alias=motoya \
+              --ks=upload.jks --ks-pass="pass:$ANDROID_UPLOAD_KEYSTORE_PASSWORD" --ks-key-alias="$KEY_ALIAS" \
               --key-pass="pass:$ANDROID_UPLOAD_KEYSTORE_PASSWORD"
             unzip -p motoya.apks universal.apk > MotoYa.apk
             rm -f upload.jks
