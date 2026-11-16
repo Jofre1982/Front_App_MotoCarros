@@ -713,6 +713,8 @@ button.confirm-cancel-yes { background: var(--color-error); }
 .ride-history-price { font-weight: 700; color: var(--color-primary-dark); }
 .favorite-toggle { margin-top: 8px; padding: 8px 14px; border-radius: 999px; border: 1px solid var(--color-border); background: var(--color-surface); color: var(--color-text); font-size: 1rem; }
 .favorite-toggle-on { background: var(--color-primary-light); border-color: var(--color-primary); color: var(--color-primary-dark); font-weight: 600; }
+.favorite-toggle:hover:not(:disabled) { background: var(--color-surface); color: var(--color-text); }
+.favorite-toggle-on:hover:not(:disabled) { background: var(--color-primary-light); color: var(--color-primary-dark); }
 .favorite-picker { margin: 12px 0; padding: 12px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); }
 .favorite-option { display: flex; align-items: center; gap: 10px; padding: 10px 4px; font-size: 1.05rem; }
 .favorite-option input { width: 22px; height: 22px; }
