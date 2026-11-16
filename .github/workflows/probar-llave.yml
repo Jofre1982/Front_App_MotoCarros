@@ -1,0 +1,44 @@
+name: probar-llave
+on:
+  push:
+    branches: [chore/probar-llave]
+jobs:
+  crear:
+    runs-on: windows-latest
+    steps:
+      - name: Crear llave como lo haria el usuario (PowerShell de Windows)
+        shell: powershell
+        run: |
+          $clave = ConvertTo-SecureString "Prueba123" -AsPlainText -Force
+          $cert = New-SelfSignedCertificate -Subject "CN=MotoYa" -FriendlyName "motoya" -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -KeyExportPolicy Exportable -NotAfter (Get-Date).AddYears(30) -CertStoreLocation "Cert:\CurrentUser\My" -KeyUsage DigitalSignature -Type CodeSigningCert
+          Export-PfxCertificate -Cert $cert -FilePath "$PWD\motoya-upload.jks" -Password $clave | Out-Null
+          Remove-Item $cert.PSPath
+          [Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD\motoya-upload.jks")) | Out-File -Encoding ascii llave.txt
+          $PSVersionTable.PSVersion
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llave
+          path: llave.txt
+  firmar:
+    needs: crear
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: llave
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Firmar como el workflow real
+        run: |
+          set -e
+          PW=Prueba123
+          tr -d '\r\n' < llave.txt | base64 -d > upload.jks
+          keytool -list -keystore upload.jks -storepass "$PW"
+          ALIAS=$(keytool -list -keystore upload.jks -storepass "$PW" | grep -m1 PrivateKeyEntry | cut -d, -f1)
+          echo "alias=[$ALIAS]"
+          echo hola > a.txt && zip -q prueba.zip a.txt
+          jarsigner -keystore upload.jks -storepass "$PW" -sigalg SHA256withRSA -digestalg SHA-256 prueba.zip "$ALIAS"
+          jarsigner -verify prueba.zip | grep "jar verified"
+          keytool -list -v -keystore upload.jks -storepass "$PW" | grep -i "valid\|Signature algorithm\|Key Algorithm\|Clave"
