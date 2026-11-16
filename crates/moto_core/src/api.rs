@@ -8,14 +8,15 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::models::{
-    AcceptErrandPayload, AcceptRidePayload, ApiErrorBody, AuthToken, AuthenticatedUser,
-    BecomeDriverPayload, BroadcastAuthPayload, BroadcastAuthResponse, ConfirmPasswordResetPayload,
-    ConfirmPhoneVerificationPayload, Coordinates, CreateErrandPayload, DataEnvelope, DocumentType,
-    DriverEarningsSummary, DriverProfile, DriverVerification, Errand, FavoriteDriver, LoginPayload,
-    RateDriverPayload, RegisterDriverPayload, RegisterPassengerPayload, RegisterVehiclePayload,
-    RequestPasswordResetPayload, Ride, RideCancellation, RideEstimate, RideEstimateRequestPayload,
-    RideRating, RideReceipt, RideRequestPayload, Role, Site, UpdateErrandAvailabilityPayload,
-    UpdateProfilePayload, UpdateVehiclePayload, UploadedDriverDocument, User, Vehicle, VehicleType,
+    AcceptErrandPayload, AcceptRidePayload, Ad, AdEvent, ApiErrorBody, AuthToken,
+    AuthenticatedUser, BecomeDriverPayload, BroadcastAuthPayload, BroadcastAuthResponse,
+    ConfirmPasswordResetPayload, ConfirmPhoneVerificationPayload, Coordinates, CreateErrandPayload,
+    DataEnvelope, DocumentType, DriverEarningsSummary, DriverProfile, DriverVerification, Errand,
+    FavoriteDriver, LoginPayload, RateDriverPayload, RegisterDriverPayload,
+    RegisterPassengerPayload, RegisterVehiclePayload, RequestPasswordResetPayload, Ride,
+    RideCancellation, RideEstimate, RideEstimateRequestPayload, RideRating, RideReceipt,
+    RideRequestPayload, Role, Site, UpdateErrandAvailabilityPayload, UpdateProfilePayload,
+    UpdateVehiclePayload, UploadedDriverDocument, User, Vehicle, VehicleType,
 };
 
 #[cfg(test)]
@@ -4467,6 +4468,42 @@ impl ApiClient {
         }
     }
 
+    /// `GET /api/v1/ads`: los anuncios que salen hoy (vacio si no hay).
+    pub async fn active_ads(
+        &self,
+        token: &AuthToken,
+    ) -> Result<AuthenticatedFetch<Vec<Ad>>, AuthenticatedRequestError> {
+        self.get_authenticated::<Vec<Ad>>("/api/v1/ads", token)
+            .await
+    }
+
+    /// `POST /api/v1/ads/{id}/view` o `/click`: suma una vista o un toque.
+    /// Si el token vencio no se reintenta: un contador perdido no importa.
+    pub async fn record_ad(
+        &self,
+        token: &AuthToken,
+        ad_id: u64,
+        event: AdEvent,
+    ) -> Result<(), ServiceActionError> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/api/v1/ads/{ad_id}/{}",
+                self.base_url,
+                event.path()
+            ))
+            .bearer_auth(&token.access_token)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|err| ServiceActionError::Network(describe_error(&err)))?;
+        match response.status().as_u16() {
+            200..=299 => Ok(()),
+            401 => Err(ServiceActionError::SessionExpired),
+            other => Err(ServiceActionError::Unexpected(other)),
+        }
+    }
+
     async fn send_remove_favorite(
         &self,
         access_token: &str,
@@ -7007,6 +7044,45 @@ mod tests {
         let without =
             serde_json::to_value(RideRequestPayload::pickup_only(sample_origin(), "", 1)).unwrap();
         assert!(without.get("preferred_driver_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn ads_are_listed_and_views_and_clicks_are_counted() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/ads"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "id": 3, "business_name": "Droguería La 14",
+                           "message": "Domicilios gratis", "whatsapp": "3001234567",
+                           "image_url": null }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ads/3/view"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/ads/3/click"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(server.uri());
+        let ads = client.active_ads(&sample_token()).await.unwrap().data;
+        assert_eq!(ads[0].business_name, "Droguería La 14");
+        assert_eq!(ads[0].whatsapp.as_deref(), Some("3001234567"));
+        client
+            .record_ad(&sample_token(), 3, AdEvent::View)
+            .await
+            .unwrap();
+        client
+            .record_ad(&sample_token(), 3, AdEvent::Click)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

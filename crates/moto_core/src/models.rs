@@ -371,6 +371,35 @@ pub struct PreferredDriver {
     pub name: String,
 }
 
+/// Anuncio de un negocio local (`GET /ads`) que ve el pasajero mientras
+/// espera su motocarro.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Ad {
+    pub id: u64,
+    pub business_name: String,
+    pub message: String,
+    #[serde(default)]
+    pub whatsapp: Option<String>,
+    #[serde(default)]
+    pub image_url: Option<String>,
+}
+
+/// Que se le cuenta a un anuncio: que se vio o que tocaron su WhatsApp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdEvent {
+    View,
+    Click,
+}
+
+impl AdEvent {
+    pub fn path(self) -> &'static str {
+        match self {
+            AdEvent::View => "view",
+            AdEvent::Click => "click",
+        }
+    }
+}
+
 /// Un conductor favorito del pasajero (`GET /me/favorite-drivers`,
 /// backend #118).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
