@@ -9,12 +9,13 @@ jobs:
       - name: Crear llave como lo haria el usuario (PowerShell de Windows)
         shell: powershell
         run: |
-          $clave = ConvertTo-SecureString "Prueba123" -AsPlainText -Force
-          $cert = New-SelfSignedCertificate -Subject "CN=MotoYa" -FriendlyName "motoya" -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -KeyExportPolicy Exportable -NotAfter (Get-Date).AddYears(30) -CertStoreLocation "Cert:\CurrentUser\My" -KeyUsage DigitalSignature -Type CodeSigningCert
-          Export-PfxCertificate -Cert $cert -FilePath "$PWD\motoya-upload.jks" -Password $clave | Out-Null
-          Remove-Item $cert.PSPath
-          [Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD\motoya-upload.jks")) | Out-File -Encoding ascii llave.txt
           $PSVersionTable.PSVersion
+          $clave = ConvertTo-SecureString "Prueba123" -AsPlainText -Force
+          $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider 2048
+          $req = New-Object System.Security.Cryptography.X509Certificates.CertificateRequest "CN=MotoYa", $rsa, ([System.Security.Cryptography.HashAlgorithmName]::SHA256), ([System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+          $llave = $req.CreateSelfSigned([DateTimeOffset]::Now, [DateTimeOffset]::Now.AddYears(30))
+          [IO.File]::WriteAllBytes("$PWD\motoya-upload.jks", $llave.Export("Pfx", $clave))
+          [Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD\motoya-upload.jks")) | Out-File -Encoding ascii llave.txt
       - uses: actions/upload-artifact@v4
         with:
           name: llave
